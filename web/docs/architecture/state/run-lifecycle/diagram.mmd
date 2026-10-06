@@ -11,7 +11,7 @@ flowchart TD
     Creating[Run creating]
     Seed[Seed pending database placements]
     SeedGuard{Every placement seeded?}
-    Activate[Create cursors and delete temporary plan]
+    Activate[Create cursors; retain frozen membership hash; delete temporary plan]
     Pending[Run pending]
     DispatchGuard{Pending or running with open shard cursor?}
     DispatchLock[Claim one run-shard dispatch cursor]
@@ -19,10 +19,10 @@ flowchart TD
     DispatchEvents[Insert run.started once and one chunk-ready outbox record per selected chunk]
     DispatchCursor[Mark selected chunks dispatched and release or mark cursor drained]
 
-    FinalizeGuard{Running or finalizing with no open chunks?}
+    FinalizeGuard{Drained cursors and every planned shard sealed?}
     Finalizing[Run finalizing]
-    Scorecard[Merge shard scorecards and apply run gates]
-    FinalizeCheck{Still finalizing and no open chunks?}
+    Scorecard[Merge retained results and planned gate denominators]
+    FinalizeCheck{Current lease and exact sealed membership?}
     Gate{Gate outcome}
     CompletedPass[Run completed + gate pass]
     CompletedFail[Run completed + gate fail]
@@ -56,7 +56,7 @@ flowchart TD
     FinalizeCheck -- No --> Noop
 
     Gate -- Criteria met --> CompletedPass --> CompletedEvent
-    Gate -- Failure or missing aggregate --> CompletedFail --> CompletedEvent
+    Gate -- Evaluation failure or incomplete results --> CompletedFail --> CompletedEvent
 
     Pending --> CancelGuard
     Running --> CancelGuard

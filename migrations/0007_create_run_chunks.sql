@@ -43,6 +43,9 @@ END $$;
 CREATE INDEX idx_run_chunks_run_status_leased_until
     ON run_chunks(run_id, run_shard, status, leased_until);
 
+CREATE INDEX idx_run_chunks_planned_order
+    ON run_chunks(run_id, run_shard, ordinal_start, id);
+
 CREATE INDEX idx_run_chunks_undispatched
     ON run_chunks(run_id, run_shard, ordinal_start, id)
     WHERE status = 'pending' AND dispatched_at IS NULL;

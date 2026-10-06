@@ -34,7 +34,7 @@ flowchart TD
     EvaluatorExecutor["fa:fa-microchip <br/> <b>Evaluator Runtime Executor</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Dispatches versioned ABI adapters in fresh stores with memory, fuel, timeout, and log limits.</small>"]:::component
     CompletenessAggregator["fa:fa-list-check <br/> <b>Completeness & Aggregation</b> <br/> <small>[Component: Rust]</small> <br/> <small>Verifies required evaluator scores before calculating authoritative dimension and aggregate scores.</small>"]:::component
     ResultPersistence["fa:fa-database <br/> <b>Result Persistence Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Appends evaluator results and upserts aggregates with child-row authority checks.</small>"]:::component
-    TerminalTransitions["fa:fa-shield-halved <br/> <b>Terminal Transition Guard</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Marks attempts completed, retry-scheduled, or terminal only when current-attempt and live-lease authority still match.</small>"]:::component
+    TerminalTransitions["fa:fa-shield-halved <br/> <b>Terminal Transition Guard</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Marks attempts completed, retry-scheduled, or terminal only when chunk, current-attempt, and live-lease authority still match.</small>"]:::component
 
     %% worker boundary
     subgraph WorkerRuntime["&nbsp;"]
@@ -45,6 +45,7 @@ flowchart TD
         MessagingCircuit
         MessageHandler
         MessageSettlement
+        Settlement
         ChunkWorkflow
         RunContextCache
         EvaluatorLoader
@@ -112,6 +113,10 @@ flowchart TD
     MessageSettlement -->|"Requests retry and quarantine publish admission from"| MessagingCircuit
     MessagingCircuit -->|"Admits closed or half-open operations over <br> <small>[AMQP]</small>"| Queue
     MessageSettlement -->|"Acknowledges handled messages over <br> <small>[AMQP]</small>"| Queue
+
+    Settlement["<b>Chunk Settlement</b><br/>Fence remaining writers and commit terminal chunk receipt."]:::component
+    MessageHandler --> Settlement
+    Settlement --> Database
 
     %% links
     click Vigilo "/docs/architecture/structure/components/vigilo/"

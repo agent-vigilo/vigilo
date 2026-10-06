@@ -12,7 +12,7 @@ flowchart TD
     RunId{Run id valid?}
     LoadRun[Load run]
     Found{Run exists?}
-    Summary[Load results summary]
+    Summary[Batch summaries by database; merge progress and scorecard in shard order]
     Payload[Build summary-only payload]
 
     Success([Success response])

@@ -162,6 +162,10 @@ pub(crate) async fn create_run(
         chunks,
         assignments,
     } = request;
+    let mut planned_draft = draft.clone();
+    planned_draft.config_snapshot["settlement_plan"] =
+        super::run_shard_summary::chunk_plan_manifests(chunks)?;
+    let draft = &planned_draft;
     let owner_id = Uuid::now_v7();
     persist_creation_plan(
         database_router,

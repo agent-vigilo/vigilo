@@ -1,7 +1,7 @@
 //! Chunk leasing and case loading workflow helpers.
 //!
 //! Workers use this module to claim a run chunk, load the corresponding dataset
-//! case rows, and then either complete or release the chunk. Lease fields are
+//! case rows, and then either complete or release the chunk. Lease fields
 //! and local write epochs are checked on completion/release so stale workers
 //! cannot overwrite a newer lease holder or shard owner.
 
@@ -136,21 +136,25 @@ fn validate_chunk_case_ordinals(
 
 /// Marks a leased chunk complete if the caller still owns the same lease.
 ///
-/// Query behavior: clears an unexpired token-owned lease and refreshes the
-/// shard summary in the same transaction. A zero row count means the worker is
+/// Query behavior: clears an unexpired token-owned lease and writes its immutable
+/// settlement receipt in the same transaction. A zero row count means the worker is
 /// stale.
-pub(crate) async fn mark_chunk_completed_and_refresh_summary(
+pub(crate) async fn mark_chunk_completed_and_settle(
     db: &PgPool,
     chunk: &RunChunk,
 ) -> anyhow::Result<u64> {
     let lease_token = require_chunk_lease_token(chunk)?;
     let mut tx = db.begin().await?;
-    let rows_affected = mark_chunk_completed(&mut tx, chunk, lease_token).await?;
-    if rows_affected > 0 {
-        super::run_shard_summary::refresh_run_shard_summary_with(
-            &mut *tx,
+    crate::db::shard_write_fence::lock_shared(&mut tx, chunk.run_id, chunk.run_shard).await?;
+    let terminal_identity = mark_chunk_completed(&mut tx, chunk, lease_token).await?;
+    let rows_affected = u64::from(terminal_identity.is_some());
+    if let Some(identity) = terminal_identity {
+        super::run_shard_summary::settle_locked_chunk_with(
+            &mut tx,
             chunk.run_id,
             chunk.run_shard,
+            chunk.id,
+            identity,
         )
         .await?;
     }
@@ -162,20 +166,24 @@ pub(crate) async fn mark_chunk_completed_and_refresh_summary(
 /// Marks a leased chunk failed if the caller still owns the lease.
 ///
 /// Query behavior: clears the lease, makes the chunk terminal `failed`, and
-/// refreshes the shard summary in one transaction. Workers use this when
+/// writes a settlement receipt in one transaction. Workers use this when
 /// bounded message retries are exhausted.
-pub(crate) async fn mark_chunk_failed_and_refresh_summary(
+pub(crate) async fn mark_chunk_failed_and_settle(
     db: &PgPool,
     chunk: &RunChunk,
 ) -> anyhow::Result<u64> {
     let lease_token = require_chunk_lease_token(chunk)?;
     let mut tx = db.begin().await?;
-    let rows_affected = mark_chunk_failed(&mut tx, chunk, lease_token).await?;
-    if rows_affected > 0 {
-        super::run_shard_summary::refresh_run_shard_summary_with(
-            &mut *tx,
+    crate::db::shard_write_fence::lock_shared(&mut tx, chunk.run_id, chunk.run_shard).await?;
+    let terminal_identity = mark_chunk_failed(&mut tx, chunk, lease_token).await?;
+    let rows_affected = u64::from(terminal_identity.is_some());
+    if let Some(identity) = terminal_identity {
+        super::run_shard_summary::settle_locked_chunk_with(
+            &mut tx,
             chunk.run_id,
             chunk.run_shard,
+            chunk.id,
+            identity,
         )
         .await?;
     }

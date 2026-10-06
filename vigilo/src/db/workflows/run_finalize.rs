@@ -59,6 +59,8 @@ struct FinalizationSummary {
     failed_execution_count: i32,
     errored_execution_count: i32,
     missing_aggregate_count: i32,
+    missing_execution_count: i32,
+    unresolved_execution_count: i32,
     failed_chunk_count: i32,
     cancelled_chunk_count: i32,
     shard_summary_count: i32,
@@ -107,7 +109,17 @@ fn summarize_for_finalization(
         checked_summary_total(summaries, "cancelled_chunk_count", |summary| {
             summary.cancelled_chunk_count
         })?;
-    let coverage_complete = terminal_execution_count >= expected_execution_count;
+    let missing_execution_count =
+        checked_summary_total(summaries, "missing_execution_count", |s| {
+            s.missing_execution_count
+        })?;
+    let unresolved_execution_count =
+        checked_summary_total(summaries, "unresolved_execution_count", |s| {
+            s.unresolved_execution_count
+        })?;
+    let coverage_complete = terminal_execution_count == expected_execution_count
+        && missing_execution_count == 0
+        && unresolved_execution_count == 0;
     let has_terminal_chunk_failure = failed_chunk_count > 0 || cancelled_chunk_count > 0;
     let shard_scorecards = summaries
         .iter()
@@ -134,6 +146,8 @@ fn summarize_for_finalization(
         failed_execution_count,
         errored_execution_count,
         missing_aggregate_count,
+        missing_execution_count,
+        unresolved_execution_count,
         failed_chunk_count,
         cancelled_chunk_count,
         shard_summary_count: i32::try_from(summaries.len())?,
@@ -189,11 +203,100 @@ pub(crate) async fn finalize_claimed_run_from_summaries(
     aggregation_policy_hash: &str,
     summaries: &[RunShardSummary],
 ) -> anyhow::Result<Option<FinalizedRun>> {
+    validate_summary_set(run_id, summaries, aggregation_policy_hash)?;
     let Some(summary) = summarize_for_finalization(summaries, aggregation_policy_hash)? else {
         return Ok(None);
     };
 
-    queries::finalize_claimed_run(db, run_id, coordinator_id, &summary).await
+    let mut shards = summaries.iter().map(|s| s.run_shard).collect::<Vec<_>>();
+    shards.sort_unstable();
+    let plans = summaries
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "shard": s.run_shard, "hash": s.planned_chunk_hash,
+                "cases": s.expected_execution_count, "chunks": s.planned_chunk_count,
+            })
+        })
+        .collect::<Vec<_>>();
+    queries::finalize_claimed_run(
+        db,
+        run_id,
+        coordinator_id,
+        &summary,
+        &shards,
+        serde_json::json!(plans),
+    )
+    .await
+}
+
+/// Validates candidate-local contracts before acquiring a control lease so a
+/// corrupt shard report cannot terminate the coordinator's entire pass.
+pub(crate) fn validate_summary_set(
+    run_id: Uuid,
+    summaries: &[RunShardSummary],
+    policy: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        summaries
+            .iter()
+            .all(|s| s.run_id == run_id && (0..128).contains(&s.run_shard)),
+        "finalization summary run or shard identity mismatch"
+    );
+    let unique = summaries
+        .iter()
+        .map(|s| s.run_shard)
+        .collect::<std::collections::BTreeSet<_>>();
+    anyhow::ensure!(
+        unique.len() == summaries.len(),
+        "duplicate finalization shard summary"
+    );
+    for s in summaries {
+        anyhow::ensure!(
+            s.expected_execution_count >= 0
+                && s.terminal_execution_count >= 0
+                && s.terminal_execution_count <= s.expected_execution_count
+                && s.missing_execution_count >= 0
+                && s.unresolved_execution_count >= 0,
+            "invalid finalization summary counters"
+        );
+        if s.is_terminal() {
+            let outcomes = i64::from(s.passed_execution_count)
+                + i64::from(s.failed_execution_count)
+                + i64::from(s.errored_execution_count)
+                + i64::from(s.skipped_execution_count);
+            anyhow::ensure!(
+                s.execution_count >= 0
+                    && s.aggregate_count >= 0
+                    && s.terminal_execution_count == s.execution_count
+                    && i64::from(s.execution_count) + i64::from(s.missing_execution_count)
+                        == i64::from(s.expected_execution_count)
+                    && i64::from(s.aggregate_count) + i64::from(s.unresolved_execution_count)
+                        == i64::from(s.execution_count)
+                    && s.missing_aggregate_count == s.unresolved_execution_count
+                    && [
+                        s.passed_execution_count,
+                        s.failed_execution_count,
+                        s.errored_execution_count,
+                        s.skipped_execution_count
+                    ]
+                    .iter()
+                    .all(|n| *n >= 0)
+                    && outcomes <= i64::from(s.aggregate_count)
+                    && s.score_count >= 0
+                    && s.score_count <= i64::from(s.aggregate_count)
+                    && s.score_sum.is_finite(),
+                "sealed summary has inconsistent result coverage"
+            );
+        }
+        let scorecard: ShardScorecard = serde_json::from_value(s.scorecard.clone())?;
+        anyhow::ensure!(
+            scorecard.run_shard == s.run_shard,
+            "scorecard and summary shard disagree"
+        );
+    }
+    summarize_for_finalization(summaries, policy)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -327,6 +430,41 @@ mod tests {
         assert!(error.to_string().contains("expected_execution_count total"));
     }
 
+    #[test]
+    fn finalization_rejects_invalid_identities_and_unsealed_failure() {
+        let run = Uuid::nil();
+        let summary = terminal_summary(run, 0, "failed");
+        let mut invalid = summary.clone();
+        invalid.run_id = Uuid::from_u128(1);
+        assert!(validate_summary_set(run, &[invalid], "aggregation-hash").is_err());
+        assert!(
+            validate_summary_set(run, &[summary.clone(), summary.clone()], "aggregation-hash")
+                .is_err()
+        );
+        for shard in [-1, 128] {
+            let mut invalid = summary.clone();
+            invalid.run_shard = shard;
+            assert!(validate_summary_set(run, &[invalid], "aggregation-hash").is_err());
+        }
+        let mut invalid = summary.clone();
+        invalid.scorecard["run_shard"] = serde_json::json!(1);
+        assert!(validate_summary_set(run, &[invalid], "aggregation-hash").is_err());
+        assert!(validate_summary_set(run, std::slice::from_ref(&summary), "other-policy").is_err());
+        let mut invalid = summary.clone();
+        invalid.terminal_execution_count = 2;
+        assert!(validate_summary_set(run, &[invalid], "aggregation-hash").is_err());
+        for (sealed, settled) in [(false, 1), (true, 0)] {
+            let mut open = summary.clone();
+            open.sealed = sealed;
+            open.settled_chunk_count = settled;
+            assert!(
+                summarize_for_finalization(&[open], "aggregation-hash")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
     pub(super) fn terminal_summary(run_id: Uuid, run_shard: i16, status: &str) -> RunShardSummary {
         RunShardSummary {
             run_id,
@@ -355,6 +493,11 @@ mod tests {
             failed_chunk_count: 0,
             cancelled_chunk_count: 0,
             status: status.to_owned(),
+            sealed: true,
+            planned_chunk_hash: format!("planned-{run_shard}"),
+            planned_chunk_count: 1,
+            settled_chunk_count: 1,
+            ..Default::default()
         }
     }
 

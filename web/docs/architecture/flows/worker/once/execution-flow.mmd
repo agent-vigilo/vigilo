@@ -59,13 +59,13 @@ sequenceDiagram
                 end
                 WASM-->>Vigilo: Evaluation outputs
                 Vigilo->>ExecutionDB: Persist batched results and lease-guarded terminal transitions
-                Vigilo->>ExecutionDB: Refresh shard summary
+                Vigilo->>ExecutionDB: Read chunk execution retry state
                 ExecutionDB-->>Vigilo: Terminal or retry-waiting chunk state
                 alt Executions still waiting for retry
                     Vigilo->>ExecutionDB: Release chunk lease
                     Vigilo->>Queue: Delay message until retry window
                 else All executions terminal
-                    Vigilo->>ExecutionDB: Complete chunk
+                    Vigilo->>ExecutionDB: Complete chunk and commit immutable settlement receipt
                     Vigilo->>Queue: Acknowledge message
                 end
                 Vigilo-->>User: Success response

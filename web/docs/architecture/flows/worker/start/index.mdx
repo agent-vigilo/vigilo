@@ -37,6 +37,8 @@ Each worker process uses a stable `worker_id` for attempts it allocates. While p
 
 <Mermaid value={decisionFlowDiagram} />
 
+Workers acknowledge terminal chunks after their local settlement receipt commits. Coordinator aggregation and run finalization proceed asynchronously; [committed partial evidence is retained](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
 ## Related
 
 - [Worker once flow](/docs/architecture/flows/worker/once/)

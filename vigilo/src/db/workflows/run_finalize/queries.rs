@@ -166,6 +166,8 @@ pub(super) async fn finalize_claimed_run(
     run_id: Uuid,
     coordinator_id: Uuid,
     summary: &FinalizationSummary,
+    shards: &[i16],
+    shard_plans: serde_json::Value,
 ) -> anyhow::Result<Option<FinalizedRun>> {
     let scorecard = serde_json::to_value(&summary.scorecard)?;
     let finalized = sqlx::query_as::<_, FinalizedRun>(
@@ -182,6 +184,18 @@ pub(super) async fn finalize_claimed_run(
               AND coordinator_id = $14::uuid
               AND coordinator_leased_until >= now()
               AND aggregation_policy_hash = $16::text
+              AND expected_execution_count = $3
+              AND config_snapshot #>> '{settlement_plan,version}' = '1'
+              AND $20::smallint[] = ARRAY(SELECT run_shard FROM shard_placements WHERE run_id = $1 ORDER BY run_shard)
+              AND NOT EXISTS (SELECT 1 FROM run_shard_dispatch_cursors WHERE run_id = $1 AND status <> 'drained')
+              AND NOT EXISTS (
+                  SELECT 1 FROM jsonb_array_elements($23::jsonb) s
+                  WHERE (
+                      config_snapshot #>> ARRAY['settlement_plan','shards',s->>'shard','hash'] IS DISTINCT FROM s->>'hash'
+                      OR (config_snapshot #>> ARRAY['settlement_plan','shards',s->>'shard','case_count'])::int IS DISTINCT FROM (s->>'cases')::int
+                      OR (config_snapshot #>> ARRAY['settlement_plan','shards',s->>'shard','chunk_count'])::int IS DISTINCT FROM (s->>'chunks')::int
+                  )
+              )
             FOR UPDATE
         ),
         inserted_scorecard AS (
@@ -222,6 +236,12 @@ pub(super) async fn finalize_claimed_run(
                     'failed_chunk_count', $9::int,
                     'cancelled_chunk_count', $10::int,
                     'coverage_complete', $11::bool,
+                    'settled', true,
+                    'planned_chunk_count', (SELECT SUM((p->>'chunks')::int) FROM jsonb_array_elements($23::jsonb) p),
+                    'settled_chunk_count', (SELECT SUM((p->>'chunks')::int) FROM jsonb_array_elements($23::jsonb) p),
+                    'sealed_shard_count', $13::int,
+                    'missing_execution_count', $21::int,
+                    'unresolved_execution_count', $22::int,
                     'has_terminal_chunk_failure', $12::bool,
                     'shard_summary_count', $13::int
                 ),
@@ -300,6 +320,10 @@ pub(super) async fn finalize_claimed_run(
     .bind(i32::try_from(summary.scorecard.shard_count)?)
     .bind(summary.scorecard.passed)
     .bind(scorecard)
+    .bind(shards)
+    .bind(summary.missing_execution_count)
+    .bind(summary.unresolved_execution_count)
+    .bind(shard_plans)
     .fetch_optional(db)
     .await?;
 

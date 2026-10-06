@@ -24,6 +24,8 @@ flowchart TD
     Cancelled[Chunk cancelled]
     Failed[Chunk failed]
     Noop[No transition]
+    Receipt[Same transaction: fence remaining writers and commit immutable receipt]
+    Aggregate[Coordinator consumes receipt asynchronously]
 
     Create --> Pending
 
@@ -47,7 +49,11 @@ flowchart TD
     Leased --> Cancel
     Cancel --> Cancelled
 
-    Leased -. Reserved terminal path .-> Failed
+    Leased -. Terminal processing failure .-> Failed
+    Completed --> Receipt
+    Failed --> Receipt
+    Cancelled --> Receipt
+    Receipt --> Aggregate
 
     class Create,Cancel command
     class Pending,Dispatch,Leased,Recover,RecoveryEvent,ClaimGuard,LoadCases,Process,CompleteGuard,ReleaseGuard,Requeued system

@@ -22,7 +22,7 @@ flowchart TD
     Persist[Persist terminal transitions]
     CheckRetry{Open retry work?}
     Delay[Release chunk and delay message until retry window]
-    Complete[Mark chunk completed]
+    Complete[Commit terminal chunk and immutable receipt]
     Ack[Acknowledge message]
     Release[Release chunk lease]
     Released{Chunk released?}

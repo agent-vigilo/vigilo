@@ -5,6 +5,8 @@
 //! active runs add live progress from shard-local summaries. The workflow
 //! avoids scanning execution hot tables on every status or watch poll.
 
+use std::collections::BTreeMap;
+
 use uuid::Uuid;
 
 use super::{
@@ -15,7 +17,7 @@ use super::{
     },
     run_shard_summary::{
         RunShardSummary,
-        select_run_shard_summary,
+        select_run_shard_summaries,
     },
 };
 use crate::{
@@ -36,6 +38,11 @@ pub(crate) struct RunProgressSummary {
     pub(crate) missing_aggregate_count: i64,
     pub(crate) failed_chunk_count: i64,
     pub(crate) cancelled_chunk_count: i64,
+    pub(crate) planned_chunk_count: i64,
+    pub(crate) settled_chunk_count: i64,
+    pub(crate) sealed_shard_count: usize,
+    pub(crate) missing_execution_count: i64,
+    pub(crate) unresolved_execution_count: i64,
 }
 
 impl RunProgressSummary {
@@ -46,6 +53,16 @@ impl RunProgressSummary {
             passed_execution_count: i64::from(run.passed_execution_count),
             failed_execution_count: i64::from(run.failed_execution_count),
             errored_execution_count: i64::from(run.errored_execution_count),
+            planned_chunk_count: run.summary["planned_chunk_count"].as_i64().unwrap_or(0),
+            settled_chunk_count: run.summary["settled_chunk_count"].as_i64().unwrap_or(0),
+            sealed_shard_count: run.summary["sealed_shard_count"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .unwrap_or(0),
+            missing_execution_count: run.summary["missing_execution_count"].as_i64().unwrap_or(0),
+            unresolved_execution_count: run.summary["unresolved_execution_count"]
+                .as_i64()
+                .unwrap_or(0),
             ..Self::default()
         }
     }
@@ -91,6 +108,11 @@ pub(crate) fn combine_run_shard_progress(summaries: &[RunShardSummary]) -> RunPr
     let mut progress = RunProgressSummary::default();
 
     for summary in summaries {
+        progress.planned_chunk_count += i64::from(summary.planned_chunk_count);
+        progress.settled_chunk_count += i64::from(summary.settled_chunk_count);
+        progress.missing_execution_count += i64::from(summary.missing_execution_count);
+        progress.unresolved_execution_count += i64::from(summary.unresolved_execution_count);
+        progress.sealed_shard_count += usize::from(summary.is_terminal());
         progress.expected_execution_count += i64::from(summary.expected_execution_count);
         progress.execution_count += i64::from(summary.execution_count);
         progress.terminal_execution_count += i64::from(summary.terminal_execution_count);
@@ -137,10 +159,16 @@ pub(crate) async fn select_run_status(
         .await?;
     let mut summaries = Vec::with_capacity(routes.len());
 
-    for (run_shard, _, db) in &routes {
-        if let Some(summary) = select_run_shard_summary(db, run_id, *run_shard).await? {
-            summaries.push(summary);
-        }
+    let mut by_database = BTreeMap::new();
+    for (run_shard, alias, db) in &routes {
+        by_database
+            .entry(alias)
+            .or_insert_with(|| (db, Vec::new()))
+            .1
+            .push(*run_shard);
+    }
+    for (db, shards) in by_database.into_values() {
+        summaries.extend(select_run_shard_summaries(db, run_id, &shards).await?);
     }
 
     let shard_summary_count = summaries.len();
@@ -225,6 +253,7 @@ mod tests {
             failed_chunk_count: 0,
             cancelled_chunk_count: 1,
             status: "running".to_string(),
+            ..Default::default()
         }
     }
 }

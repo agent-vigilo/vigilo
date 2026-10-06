@@ -53,19 +53,30 @@ sequenceDiagram
         end
     end
 
+    loop Serviceable databases with bounded concurrency
+        Vigilo->>ExecutionDB: Discover bounded ready candidates
+        loop Fair page admission within database page and time budgets
+            Note over Vigilo,ExecutionDB: Bounded shard concurrency with one in-flight page per shard
+            Vigilo->>ExecutionDB: Try page claim, fence ownership, and commit progress or canonical checkpoint
+            ExecutionDB-->>Vigilo: Ready again, caught up, sealed, busy, or deferred
+            Vigilo->>Vigilo: Visit unchecked candidates before revisiting remaining ready work
+        end
+        Vigilo->>Vigilo: Await admitted page operations under the database deadline
+    end
+
     loop Finalize bounded terminal runs
         Vigilo->>ControlDB: Count finalization candidate backlog
         Vigilo->>ControlDB: Select finalization candidate
         ControlDB-->>Vigilo: Candidate or no work
         alt Candidate selected
-            Vigilo->>ExecutionDB: Read routed shard summaries
-            alt Every placement read succeeds and summaries are terminal
+            Vigilo->>ExecutionDB: Read routed shard summaries in one batch per database
+            alt Every placement read succeeds and summaries are sealed and valid
                 ExecutionDB-->>Vigilo: Terminal summary rows
                 Vigilo->>ControlDB: Claim run, set gate, and enqueue completion event
                 ControlDB-->>Vigilo: Finalized run or no update
-            else Placement read fails or summary is incomplete
+            else Placement read fails or summary is unsealed or invalid
                 ExecutionDB-->>Vigilo: Partial summaries or database error
-                Vigilo->>Vigilo: Defer run and end this finalization pass
+                Vigilo->>Vigilo: Defer candidate and continue other runs
             end
         end
     end

@@ -32,9 +32,12 @@ Describes the major internal responsibilities of the coordinator runtime.
   complete the run row.
 - Outbox publication is deliberately separate from state changes so committed ledger event records can be retried after broker or process failures.
 - Coordinator throughput knobs can tune cycle interval, creation-recovery batch
-  size, chunk lease recovery batch size and limit, dispatch windows, outbox
-  batch size, publish parallelism, leases, and retry delay.
+  size, chunk lease recovery batch size and limit, dispatch windows, receipt
+  aggregation budgets and concurrency, outbox batch size, publish parallelism,
+  leases, and retry delay.
 - Coordinator structured logs expose dispatch backlog, finalization backlog, oldest finalization candidate lag, per-placement outbox backlog, route resolution timing, pool acquisition timing, and cycle-stage durations for metrics pipelines.
+- `aggregation_pages_advanced` counts committed productive aggregation pages,
+  including caught-up and sealing pages. One shard can contribute several pages.
 - Outbox publishers claim rows from the sharded `outbox_delivery_queue`, assign claim tokens, and publish joined ledger payloads as broker messages with bounded concurrency.
 - Confirmed publishes update `outbox_events` to `published` and delete the delivery row, keeping the hot queue limited to unfinished work.
 - RabbitMQ publishes use durable topology, persistent messages, mandatory routing, publisher confirms, and the outbox dedupe key as the AMQP message id.
@@ -42,6 +45,48 @@ Describes the major internal responsibilities of the coordinator runtime.
   circuit leaves durable delivery rows pending; one half-open publish probes
   recovery after the configured cooldown.
 - Broker delivery remains at-least-once; exactly-once effects are enforced by database idempotency and authority checks.
+
+Receipt aggregation runs on serviceable placements after dispatch, including
+progress for runs whose dispatch is still open. It selects pending receipts or
+ready canonical folds and revisits shards with remaining ready work in fair rounds
+within each database's page and scheduling-time budgets. A page that consumes all
+available receipts while other planned chunks remain open stops participating
+until another discovery finds work. Once every planned receipt is accounted for,
+canonical verification can continue within the same pass.
+Independent shards and databases
+advance with bounded concurrency. Each page commits under its own nonblocking
+claim and movement fence; workers do not wait for aggregation. Invalid or
+unavailable shards do not prevent unrelated shards from advancing.
+
+Finalization reads summaries in one batch per execution database, then requires
+validated seals and frozen planned membership before claiming control ownership.
+Receipt aggregation advances only in its dedicated cycle stage.
+See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
+## Receipt Aggregation Controls
+
+These options apply to both `coordinator once` and `coordinator start`.
+
+| Option / environment variable | Default | Bound |
+| --- | --- | --- |
+| `--max-aggregation-pages-per-cycle` / `VIGILO_COORDINATOR_MAX_AGGREGATION_PAGES_PER_CYCLE` | `256` | Attempted pages per execution database per cycle |
+| `--aggregation-time-budget-ms` / `VIGILO_COORDINATOR_AGGREGATION_TIME_BUDGET_MS` | `1000` | Time to admit pages after each database's candidate discovery |
+| `--aggregation-parallelism` / `VIGILO_COORDINATOR_AGGREGATION_PARALLELISM` | `4` | Concurrent page operations per execution database |
+| `--aggregation-database-parallelism` / `VIGILO_COORDINATOR_AGGREGATION_DATABASE_PARALLELISM` | `4` | Concurrent execution database aggregation passes |
+
+The scheduling-time budget starts after candidate discovery and stops admission
+of additional pages. A slow successful discovery therefore still leaves time for
+page admission. In-flight work can finish after the scheduling budget; the database
+operation deadline bounds the whole placement pass, including discovery. The
+defaults permit at most 16 concurrent page operations per coordinator, with one
+page owner per run shard. Each page retains the
+[receipt row and byte limits](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
+Aggregation budgets are independent of `--max-finalize-per-cycle`, which bounds
+finalization candidate inspections. A shard can publish progress and complete its
+canonical fold in the same cycle when ready work and budgets allow. Scheduling
+bounds describe work admission, not guaranteed throughput or a completion deadline;
+database capacity, contention, payload size, and other cycle work still matter.
 
 ## Related
 

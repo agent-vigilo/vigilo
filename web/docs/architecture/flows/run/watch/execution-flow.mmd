@@ -19,7 +19,7 @@ sequenceDiagram
     alt Run is creating or failed during creation
         ControlDB-->>Vigilo: Run and placement creation progress
     else Run was activated
-        Vigilo->>ExecDB: Read routed shard summaries where available
+        Vigilo->>ExecDB: Read routed shard summaries in one batch per database
         ExecDB-->>Vigilo: Run and live execution progress
     end
 
@@ -44,7 +44,7 @@ sequenceDiagram
             alt Run is creating or failed during creation
                 ControlDB-->>Vigilo: Refreshed placement creation progress
             else Run was activated
-                Vigilo->>ExecDB: Refresh routed shard summaries
+                Vigilo->>ExecDB: Read latest routed summaries in one batch per database
                 ExecDB-->>Vigilo: Refreshed live execution progress
             end
         end

@@ -24,7 +24,7 @@ sequenceDiagram
             ControlDB-->>Vigilo: Control-only creation progress
         else Run was activated
             Vigilo->>ControlDB: Load execution routes
-            Vigilo->>ExecDB: Read shard summaries where available
+            Vigilo->>ExecDB: Read routed shard summaries in one batch per database
             ExecDB-->>Vigilo: Live progress summaries
         end
         Vigilo->>Vigilo: Mark whether status is terminal

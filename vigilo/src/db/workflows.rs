@@ -12,7 +12,7 @@
 //!   machine before dispatch cursors make a run visible.
 //! - `run_dispatch` starts dispatchable runs, prepares execution-local run
 //!   snapshots, and owns chunk visibility plus expired chunk lease recovery.
-//! - `run_shard_summary` refreshes shard-local progress rollups used by later
+//! - `run_shard_summary` settles chunks and seals resumable rollups used by later
 //!   global finalization.
 //! - `run_status` combines the control run row with routed shard-summary
 //!   progress for status/watch reads.

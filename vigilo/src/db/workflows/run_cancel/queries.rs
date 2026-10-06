@@ -468,6 +468,10 @@ pub(super) async fn select_run_execution_progress(
              AND ea.run_shard = e.run_shard
              AND ea.execution_id = e.id
              AND ea.attempt_id = e.current_attempt_id
+             AND EXISTS (SELECT 1 FROM execution_attempts a
+                 WHERE a.run_id=e.run_id AND a.run_shard=e.run_shard
+                   AND a.execution_id=e.id AND a.id=e.current_attempt_id
+                   AND a.status IN ('completed','failed_agent_call','failed_evaluation','timed_out'))
             WHERE e.run_id = $1::uuid
         ),
         chunk_counts AS (

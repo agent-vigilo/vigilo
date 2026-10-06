@@ -27,6 +27,8 @@ How `vigilo run cancel` marks the control run cancelled, fans out execution-loca
 
 <Mermaid value={decisionFlowDiagram} />
 
+Each placement commits terminal chunk receipts with cancellation, preserving committed results and retiring unfinished authority. Undispatched shards obtain snapshots from their frozen local run context. Coordinator pages subsequently publish progress and seals; the control lifecycle remains `cancelled`. Cancellation retry and fanout behavior are unchanged.
+
 ## Related
 
 - [Run watch flow](/docs/architecture/flows/run/watch/)

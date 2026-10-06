@@ -670,10 +670,7 @@ async fn settle_retryable_chunk_failure(
             .run_database_operation(
                 settlement.database_alias,
                 "worker_fail_exhausted_chunk",
-                chunk_processing::mark_chunk_failed_and_refresh_summary(
-                    settlement.db,
-                    settlement.chunk,
-                ),
+                chunk_processing::mark_chunk_failed_and_settle(settlement.db, settlement.chunk),
             )
             .await?;
         if failed > 0 {
@@ -1301,7 +1298,7 @@ async fn run_worker_message_admitted(
                 .run_database_operation(
                     &payload.database_alias,
                     "worker_chunk_completion",
-                    chunk_processing::mark_chunk_completed_and_refresh_summary(db, &chunk),
+                    chunk_processing::mark_chunk_completed_and_settle(db, &chunk),
                 )
                 .await?;
             if completed == 0 {

@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::run_shard_summary::{
     RunShardSummary,
-    refresh_run_shard_summary_with,
+    initialize_run_shard_summary_with,
 };
 use crate::{
     context::database::{
@@ -194,7 +194,9 @@ async fn cancel_execution_target_with_transaction(
     let progress = select_run_execution_progress(&mut tx, run_id).await?;
     let mut summaries = Vec::with_capacity(run_shards.len());
     for run_shard in run_shards {
-        if let Some(summary) = refresh_run_shard_summary_with(&mut *tx, run_id, run_shard).await? {
+        super::run_shard_summary::settle_terminal_chunks_with(&mut tx, run_id, run_shard).await?;
+        if let Some(summary) = initialize_run_shard_summary_with(&mut tx, run_id, run_shard).await?
+        {
             summaries.push(summary);
         }
     }
@@ -309,7 +311,7 @@ async fn finalize_control_cancellation(
 /// - Resolve execution routes and cancel each placement once, grouped by
 ///   database alias and bounded by `ROUTED_CANCEL_PARALLELISM`.
 /// - Hold shared movement admission while cancelling execution-local rows and
-///   refreshing their shard summaries in one transaction.
+///   committing their terminal chunk receipts in one transaction.
 /// - Count execution-local progress directly for shards that were never
 ///   dispatched.
 /// - Finalize the control run summary and emit one idempotent control outbox

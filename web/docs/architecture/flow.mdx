@@ -238,16 +238,16 @@ Before finalization, the coordinator recovers expired chunk leases for running r
 
 The coordinator checks a bounded number of candidates per cycle:
 
-> Are all chunks terminal?
+> Does every planned shard have a valid sealed summary?
 
-`pending` or `leased` chunks keep a run out of finalization, including chunks waiting on execution retry windows. Once chunks are terminal, each shard publishes bounded scorecard counters for the configured run gates.
+`pending` or `leased` chunks keep a run out of finalization, including chunks waiting on execution retry windows. Terminal chunk transactions record immutable receipts. Coordinators consume bounded pages and seal only exact planned membership; [partial results remain valid evidence](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
-A candidate with missing or non-terminal shard summaries is recorded as
+A candidate with missing, unsealed, or invalid shard summaries is recorded as
 checked and rotated behind unchecked candidates. The coordinator continues to
 later candidates in the same cycle, preventing one slow shard from blocking
 unrelated ready runs.
 
-If all chunks are terminal:
+After exact shard settlement:
 
 ```text
 run.status = finalizing

@@ -6,8 +6,6 @@
 //! database and serialize route claims while execution databases own chunk
 //! scans and chunk-ready outbox event records.
 
-use std::collections::BTreeSet;
-
 use sqlx::{
     PgPool,
     Postgres,
@@ -181,8 +179,8 @@ fn dispatch_cursor_status(has_remaining_chunks: bool) -> &'static str {
 ///   limit and marks them `failed`.
 /// - `SKIP LOCKED` lets multiple coordinators run recovery without blocking
 ///   each other on the same chunk rows.
-/// - Failed-shard summaries are refreshed before commit, so clearing the final
-///   active lease and its derived summary are one source-side transition.
+/// - Exhausted chunks commit immutable settlement receipts with retired attempt
+///   authority before commit; coordinators aggregate them asynchronously.
 /// - Recovery clears the chunk's opaque claim token, fencing a worker from
 ///   allocating attempts or persisting results after reassignment.
 pub(crate) async fn recover_expired_chunk_leases(
@@ -192,12 +190,52 @@ pub(crate) async fn recover_expired_chunk_leases(
 ) -> anyhow::Result<ChunkLeaseRecoveryStats> {
     let mut tx = db.begin().await?;
 
-    let (recovered, failed_rows) =
-        recover_expired_chunks(&mut tx, max_recoveries, batch_size).await?;
+    // Acquire shared movement admission before chunk locks. The following SQL
+    // takes a fresh snapshot and rechecks local state after these nonblocking
+    // claims, so a completed move cannot leave recovery writing the old owner.
+    let candidates = sqlx::query_as::<_, (Uuid, i16)>(
+        r#"
+        SELECT DISTINCT run_id,run_shard FROM (
+            (SELECT run_id,run_shard FROM run_chunks WHERE status = 'leased'
+                AND leased_until < now() AND recovery_count < $1
+                ORDER BY leased_until,run_id,id LIMIT $2)
+            UNION ALL
+            (SELECT run_id,run_shard FROM run_chunks WHERE status = 'leased'
+                AND leased_until < now() AND recovery_count >= $1
+                ORDER BY leased_until,run_id,id LIMIT $2)
+        ) candidates ORDER BY run_id,run_shard
+    "#,
+    )
+    .bind(max_recoveries)
+    .bind(batch_size)
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut admitted_runs = Vec::new();
+    let mut admitted_shards = Vec::new();
+    for (run_id, shard) in candidates {
+        let admitted: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1::uuid::text,$2::bigint))",
+        )
+        .bind(run_id)
+        .bind(i64::from(shard))
+        .fetch_one(&mut *tx)
+        .await?;
+        if admitted {
+            admitted_runs.push(run_id);
+            admitted_shards.push(shard);
+        }
+    }
+    let (recovered, failed_rows) = recover_expired_chunks(
+        &mut tx,
+        max_recoveries,
+        batch_size,
+        &admitted_runs,
+        &admitted_shards,
+    )
+    .await?;
 
-    let failed_shards = failed_rows.iter().copied().collect::<BTreeSet<_>>();
-    for (run_id, run_shard) in failed_shards {
-        run_shard_summary::refresh_run_shard_summary_with(&mut *tx, run_id, run_shard).await?;
+    for &(run_id, run_shard, chunk_id) in &failed_rows {
+        run_shard_summary::settle_chunk_with(&mut tx, run_id, run_shard, chunk_id).await?;
     }
     tx.commit().await?;
 
@@ -349,8 +387,8 @@ async fn dispatch_routed_run_window_with_transactions(
         dispatch_run_window(&mut execution_tx, chunk_window_size, route, snapshot).await?;
 
     if let Some(dispatched) = &dispatched {
-        run_shard_summary::refresh_run_shard_summary_with(
-            &mut *execution_tx,
+        run_shard_summary::insert_run_shard_summary_with(
+            &mut execution_tx,
             dispatched.id,
             dispatched.run_shard,
         )

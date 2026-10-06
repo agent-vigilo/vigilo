@@ -155,6 +155,10 @@ High-volume execution tables are list partitioned by `run_shard`. The key is
 stable for the lifetime of a chunk and its child rows. Adding database capacity
 does not recalculate `run_shard`; it changes stored placement rows.
 
+Within a run shard, the `executions(run_id, run_shard, chunk_id)` index supports
+chunk receipt totals and cleanup of unfinished attempts. These lookups include
+terminal executions, so the index covers every execution status.
+
 ## Routing Lifecycle
 
 Run creation persists a recoverable control plan before it writes to any remote
@@ -209,7 +213,7 @@ Workers stay chunk-local:
   route cache and perform one authoritative refresh.
 - After claiming, the worker loads the
   local run snapshot and case data, persists attempts/results/aggregates, and
-  refreshes the shard summary in that execution placement.
+  commits a terminal chunk receipt in that execution placement.
 - Evaluator registry metadata remains a control-database read.
 - Database operations have bounded client and PostgreSQL deadlines. An
   availability failure or lock conflict delays only the affected message and
@@ -222,9 +226,29 @@ Workers stay chunk-local:
 Finalization fans in:
 
 - Each execution placement maintains `run_shard_summaries`.
-- On the terminal shard transition, each summary adds one bounded, mergeable entry per configured scorecard gate. Entries contain counts, score sums, and extrema; nonterminal refreshes do not scan scorecard inputs and summaries never contain execution rows.
+- Coordinators consume bounded immutable receipt pages, publish provisional progress, and seal summaries only after a canonical fold validates exact planned membership. Every configured gate retains its planned denominator, including eligible cases without executions. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+- Aggregation selects shards with indexed pending receipts or a canonical fold
+  ready to advance. Idle shards do not open aggregation transactions. Successful
+  checkpoints rotate productive shards; busy or invalid candidates also rotate
+  to keep the bounded ready-work pass fair. Shards with remaining ready work are
+  revisited in fair rounds within each database's page and scheduling-time budgets.
+  A progress page uses one extra pending identity in its existing query to avoid
+  revisiting a shard that has consumed all currently available receipts and still
+  awaits other chunks. Independent
+  shard pages and execution database passes run with bounded concurrency; each
+  page retains its own ownership claim, movement fence, and atomic checkpoint.
+  Pages are limited by both receipt count and serialized bytes, so large gate
+  payloads can fill a page before its row limit. See the [aggregation controls](/docs/architecture/structure/components/coordinator/#receipt-aggregation-controls)
+  for defaults and the distinction between scheduling budgets and database deadlines.
+- Aggregation budgets are separate from finalization candidate limits. Concurrent
+  work is bounded per coordinator, so adding coordinators also increases potential
+  database demand. Readiness discovery can still inspect idle unsealed summaries;
+  a bounded candidate result does not guarantee constant discovery work. Capacity
+  depends on database headroom and sustained receipt arrival and drainage rates.
 - The coordinator inspects a bounded number of candidates per cycle and reads
-  routed summaries for each run. A blocked candidate is moved behind unchecked
+  routed summaries for each run in one batch per execution database. Finalization
+  inspects published progress and seals; receipt aggregation advances only in its
+  dedicated cycle stage. A blocked candidate is moved behind unchecked
   candidates, allowing a later ready run to finalize in the same cycle.
   `--max-finalize-per-cycle` / `VIGILO_COORDINATOR_MAX_FINALIZE_PER_CYCLE`
   bounds candidate inspections, not guaranteed successful finalizations; the
@@ -235,7 +259,7 @@ Finalization fans in:
 - The coordinator verifies every shard scorecard has the same policy hash and gate set, merges exact counters, evaluates run gates, and atomically stores `run_scorecards`, `runs.gate_status`, and the completion event.
 - A failed placement read defers that run without discarding summaries already
   read from healthy placements. The run cannot finalize until every routed
-  summary is available and terminal.
+  summary is available, sealed, and valid.
 
 Cancellation fans out:
 
@@ -244,16 +268,20 @@ Cancellation fans out:
 - The workflow resolves the run's execution placements and cancels local
   chunks, executions, and attempts in each placement with bounded fanout. Each
   group holds shared movement admission, validates local settlement authority, and
-  refreshes shard summaries in the cancellation transaction.
+  commits chunk receipts in the cancellation transaction; coordinator pages publish the summaries.
 - `run.cancelled` remains a control-database outbox event record.
 
-Status and watch reads fan in lightweight progress:
+Status, watch, results, and export reads fan in lightweight summaries:
 
 - The control run row remains the authoritative lifecycle record.
 - While a run is `creating`, reads report placement counts, attempts, and the
   latest creation error from the control database without contacting unseeded
   execution databases.
-- Live progress is read from routed `run_shard_summaries` when available.
+- Live progress is read from routed `run_shard_summaries` when available, in one
+  batch per execution database. Shards on the same database share that read;
+  route validation and missing-shard checks still apply to each shard.
+- Results and export merge summaries in shard order, keeping floating-point
+  scores independent of the grouping of shards into database batches.
 - Payloads include `data.live_progress` and progress-source metadata so callers
   can distinguish control-only state from execution-shard progress.
 
@@ -491,8 +519,10 @@ After claim admission commits, an opaque chunk claim token and renewable
 deadline carry worker authority. Attempt allocation and result persistence lock
 and validate that live token; result persistence also requires the current live
 worker attempt. Recovery clears the chunk token, stales the attempt, and updates
-any failed-shard summary atomically. Terminal worker settlement and cancellation
-also refresh shard summaries in the transaction that clears active work.
+a failed chunk receipt atomically. Terminal worker settlement and cancellation
+also write receipts in the transaction that clears active work. Aggregation
+checkpoints, receipt-consumption identities, and sealed summaries move with their
+shard under the same ownership fence.
 
 When active work exists, the route stays `draining`; re-run the move after that
 work finishes. When an online catch-up cycle reaches its work bound with too
@@ -527,6 +557,8 @@ execution_attempts
 execution_aggregates
 evaluator_results
 evaluator_diagnostics
+run_chunk_settlements
+run_chunk_settlement_consumptions
 run_shard_summaries
 ```
 

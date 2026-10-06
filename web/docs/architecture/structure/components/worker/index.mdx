@@ -45,6 +45,8 @@ Describes the major internal responsibilities of the worker runtime.
   message retry budgets remain independent from broker availability.
 - Duplicate broker deliveries are expected under at-least-once messaging; chunk claims, attempt authority tokens, and evaluator-result uniqueness make processing idempotent at the persistence boundary.
 
+Workers settle terminal chunks under the chunk lock, preserve authoritative committed results, and retire unfinished authority before writing an immutable receipt. They acknowledge after this transaction; coordinators own shard aggregation and sealing. See [settlement](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
 ## Related
 
 - [Structure overview](../..)

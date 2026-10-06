@@ -26,7 +26,7 @@ sequenceDiagram
         Vigilo->>ControlDB: Mark dispatch cursors drained
         Vigilo->>ControlDB: Resolve readable execution routes
         ControlDB-->>Vigilo: Route list
-        Vigilo->>ExecDB: Idempotently cancel local work by placement
+        Vigilo->>ExecDB: Idempotently cancel local work and record missing receipts
         ExecDB-->>Vigilo: Cancellation counts
         Vigilo->>ControlDB: Refresh cancellation summary and event
         Vigilo-->>User: Success response
@@ -34,7 +34,7 @@ sequenceDiagram
         Vigilo->>ControlDB: Mark dispatch cursors drained
         Vigilo->>ControlDB: Resolve readable execution routes
         ControlDB-->>Vigilo: Route list
-        Vigilo->>ExecDB: Cancel attempts, executions, and chunks
+        Vigilo->>ExecDB: Lock chunks, cancel open work, and commit immutable receipts
         ExecDB-->>Vigilo: Cancellation counts and summaries
         Vigilo->>ControlDB: Persist final cancellation summary
         Vigilo->>ControlDB: Enqueue run.cancelled

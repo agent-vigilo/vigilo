@@ -14,12 +14,12 @@ flowchart TD
     Cases{Dataset has cases?}
     Executable{Profile executable for dataset?}
     Plan[Plan case, dataset, run, chunks, and shard assignments]
-    Persist[Commit creating run, placement ledger, and chunk plan]
+    Persist[Commit creating run, frozen membership hashes, ledger, and chunk plan]
     Placement{Pending placement remains?}
     Seed[Idempotently seed the placement]
     SeedResult{Seed result?}
     Record[Record placement seeded]
-    Activate[Create dispatch cursors, set pending, and remove chunk plan]
+    Activate[Create dispatch cursors, set pending, and remove temporary plan; retain membership hashes]
     Payload[Build run creation payload]
 
     Success([Success response])

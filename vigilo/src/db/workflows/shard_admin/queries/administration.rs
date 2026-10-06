@@ -112,6 +112,10 @@ where
             UNION ALL
             SELECT COUNT(*)::bigint FROM run_shard_summaries WHERE run_id = $1::uuid AND run_shard = $2
             UNION ALL
+            SELECT COUNT(*)::bigint FROM run_chunk_settlements WHERE run_id = $1::uuid AND run_shard = $2
+            UNION ALL
+            SELECT COUNT(*)::bigint FROM run_chunk_settlement_consumptions WHERE run_id = $1::uuid AND run_shard = $2
+            UNION ALL
             SELECT COUNT(*)::bigint FROM executions WHERE run_id = $1::uuid AND run_shard = $2
             UNION ALL
             SELECT COUNT(*)::bigint FROM execution_attempts WHERE run_id = $1::uuid AND run_shard = $2

@@ -40,6 +40,8 @@ snapshot. Workers verify both hashes before executing any case.
 
 <Mermaid value={decisionFlowDiagram} />
 
+Creation also freezes per-shard chunk counts, case counts, and canonical membership hashes in the configuration. They survive temporary creation-plan cleanup and let coordinators verify [exact settlement](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
 ## Related
 
 - [Run validate flow](/docs/architecture/flows/run/validate/)

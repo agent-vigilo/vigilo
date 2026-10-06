@@ -27,6 +27,15 @@ How `vigilo run export` loads a run and exports summary, execution, attempt, agg
 
 <Mermaid value={decisionFlowDiagram} />
 
+Progress reports include planned and settled chunk counts, sealed shard count, and missing/unresolved execution counts. Progress may lag committed receipts; final scorecards require every planned shard to be sealed. Missing counts describe settled work only. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
+JSON exports label each attempt with `evidence_state`: `authoritative` for the
+current terminal attempt with its matching aggregate, `stale` for superseded or
+retired attempts, and `partial` otherwise. Each execution has an
+`aggregate_authoritative` flag. JSONL carries the same attempt/result labels and
+an `authoritative` flag on aggregate records. Raw results and diagnostics remain
+available in all states. JSON materializes the run; JSONL pages and streams it.
+
 ## Related
 
 - [Run results flow](/docs/architecture/flows/run/results/)

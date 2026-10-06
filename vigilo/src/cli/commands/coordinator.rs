@@ -3,12 +3,15 @@
 //! The coordinator drives run-level orchestration:
 //! - resumes durable multi-database run creation
 //! - atomically starts fully created runs and dispatches bounded chunk windows
-//! - finalizes runs whose chunks/executions are terminal
+//! - aggregates chunk receipts and finalizes runs with exact sealed shard sets
+//! - drains aggregation pages within independent budgets, with bounded shard and
+//!   database concurrency while retaining transaction-local ownership
 //! - publishes outbox event records from active database placements as messages
 //! - contains placement-scoped database failures so healthy aliases continue
 
 use std::{
     collections::BTreeMap,
+    num::NonZeroUsize,
     time::{
         Duration,
         Instant,
@@ -71,6 +74,7 @@ use placement::{
     record_open as record_placement_open,
     record_skip as record_placement_skip,
     run_operations as run_placement_operations,
+    run_operations_concurrently,
     run_operations_without_outer_deadline,
 };
 
@@ -79,6 +83,10 @@ const COORDINATOR_LEASE_SECONDS: i32 = 60;
 const COORDINATOR_MAX_CREATE_RECOVERY_PER_CYCLE: u64 = 16;
 const COORDINATOR_MAX_DISPATCH_PER_CYCLE: u64 = 64;
 const COORDINATOR_MAX_FINALIZE_PER_CYCLE: u64 = 64;
+const COORDINATOR_MAX_AGGREGATION_PAGES_PER_CYCLE: u64 = 256;
+const COORDINATOR_AGGREGATION_TIME_BUDGET_MS: u64 = 1_000;
+const COORDINATOR_AGGREGATION_PARALLELISM: u64 = 4;
+const COORDINATOR_AGGREGATION_DATABASE_PARALLELISM: u64 = 4;
 const RUN_CHUNK_DISPATCH_WINDOW_SIZE: i64 = 512;
 const CHUNK_LEASE_RECOVERY_BATCH_SIZE: i64 = 1_000;
 const CHUNK_LEASE_MAX_RECOVERIES: i32 = 3;
@@ -95,6 +103,8 @@ struct CoordinatorRuntimeConfig {
     max_create_recovery_per_cycle: usize,
     max_dispatch_per_cycle: usize,
     max_finalize_per_cycle: usize,
+    aggregation: run_shard_summary::AggregationConfig,
+    aggregation_database_parallelism: NonZeroUsize,
     run_chunk_dispatch_window_size: i64,
     chunk_lease_recovery_batch_size: i64,
     chunk_lease_max_recoveries: i32,
@@ -153,6 +163,22 @@ pub(crate) struct Command {
     #[arg(long, env = "VIGILO_COORDINATOR_MAX_FINALIZE_PER_CYCLE", default_value_t = COORDINATOR_MAX_FINALIZE_PER_CYCLE, value_parser = clap::value_parser!(u64).range(1..=100_000))]
     pub max_finalize_per_cycle: u64,
 
+    /// Maximum aggregation page attempts per execution database per cycle
+    #[arg(long, env = "VIGILO_COORDINATOR_MAX_AGGREGATION_PAGES_PER_CYCLE", default_value_t = COORDINATOR_MAX_AGGREGATION_PAGES_PER_CYCLE, value_parser = clap::value_parser!(u64).range(1..=100_000))]
+    pub max_aggregation_pages_per_cycle: u64,
+
+    /// Milliseconds to admit aggregation pages per database after candidate discovery
+    #[arg(long, env = "VIGILO_COORDINATOR_AGGREGATION_TIME_BUDGET_MS", default_value_t = COORDINATOR_AGGREGATION_TIME_BUDGET_MS, value_parser = clap::value_parser!(u64).range(1..=60_000))]
+    pub aggregation_time_budget_ms: u64,
+
+    /// Maximum concurrent aggregation pages on independent shards per database
+    #[arg(long, env = "VIGILO_COORDINATOR_AGGREGATION_PARALLELISM", default_value_t = COORDINATOR_AGGREGATION_PARALLELISM, value_parser = clap::value_parser!(u64).range(1..=128))]
+    pub aggregation_parallelism: u64,
+
+    /// Maximum execution databases aggregating concurrently per cycle
+    #[arg(long, env = "VIGILO_COORDINATOR_AGGREGATION_DATABASE_PARALLELISM", default_value_t = COORDINATOR_AGGREGATION_DATABASE_PARALLELISM, value_parser = clap::value_parser!(u64).range(1..=128))]
+    pub aggregation_database_parallelism: u64,
+
     /// Number of run chunks made ready per run-shard dispatch window
     #[arg(long, env = "VIGILO_RUN_CHUNK_DISPATCH_WINDOW_SIZE", default_value_t = RUN_CHUNK_DISPATCH_WINDOW_SIZE, value_parser = clap::value_parser!(i64).range(1..=1_000_000))]
     pub run_chunk_dispatch_window_size: i64,
@@ -194,6 +220,15 @@ impl Command {
             max_create_recovery_per_cycle: self.max_create_recovery_per_cycle as usize,
             max_dispatch_per_cycle: self.max_dispatch_per_cycle as usize,
             max_finalize_per_cycle: self.max_finalize_per_cycle as usize,
+            aggregation: run_shard_summary::AggregationConfig {
+                max_pages: self.max_aggregation_pages_per_cycle as usize,
+                time_budget: Duration::from_millis(self.aggregation_time_budget_ms),
+                parallelism: self.aggregation_parallelism as usize,
+            },
+            aggregation_database_parallelism: NonZeroUsize::new(
+                self.aggregation_database_parallelism as usize,
+            )
+            .expect("CLI validates nonzero aggregation database parallelism"),
             run_chunk_dispatch_window_size: self.run_chunk_dispatch_window_size,
             chunk_lease_recovery_batch_size: self.chunk_lease_recovery_batch_size,
             chunk_lease_max_recoveries: self.chunk_lease_max_recoveries,
@@ -230,7 +265,7 @@ impl Executable for Command {
 /// 1. resume stale multi-database run creation
 /// 2. recover expired worker chunk leases
 /// 3. atomically start pending runs and dispatch bounded chunk windows
-/// 4. claim/finalize finalizable runs (bounded batch)
+/// 4. aggregate bounded receipt pages, then finalize exact sealed shard sets
 /// 5. publish bounded batches of pending outbox records from serviceable placements
 async fn run_coordinator_cycle(
     context: Context,
@@ -273,6 +308,8 @@ async fn run_coordinator_cycle(
     let dispatch = dispatch_ready_chunk_windows(database_router, coordinator_id, config).await?;
     let dispatch_ms = dispatch_started.elapsed().as_millis() as u64;
 
+    let aggregation = aggregate_pending_summaries(database_router, coordinator_id, config).await?;
+
     // --- Finalize terminal runs ---
     let finalization_started = Instant::now();
     let finalization = finalize_ready_runs(database_router, coordinator_id, config).await?;
@@ -299,6 +336,7 @@ async fn run_coordinator_cycle(
     let mut placement_failures = PlacementFailureStats::default();
     placement_failures.merge(recovery.failures);
     placement_failures.merge(dispatch.failures);
+    placement_failures.merge(aggregation.failures);
     placement_failures.merge(finalization.failures);
     placement_failures.merge(publication.failures);
     info!(
@@ -312,6 +350,7 @@ async fn run_coordinator_cycle(
         recovery_ms,
         dispatch_windows_prepared = dispatch.output,
         dispatch_ms,
+        aggregation_pages_advanced = aggregation.output,
         runs_finalized = finalization.output,
         finalization_ms,
         outbox_events_claimed = publication.output.claimed_events,
@@ -464,6 +503,54 @@ async fn recover_expired_chunk_leases(
 
     Ok(PlacementPassResult {
         output: stats,
+        failures,
+    })
+}
+
+/// Drains placement-local summaries within independent aggregation budgets.
+///
+/// Database slots bound concurrent drains; each drain independently bounds shard
+/// pages. Every admitted placement outcome is recorded before finalization begins,
+/// including failures or expiration of the existing database operation deadline.
+async fn aggregate_pending_summaries(
+    database_router: &database::DatabaseRouter,
+    coordinator_id: Uuid,
+    config: &CoordinatorRuntimeConfig,
+) -> anyhow::Result<PlacementPassResult<usize>> {
+    let aliases = database_router
+        .serviceable_execution_database_aliases()
+        .await?;
+    let batch = run_operations_concurrently(
+        database_router,
+        coordinator_id,
+        "shard_summary_aggregation",
+        aliases,
+        config.aggregation_database_parallelism,
+        |alias| async move {
+            let db = database_router.execution_database(&alias).await?;
+            run_shard_summary::advance_pending_summaries(&db, &config.aggregation).await
+        },
+    )
+    .await;
+    let mut failures = PlacementFailureStats::default();
+    for skip in batch.skipped {
+        record_placement_skip(
+            &mut failures,
+            coordinator_id,
+            "shard_summary_aggregation",
+            skip,
+        );
+    }
+    for failure in batch.failures {
+        record_placement_failure(
+            &mut failures,
+            coordinator_id,
+            "shard_summary_aggregation",
+            failure,
+        );
+    }
+    Ok(PlacementPassResult {
+        output: batch.successes.into_iter().map(|(_, n)| n).sum(),
         failures,
     })
 }
@@ -709,7 +796,7 @@ async fn dispatch_ready_chunk_windows(
             chunk_ready_event_records_inserted = run.chunk_ready_event_records_inserted,
             chunks_marked_dispatched = run.chunks_marked_dispatched,
             run_started_event_records_inserted = run.run_started_event_records_inserted,
-            shard_summary_refreshed = true,
+            shard_summary_initialized = true,
             execution_pool_resolution_ms,
             dispatch_window_ms,
             "prepared bounded dispatch shard window"
@@ -876,8 +963,16 @@ async fn finalize_ready_runs(
                 shard_summary_count = summaries.len(),
                 failed_placement_operations = placement_failure_count,
                 finalization_candidate_select_ms,
-                "finalization candidate is waiting for terminal shard summaries"
+                "finalization candidate is waiting for sealed shard summaries"
             );
+            run_finalize::mark_finalization_candidate_checked(control_db, run.id).await?;
+            continue;
+        }
+
+        if let Err(error) =
+            run_finalize::validate_summary_set(run.id, &summaries, &run.aggregation_policy_hash)
+        {
+            warn!(run_id = %run.id, error = %error, "invalid finalization summary; deferred this candidate");
             run_finalize::mark_finalization_candidate_checked(control_db, run.id).await?;
             continue;
         }
@@ -971,38 +1066,42 @@ async fn collect_run_shard_summaries(
             let placements = placements_by_alias.get(&alias).cloned().unwrap_or_default();
             async move {
                 let db = database_router.execution_database(&alias).await?;
-                let mut summaries = Vec::with_capacity(placements.len());
-                let mut complete = true;
-
-                for placement in placements {
+                for placement in &placements {
                     if !placement.is_dispatchable() {
                         return Err(
                             database::ExecutionRouteError::NonDispatchableShardPlacement {
                                 run_id,
                                 run_shard: placement.run_shard,
-                                status: placement.status,
+                                status: placement.status.clone(),
                             }
                             .into(),
                         );
                     }
+                }
 
-                    let Some(summary) = run_shard_summary::select_run_shard_summary(
-                        &db,
-                        run_id,
-                        placement.run_shard,
-                    )
-                    .await?
-                    else {
-                        complete = false;
+                // Sealed summaries are immutable. Receipt aggregation owns all
+                // writes; finalization only reads the currently routed shard set.
+                let shards = placements
+                    .iter()
+                    .map(|placement| placement.run_shard)
+                    .collect::<Vec<_>>();
+                let summaries =
+                    run_shard_summary::select_run_shard_summaries(&db, run_id, &shards).await?;
+                let complete = summaries.len() == shards.len();
+                for placement in &placements {
+                    if summaries
+                        .binary_search_by_key(&placement.run_shard, |summary| summary.run_shard)
+                        .is_err()
+                    {
                         debug!(
                             run_id = %run_id,
                             run_shard = placement.run_shard,
                             database_alias = %alias,
                             "run shard summary is not available yet"
                         );
-                        continue;
-                    };
-
+                    }
+                }
+                for summary in &summaries {
                     debug!(
                         run_id = %summary.run_id,
                         run_shard = summary.run_shard,
@@ -1012,7 +1111,6 @@ async fn collect_run_shard_summaries(
                         expected_execution_count = summary.expected_execution_count,
                         "loaded run shard summary for finalization"
                     );
-                    summaries.push(summary);
                 }
 
                 Ok((summaries, complete))
@@ -1076,9 +1174,14 @@ mod placement {
     use std::{
         collections::BTreeSet,
         future::Future,
+        num::NonZeroUsize,
         time::Duration,
     };
 
+    use futures_util::{
+        StreamExt,
+        stream::FuturesUnordered,
+    };
     use tracing::{
         debug,
         info,
@@ -1224,6 +1327,34 @@ mod placement {
             aliases,
             operation,
             true,
+            NonZeroUsize::MIN,
+        )
+        .await
+    }
+
+    /// Bounds independently admitted placement operations while retaining circuit
+    /// permits, wall-clock deadlines, and every completed outcome. Only aggregation
+    /// uses this mode; other coordinator phases retain sequential execution.
+    pub(super) async fn run_operations_concurrently<T, Operation, OperationFuture>(
+        database_router: &database::DatabaseRouter,
+        coordinator_id: Uuid,
+        operation_name: &'static str,
+        aliases: Vec<String>,
+        parallelism: NonZeroUsize,
+        operation: Operation,
+    ) -> PlacementOperationBatch<T>
+    where
+        Operation: FnMut(String) -> OperationFuture,
+        OperationFuture: Future<Output = anyhow::Result<T>>,
+    {
+        run_operations_with_deadline(
+            database_router,
+            coordinator_id,
+            operation_name,
+            aliases,
+            operation,
+            true,
+            parallelism,
         )
         .await
     }
@@ -1248,6 +1379,7 @@ mod placement {
             aliases,
             operation,
             false,
+            NonZeroUsize::MIN,
         )
         .await
     }
@@ -1259,6 +1391,7 @@ mod placement {
         aliases: Vec<String>,
         mut operation: Operation,
         enforce_outer_deadline: bool,
+        parallelism: NonZeroUsize,
     ) -> PlacementOperationBatch<T>
     where
         Operation: FnMut(String) -> OperationFuture,
@@ -1267,34 +1400,46 @@ mod placement {
         let mut successes = Vec::with_capacity(aliases.len());
         let mut failures = Vec::new();
         let mut skipped = Vec::new();
+        let mut aliases = aliases.into_iter();
+        let mut in_flight = FuturesUnordered::new();
 
-        for alias in aliases {
-            let permit = match database_router.acquire_database_operation(&alias) {
-                Ok(permit) => permit,
-                Err(open) => {
-                    skipped.push(PlacementCircuitSkip {
-                        database_alias: alias,
-                        retry_after: open.retry_after,
-                    });
-                    continue;
+        loop {
+            while in_flight.len() < parallelism.get() {
+                let Some(alias) = aliases.next() else { break };
+                let permit = match database_router.acquire_database_operation(&alias) {
+                    Ok(permit) => permit,
+                    Err(open) => {
+                        skipped.push(PlacementCircuitSkip {
+                            database_alias: alias,
+                            retry_after: open.retry_after,
+                        });
+                        continue;
+                    }
+                };
+                if permit.is_probe() {
+                    info!(
+                        coordinator_id = %coordinator_id,
+                        database_alias = %alias,
+                        operation = operation_name,
+                        "probing half-open execution database circuit"
+                    );
                 }
-            };
-            if permit.is_probe() {
-                info!(
-                    coordinator_id = %coordinator_id,
-                    database_alias = %alias,
-                    operation = operation_name,
-                    "probing half-open execution database circuit"
-                );
+                let operation_future = operation(alias.clone());
+                in_flight.push(async move {
+                    let result = if enforce_outer_deadline {
+                        database_router
+                            .deadline_database_operation(&alias, operation_name, operation_future)
+                            .await
+                            .map_err(anyhow::Error::new)
+                            .and_then(std::convert::identity)
+                    } else {
+                        operation_future.await
+                    };
+                    (alias, permit, result)
+                });
             }
-            let result = if enforce_outer_deadline {
-                database_router
-                    .deadline_database_operation(&alias, operation_name, operation(alias.clone()))
-                    .await
-                    .map_err(anyhow::Error::new)
-                    .and_then(std::convert::identity)
-            } else {
-                operation(alias.clone()).await
+            let Some((alias, permit, result)) = in_flight.next().await else {
+                break;
             };
             match result {
                 Ok(output) => {
@@ -1472,7 +1617,186 @@ mod placement {
 
     #[cfg(test)]
     mod tests {
+        use std::sync::{
+            Arc,
+            atomic::{
+                AtomicUsize,
+                Ordering,
+            },
+        };
+
         use super::*;
+
+        #[tokio::test]
+        async fn concurrent_placement_operations_bound_work_and_collect_every_outcome() {
+            for parallelism in [1, 2, 4] {
+                let context = test_context();
+                let database_router = context.dbr().await.unwrap();
+                let active = Arc::new(AtomicUsize::new(0));
+                let peak = Arc::new(AtomicUsize::new(0));
+                let completed = Arc::new(AtomicUsize::new(0));
+                let batch = run_operations_concurrently(
+                    database_router,
+                    Uuid::now_v7(),
+                    "aggregation_test",
+                    (0..8).map(|n| format!("shard_{n}")).collect(),
+                    NonZeroUsize::new(parallelism).unwrap(),
+                    |alias| {
+                        let active = active.clone();
+                        let peak = peak.clone();
+                        let completed = completed.clone();
+                        async move {
+                            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(count, Ordering::SeqCst);
+                            tokio::task::yield_now().await;
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            completed.fetch_add(1, Ordering::SeqCst);
+                            if alias == "shard_2" {
+                                anyhow::bail!("invalid aggregation manifest");
+                            }
+                            Ok(alias)
+                        }
+                    },
+                )
+                .await;
+                assert_eq!(peak.load(Ordering::SeqCst), parallelism);
+                assert_eq!(active.load(Ordering::SeqCst), 0);
+                assert_eq!(completed.load(Ordering::SeqCst), 8);
+                assert_eq!(batch.successes.len(), 7);
+                assert_eq!(batch.failures.len(), 1);
+                assert_eq!(batch.failures[0].database_alias, "shard_2");
+                assert!(batch.skipped.is_empty());
+                if parallelism == 1 {
+                    assert_eq!(
+                        batch
+                            .successes
+                            .into_iter()
+                            .map(|(alias, _)| alias)
+                            .collect::<Vec<_>>(),
+                        [
+                            "shard_0", "shard_1", "shard_3", "shard_4", "shard_5", "shard_6",
+                            "shard_7"
+                        ]
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn concurrent_placement_operations_let_healthy_alias_finish_before_slow_alias() {
+            let context = test_context_with_timeout(Duration::from_secs(1));
+            let database_router = context.dbr().await.unwrap();
+            let healthy_finished = tokio::sync::Notify::new();
+            let batch = run_operations_concurrently(
+                database_router,
+                Uuid::now_v7(),
+                "aggregation_test",
+                ["slow", "healthy", "later"].map(str::to_string).to_vec(),
+                NonZeroUsize::new(2).unwrap(),
+                |alias| {
+                    let healthy_finished = &healthy_finished;
+                    async move {
+                        if alias == "slow" {
+                            healthy_finished.notified().await;
+                            return Err(anyhow::Error::new(sqlx::Error::PoolTimedOut));
+                        }
+                        if alias == "healthy" {
+                            healthy_finished.notify_one();
+                        }
+                        Ok(alias)
+                    }
+                },
+            )
+            .await;
+            assert_eq!(batch.successes.len(), 2);
+            assert_eq!(batch.failures.len(), 1);
+            assert!(
+                matches!(
+                    batch.failures[0].error.downcast_ref::<sqlx::Error>(),
+                    Some(sqlx::Error::PoolTimedOut)
+                ),
+                "healthy work must release the slow operation before its deadline"
+            );
+        }
+
+        #[tokio::test]
+        async fn concurrent_placement_deadlines_release_operations_and_keep_healthy_results() {
+            struct InFlight(Arc<AtomicUsize>);
+            impl Drop for InFlight {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let context = test_context_with_timeout(Duration::from_millis(20));
+            let database_router = context.dbr().await.unwrap();
+            let active = Arc::new(AtomicUsize::new(0));
+            let batch = run_operations_concurrently(
+                database_router,
+                Uuid::now_v7(),
+                "aggregation_test",
+                ["slow", "healthy", "later"].map(str::to_string).to_vec(),
+                NonZeroUsize::new(2).unwrap(),
+                |alias| {
+                    let active = active.clone();
+                    async move {
+                        active.fetch_add(1, Ordering::SeqCst);
+                        let _guard = InFlight(active);
+                        if alias == "slow" {
+                            std::future::pending::<()>().await;
+                        }
+                        Ok(alias)
+                    }
+                },
+            )
+            .await;
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+            assert_eq!(batch.successes.len(), 2);
+            assert_eq!(batch.failures.len(), 1);
+            assert_eq!(batch.failures[0].database_alias, "slow");
+            assert!(
+                batch.failures[0]
+                    .error
+                    .downcast_ref::<database::DatabaseOperationTimeout>()
+                    .is_some()
+            );
+            assert_eq!(
+                batch.failures[0].classification.kind,
+                ErrorKind::DatabaseUnavailable
+            );
+        }
+
+        #[tokio::test]
+        async fn concurrent_placement_operations_skip_open_circuits_without_starting_work() {
+            let context = test_context();
+            let database_router = context.dbr().await.unwrap();
+            for _ in 0..3 {
+                let permit = database_router
+                    .acquire_database_operation("offline")
+                    .unwrap();
+                database_router.record_database_operation_error(
+                    permit,
+                    &anyhow::Error::new(sqlx::Error::PoolTimedOut),
+                );
+            }
+            let mut started = Vec::new();
+            let batch = run_operations_concurrently(
+                database_router,
+                Uuid::now_v7(),
+                "aggregation_test",
+                ["offline", "healthy", "later"].map(str::to_string).to_vec(),
+                NonZeroUsize::new(2).unwrap(),
+                |alias| {
+                    started.push(alias.clone());
+                    async move { Ok::<_, anyhow::Error>(alias) }
+                },
+            )
+            .await;
+            assert_eq!(started, ["healthy", "later"]);
+            assert_eq!(batch.successes.len(), 2);
+            assert!(batch.failures.is_empty());
+            assert_eq!(batch.skipped.len(), 1);
+            assert_eq!(batch.skipped[0].database_alias, "offline");
+        }
 
         #[tokio::test]
         async fn placement_operations_preserve_successes_and_classify_failures() {
@@ -1731,6 +2055,103 @@ mod placement {
                 crate::context::wasm::Config::default(),
                 crate::context::output::OutputFormat::Json,
             )
+        }
+    }
+}
+
+#[cfg(test)]
+mod postgres_tests;
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Debug, Parser)]
+    struct TestCommand {
+        #[command(flatten)]
+        command: Command,
+    }
+
+    #[test]
+    fn aggregation_controls_accept_independent_budgets() {
+        let parsed = TestCommand::try_parse_from([
+            "coordinator",
+            "--messaging-url",
+            "amqp://not-used",
+            "--max-finalize-per-cycle",
+            "1",
+            "--max-aggregation-pages-per-cycle",
+            "256",
+            "--aggregation-time-budget-ms",
+            "1000",
+            "--aggregation-parallelism",
+            "4",
+            "--aggregation-database-parallelism",
+            "4",
+            "once",
+        ]);
+        assert!(
+            parsed.is_ok(),
+            "aggregation controls must parse: {parsed:?}"
+        );
+        let config = parsed.unwrap().command.runtime_config();
+        assert_eq!(config.max_finalize_per_cycle, 1);
+        assert_eq!(config.aggregation.max_pages, 256);
+        assert_eq!(config.aggregation.time_budget, Duration::from_millis(1000));
+        assert_eq!(config.aggregation.parallelism, 4);
+        assert_eq!(config.aggregation_database_parallelism.get(), 4);
+    }
+
+    #[test]
+    fn aggregation_controls_have_bounded_defaults_and_reject_invalid_values() {
+        let command = TestCommand::try_parse_from([
+            "coordinator",
+            "--messaging-url",
+            "amqp://not-used",
+            "once",
+        ])
+        .unwrap()
+        .command;
+        let config = command.runtime_config();
+        assert_eq!(config.max_finalize_per_cycle, 64);
+        assert_eq!(config.aggregation.max_pages, 256);
+        assert_eq!(config.aggregation.time_budget, Duration::from_millis(1000));
+        assert_eq!(config.aggregation.parallelism, 4);
+        assert_eq!(config.aggregation_database_parallelism.get(), 4);
+        for (flag, upper) in [
+            ("--max-aggregation-pages-per-cycle", 100_000),
+            ("--aggregation-time-budget-ms", 60_000),
+            ("--aggregation-parallelism", 128),
+            ("--aggregation-database-parallelism", 128),
+        ] {
+            for value in [0, upper + 1] {
+                let parsed = TestCommand::try_parse_from([
+                    "coordinator",
+                    "--messaging-url",
+                    "amqp://not-used",
+                    flag,
+                    &value.to_string(),
+                    "once",
+                ]);
+                assert_eq!(
+                    parsed.unwrap_err().kind(),
+                    clap::error::ErrorKind::ValueValidation,
+                    "flag={flag} value={value}"
+                );
+            }
+            for value in [1, upper] {
+                TestCommand::try_parse_from([
+                    "coordinator",
+                    "--messaging-url",
+                    "amqp://not-used",
+                    flag,
+                    &value.to_string(),
+                    "once",
+                ])
+                .unwrap();
+            }
         }
     }
 }

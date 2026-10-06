@@ -20,8 +20,13 @@ flowchart TD
     RecoveryIsolated[Count placement failure and continue aliases]
     Dispatch[Dispatch ready run-shard windows]
     DispatchIsolated[Leave cursor open and exclude failed alias]
-    Finalize[Finalize ready runs]
-    FinalizeIsolated[Defer run and continue cycle]
+    Finalize[Read summaries by database and finalize exact valid seals]
+    FinalizeIsolated[Defer candidate; inspect next run]
+    Aggregate[Discover ready shards with bounded database and shard concurrency]
+    AggregationBudget{Ready page and database scheduling budgets available?}
+    AggregationPage[Try claim and atomically commit one bounded receipt or canonical page]
+    AggregationNext[Visit unchecked candidates before revisiting shards with ready work]
+    AggregationDrain[Await all admitted page operations under database deadlines]
     Messaging{Messaging context available?}
     Outbox[Claim delivery queue batch and publish with bounded concurrency]
     BrokerCircuit{Messaging circuit admits publish?}
@@ -56,15 +61,18 @@ flowchart TD
     Recover -. Placement operation fails .-> RecoveryIsolated
     RecoveryIsolated --> Recover
 
-    Dispatch --> Finalize
+    Dispatch --> Aggregate
+    Aggregate --> AggregationBudget
+    AggregationBudget -- Yes --> AggregationPage --> AggregationNext --> AggregationBudget
+    AggregationBudget -- No --> AggregationDrain --> Finalize
     Dispatch -. Execution placement fails .-> DispatchIsolated
     Dispatch -. Control dispatch fails .-> CycleFail
     DispatchIsolated --> Dispatch
 
     Finalize --> Messaging
-    Finalize -. Placement summary read fails .-> FinalizeIsolated
+    Finalize -. Summary unavailable, open, or invalid .-> FinalizeIsolated
     Finalize -. Control finalization fails .-> CycleFail
-    FinalizeIsolated --> Messaging
+    FinalizeIsolated --> Finalize
 
     Messaging -- No --> ContextFail
     Messaging -- Yes --> Outbox
@@ -86,5 +94,5 @@ flowchart TD
 
     class Start command
     class Success success
-    class CoordinatorId,Runner,Event,Database,RecoverCreation,Circuit,CircuitSkip,Recover,RecoveryIsolated,Dispatch,DispatchIsolated,Finalize,FinalizeIsolated,Messaging,Outbox,BrokerCircuit,OutboxIsolated,Wait,Shutdown,Stop system
+    class CoordinatorId,Runner,Event,Database,RecoverCreation,Circuit,CircuitSkip,Recover,RecoveryIsolated,Dispatch,DispatchIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Finalize,FinalizeIsolated,Messaging,Outbox,BrokerCircuit,OutboxIsolated,Wait,Shutdown,Stop system
     class ContextFail,CycleFail,ShutdownFail error

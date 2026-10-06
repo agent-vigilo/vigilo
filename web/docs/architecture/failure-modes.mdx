@@ -103,6 +103,22 @@ Worker persistence batches are guarded by current-attempt and live-attempt-lease
 
 Failed case attempts that still have retry budget are stored as `retry_scheduled` with a bounded `retry_after` timestamp. Workers do not keep spinning on those rows: they release the chunk, delay the chunk-ready broker message until the next retry window, and re-check the database before creating another attempt. `defaults.max_attempts` closes the execution retry loop; actual worker processing failures still use the bounded RabbitMQ failure retry budget and then quarantine or fail the chunk.
 
+## Partial results and aggregation crashes
+
+Evaluation failure does not settle other work. Exhausted chunks commit receipts
+that retain authoritative scores and explicitly count missing or unresolved
+executions; no result rows or evaluator errors are invented. Planned cases remain
+in all eligible scorecard denominators. Finalization accepts incomplete results
+only after exact shard settlement, and incomplete operational coverage fails the
+gate.
+
+A coordinator consumes receipt pages under a nonblocking transaction-scoped
+claim. The counters and consumption checkpoint commit together; crash or rollback
+cannot double-count a receipt. Another coordinator resumes the durable checkpoint
+and seals only verified membership. Workers never wait for this claim. Invalid
+policy, membership, or seal data defers that candidate while other runs continue.
+See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
 ## Related
 
 - [State ownership](/docs/architecture/state/ownership/)

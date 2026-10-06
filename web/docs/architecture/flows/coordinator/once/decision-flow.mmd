@@ -19,9 +19,16 @@ flowchart TD
     DispatchClaim{Dispatchable run-shard cursor claimed?}
     DispatchRun[Start run if needed and enqueue shard chunk window]
     DispatchIsolated[Leave cursor open and exclude alias for this pass]
-    FinalizeClaim{Finalizable run claimed?}
+    FinalizeCandidate{Next finalization candidate within budget?}
+    ReadSummaries[Read candidate summaries in one batch per database]
+    FinalizeClaim{Candidate has exact valid seals?}
     FinalizeRun[Roll up counts, set gate, and enqueue completion event]
     FinalizeIsolated[Defer run and retain healthy summary reads]
+    Aggregate[Discover ready shards with bounded database and shard concurrency]
+    AggregationBudget{Ready page and database scheduling budgets available?}
+    AggregationPage[Try claim and atomically commit one bounded receipt or canonical page]
+    AggregationNext[Visit unchecked candidates before revisiting shards with ready work]
+    AggregationDrain[Await all admitted page operations under database deadlines]
     Messaging{Messaging context available?}
     OutboxCatalog{Outbox placement catalog available?}
     OutboxPlacement{Database placements remain?}
@@ -61,20 +68,25 @@ flowchart TD
     RecoveryIsolated --> RecoveryPlacement
 
     DispatchClaim -- Yes --> DispatchRun
-    DispatchClaim -- No or batch limit reached --> FinalizeClaim
+    DispatchClaim -- No or batch limit reached --> Aggregate
+    Aggregate --> AggregationBudget
+    AggregationBudget -- Yes --> AggregationPage --> AggregationNext --> AggregationBudget
+    AggregationBudget -- No --> AggregationDrain --> FinalizeCandidate
 
     DispatchRun --> DispatchClaim
     DispatchRun -. Execution placement fails .-> DispatchIsolated
     DispatchRun -. Control update fails .-> DispatchFail
     DispatchIsolated --> DispatchClaim
 
+    FinalizeCandidate -- Yes --> ReadSummaries --> FinalizeClaim
+    FinalizeCandidate -- No --> Messaging
     FinalizeClaim -- Yes --> FinalizeRun
-    FinalizeClaim -- No or batch limit reached --> Messaging
+    FinalizeClaim -- No --> FinalizeIsolated
 
-    FinalizeRun --> FinalizeClaim
-    FinalizeRun -. Placement summary read fails .-> FinalizeIsolated
+    ReadSummaries -. Placement unavailable .-> FinalizeIsolated
+    FinalizeRun --> FinalizeCandidate
     FinalizeRun -. Control update fails .-> FinalizeFail
-    FinalizeIsolated --> Messaging
+    FinalizeIsolated --> FinalizeCandidate
 
     Messaging -- No --> ContextFail
     Messaging -- Yes --> OutboxCatalog
@@ -109,6 +121,6 @@ flowchart TD
 
     class Start command
     class Success success
-    class CoordinatorId,Database,RecoverCreation,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeClaim,FinalizeRun,FinalizeIsolated,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
+    class CoordinatorId,Database,RecoverCreation,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeCandidate,ReadSummaries,FinalizeClaim,FinalizeRun,FinalizeIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
     class Publish component
     class ContextFail,RecoveryFail,DispatchFail,FinalizeFail,OutboxFail error

@@ -30,6 +30,8 @@ execution progress.
 
 <Mermaid value={decisionFlowDiagram} />
 
+Progress reports include planned and settled chunk counts, sealed shard count, and missing/unresolved execution counts. Progress may lag committed receipts; final scorecards require every planned shard to be sealed. Missing counts describe settled work only. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
 ## Related
 
 - [Run create flow](/docs/architecture/flows/run/create/)

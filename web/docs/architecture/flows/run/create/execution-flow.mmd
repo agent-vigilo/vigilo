@@ -19,7 +19,7 @@ sequenceDiagram
     Vigilo->>Vigilo: Canonicalize payloads and validate dataset
     Vigilo->>ControlDB: Validate profile executability
     ControlDB-->>Vigilo: Verified evaluator artifacts and ABI identities
-    Vigilo->>Vigilo: Hash scoring policy and immutable evaluator execution plan
+    Vigilo->>Vigilo: Hash scoring policy, evaluator execution plan, and per-shard chunk membership
 
     Vigilo->>Vigilo: Plan case blobs, dataset version, run, chunks, and shard assignments
     Vigilo->>ControlDB: Commit creating run, routes, placement ledger, and exact chunk plan
@@ -40,7 +40,7 @@ sequenceDiagram
     end
 
     alt Every placement is seeded
-        Vigilo->>ControlDB: Create dispatch cursors, set pending, and delete chunk plan
+        Vigilo->>ControlDB: Create dispatch cursors, set pending, and delete temporary chunk plan and retain membership hashes
         ControlDB-->>Vigilo: Run activated
         Vigilo-->>User: Pending run response
     else Creation remains retryable

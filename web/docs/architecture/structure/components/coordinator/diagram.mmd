@@ -18,12 +18,13 @@ flowchart TD
     ServiceLoop["fa:fa-rotate <br/> <b>Service Loop Runner</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Runs coordinator cycles on a fixed tick and handles shutdown.</small>"]:::component
     RuntimeContext["fa:fa-layer-group <br/> <b>Runtime Context Access</b> <br/> <small>[Component: Rust]</small> <br/> <small>Provides database and messaging clients for each cycle.</small>"]:::component
 
-    CycleOrchestrator["fa:fa-arrows-spin <br/> <b>Coordinator Cycle Orchestrator</b> <br/> <small>[Component: Rust]</small> <br/> <small>Runs creation recovery, lease recovery, dispatch, finalization, outbox publication, and timing logs in deterministic order.</small>"]:::component
+    CycleOrchestrator["fa:fa-arrows-spin <br/> <b>Coordinator Cycle Orchestrator</b> <br/> <small>[Component: Rust]</small> <br/> <small>Runs creation recovery, lease recovery, dispatch, receipt aggregation, finalization, outbox publication, and timing logs in deterministic order.</small>"]:::component
     CreationRecovery["fa:fa-database <br/> <b>Run Creation Recovery</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Claims stale creating runs, resumes idempotent placement seeds, and activates fully seeded runs.</small>"]:::component
     LeaseRecovery["fa:fa-life-ring <br/> <b>Chunk Lease Recovery</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Recovers expired chunk leases or marks poison chunks failed after the recovery limit.</small>"]:::component
     DispatchPass["fa:fa-list-check <br/> <b>Dispatch Pass</b> <br/> <small>[Component: Rust]</small> <br/> <small>Bounds chunk-window dispatch work and logs cursor backlog per coordinator cycle.</small>"]:::component
     DispatchWorkflow["fa:fa-share-nodes <br/> <b>Run Dispatch Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Claims a control cursor, prepares an execution snapshot, and inserts one run.chunk.ready outbox record per selected chunk.</small>"]:::component
 
+    ReceiptAggregation["<b>Receipt Aggregation</b><br/>Drains ready work in fair rounds with page and time budgets, bounded shard/database concurrency, and one atomic checkpoint per page."]:::component
     FinalizationPass["fa:fa-flag-checkered <br/> <b>Finalization Pass</b> <br/> <small>[Component: Rust]</small> <br/> <small>Bounds finalizable-run work and logs candidate backlog per coordinator cycle.</small>"]:::component
     FinalizeWorkflow["fa:fa-calculator <br/> <b>Run Finalization Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Merges bounded shard scorecards, applies run gates, and commits the scorecard, gate status, and completion event.</small>"]:::component
 
@@ -42,6 +43,7 @@ flowchart TD
         LeaseRecovery
         DispatchPass
         DispatchWorkflow
+        ReceiptAggregation
         FinalizationPass
         FinalizeWorkflow
         OutboxPublisher
@@ -69,15 +71,17 @@ flowchart TD
     CreationRecovery -->|"Claims control plans, seeds execution rows, and activates complete runs in <br> <small>[SQL/TCP]</small>"| Database
 
     CycleOrchestrator -->|"Then recovers"| LeaseRecovery
-    LeaseRecovery -->|"Resets expired leases, inserts recovery events, or fails exhausted chunks in <br> <small>[SQL/TCP]</small>"| Database
+    LeaseRecovery -->|"Resets expired leases, inserts recovery events, or settles exhausted chunks with receipts in <br> <small>[SQL/TCP]</small>"| Database
 
     CycleOrchestrator -->|"Then dispatches with"| DispatchPass
     DispatchPass -->|"Claims one dispatchable chunk window with"| DispatchWorkflow
     DispatchWorkflow -->|"Claims one control cursor, then updates execution-local chunks, snapshots, outbox records, and delivery rows in <br> <small>[SQL/TCP]</small>"| Database
 
+    CycleOrchestrator -->|"Then aggregates receipts with"| ReceiptAggregation
+    ReceiptAggregation -->|"Per-page claims, ownership fences, and resumable seals in"| Database
     CycleOrchestrator -->|"Then finalizes"| FinalizationPass
     FinalizationPass -->|"Claims and finalizes one terminal run at a time with"| FinalizeWorkflow
-    FinalizeWorkflow -->|"Reads one scorecard summary per shard and atomically stores the final scorecard and run outcome in <br> <small>[SQL/TCP]</small>"| Database
+    FinalizeWorkflow -->|"Reads summaries by database, validates exact shard seals, and atomically stores the final scorecard and run outcome in <br> <small>[SQL/TCP]</small>"| Database
 
     CycleOrchestrator -->|"Finally publishes with"| OutboxPublisher
     OutboxPublisher -->|"Claims delivery rows, marks ledgers, deletes completed rows, and reschedules retries in <br> <small>[SQL/TCP]</small>"| Database

@@ -22,6 +22,32 @@ struct PersistedRun {
 }
 
 #[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn finalization_rejects_missing_frozen_plan(pool: PgPool) {
+    let run = Uuid::now_v7();
+    let owner = Uuid::now_v7();
+    seed_run(&pool, run, Uuid::now_v7(), Uuid::now_v7(), "finalizing").await;
+    seed_dispatch_cursor(&pool, run, 0, "drained").await;
+    set_finalization_lease(&pool, run, owner, "60 seconds").await;
+    sqlx::query("UPDATE runs SET expected_execution_count=1,config_snapshot=config_snapshot-'settlement_plan' WHERE id=$1")
+        .bind(run).execute(&pool).await.unwrap();
+    assert!(
+        finalize_claimed_run_from_summaries(
+            &pool,
+            run,
+            owner,
+            "aggregation-hash",
+            &[terminal_summary(run, 0, "completed")]
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.completed'")
+        .bind(run).fetch_one(&pool).await.unwrap(), 0);
+}
+
+#[sqlx::test(migrations = "../migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx finalization tests"]
 async fn finalize_claimed_run_from_summaries_combines_terminal_shards(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -31,16 +57,21 @@ async fn finalize_claimed_run_from_summaries_combines_terminal_shards(pool: PgPo
 
     seed_run(&pool, run_id, dataset_id, dataset_version_id, "finalizing").await;
     set_finalization_lease(&pool, run_id, coordinator_id, "60 seconds").await;
-    seed_dispatch_cursor(&pool, run_id, 3, "open").await;
+    seed_dispatch_cursor(&pool, run_id, 3, "drained").await;
+    seed_dispatch_cursor(&pool, run_id, 7, "drained").await;
 
     let mut first_summary = terminal_summary(run_id, 3, "completed");
     first_summary.expected_execution_count = 2;
+    first_summary.execution_count = 2;
+    first_summary.aggregate_count = 2;
     first_summary.terminal_execution_count = 2;
     first_summary.passed_execution_count = 2;
 
     let mut second_summary = terminal_summary(run_id, 7, "failed");
     second_summary.failed_execution_count = 1;
 
+    sqlx::query("UPDATE runs SET config_snapshot=jsonb_set(config_snapshot,'{settlement_plan,shards,3,case_count}','2') WHERE id=$1")
+        .bind(run_id).execute(&pool).await.unwrap();
     let summaries = vec![first_summary, second_summary];
 
     let finalized = finalize_claimed_run_from_summaries(
@@ -182,6 +213,12 @@ async fn stale_or_expired_finalization_owner_cannot_commit(pool: PgPool) {
 
     seed_run(&pool, run_id, Uuid::now_v7(), Uuid::now_v7(), "finalizing").await;
     set_finalization_lease(&pool, run_id, current_coordinator_id, "60 seconds").await;
+    seed_dispatch_cursor(&pool, run_id, 0, "drained").await;
+    sqlx::query("UPDATE runs SET expected_execution_count = 1 WHERE id = $1")
+        .bind(run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let summaries = [terminal_summary(run_id, 0, "completed")];
 
     let finalized = finalize_claimed_run_from_summaries(
@@ -396,6 +433,10 @@ async fn seed_run(
 }
 
 async fn seed_dispatch_cursor(pool: &PgPool, run_id: Uuid, run_shard: i16, status: &str) {
+    sqlx::query("UPDATE runs SET config_snapshot=jsonb_set(config_snapshot,'{settlement_plan}',jsonb_build_object('version',1,'shards',COALESCE(config_snapshot #> '{settlement_plan,shards}','{}'::jsonb) || jsonb_build_object($2::text,jsonb_build_object('hash',$3::text,'case_count',1,'chunk_count',1)))) WHERE id=$1")
+        .bind(run_id).bind(run_shard.to_string()).bind(format!("planned-{run_shard}")).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO shard_placements (run_id,run_shard,database_alias,status) VALUES ($1,$2,'primary','active')")
+        .bind(run_id).bind(run_shard).execute(pool).await.unwrap();
     sqlx::query(
         r#"
             INSERT INTO run_shard_dispatch_cursors (run_id, run_shard, status)
@@ -430,4 +471,84 @@ async fn set_finalization_lease(
     .execute(pool)
     .await
     .unwrap();
+}
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL for finalization membership tests"]
+async fn finalization_requires_exact_control_membership_and_frozen_plan(pool: PgPool) {
+    let run = Uuid::now_v7();
+    let owner = Uuid::now_v7();
+    seed_run(&pool, run, Uuid::now_v7(), Uuid::now_v7(), "finalizing").await;
+    set_finalization_lease(&pool, run, owner, "60 seconds").await;
+    seed_dispatch_cursor(&pool, run, 0, "open").await;
+    sqlx::query("UPDATE runs SET expected_execution_count=1,config_snapshot=$2 WHERE id=$1")
+        .bind(run).bind(serde_json::json!({"settlement_plan":{"version":1,"shards":{"0":{"hash":"expected-plan","case_count":1,"chunk_count":1}}}}))
+        .execute(&pool).await.unwrap();
+    let mut summary = terminal_summary(run, 0, "completed");
+    summary.planned_chunk_hash = "expected-plan".into();
+    assert!(
+        finalize_claimed_run_from_summaries(
+            &pool,
+            run,
+            owner,
+            "aggregation-hash",
+            &[summary.clone()]
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    sqlx::query("UPDATE run_shard_dispatch_cursors SET status='drained' WHERE run_id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    summary.planned_chunk_hash = "changed-plan".into();
+    assert!(
+        finalize_claimed_run_from_summaries(
+            &pool,
+            run,
+            owner,
+            "aggregation-hash",
+            &[summary.clone()]
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    summary.planned_chunk_hash = "expected-plan".into();
+    sqlx::query("UPDATE shard_placements SET run_shard=1 WHERE run_id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        finalize_claimed_run_from_summaries(
+            &pool,
+            run,
+            owner,
+            "aggregation-hash",
+            &[summary.clone()]
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    sqlx::query("UPDATE shard_placements SET run_shard=0 WHERE run_id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Two owners attempting the same sealed report can emit only one event.
+    let first = [summary.clone()];
+    let second = [summary];
+    let (a, b) = tokio::join!(
+        finalize_claimed_run_from_summaries(&pool, run, owner, "aggregation-hash", &first),
+        finalize_claimed_run_from_summaries(&pool, run, owner, "aggregation-hash", &second)
+    );
+    assert_eq!(
+        usize::from(a.unwrap().is_some()) + usize::from(b.unwrap().is_some()),
+        1
+    );
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.completed'").bind(run).fetch_one(&pool).await.unwrap(),1);
 }

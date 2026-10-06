@@ -110,9 +110,9 @@ struct EvaluatorExecutionRecord {
 }
 
 #[derive(Debug, Clone)]
-struct CaseEvaluationPlan {
-    profile_group_id: String,
-    evaluator_bindings: Vec<EvaluatorBinding>,
+pub(super) struct CaseEvaluationPlan {
+    pub(super) profile_group_id: String,
+    pub(super) evaluator_bindings: Vec<EvaluatorBinding>,
     aggregation: AggregationSettings,
 }
 
@@ -719,7 +719,7 @@ fn equivalent_evaluator_binding(left: &EvaluatorBinding, right: &EvaluatorBindin
 /// case-group policies that selected the evaluator bindings. When multiple
 /// groups match the same case, non-overlapping or identical dimension policies
 /// are merged; conflicting policies are rejected rather than guessed.
-fn evaluation_plan_for_case(
+pub(super) fn evaluation_plan_for_case(
     profile: &RunProfile,
     case: &chunk_processing::WorkerCaseBatchItem,
 ) -> anyhow::Result<CaseEvaluationPlan> {

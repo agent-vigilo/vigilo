@@ -27,6 +27,8 @@ How `vigilo worker once` processes at most one chunk-ready broker message and ex
 
 <Mermaid value={decisionFlowDiagram} />
 
+Workers acknowledge terminal chunks after their local settlement receipt commits. Coordinator aggregation and run finalization proceed asynchronously; [committed partial evidence is retained](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
 ## Related
 
 - [Worker start flow](/docs/architecture/flows/worker/start/)

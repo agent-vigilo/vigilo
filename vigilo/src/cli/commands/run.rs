@@ -499,6 +499,11 @@ fn run_watch_payload_from_status(
                 "errored_execution_count": status.live_progress.errored_execution_count,
                 "skipped_execution_count": status.live_progress.skipped_execution_count,
                 "missing_aggregate_count": status.live_progress.missing_aggregate_count,
+                "missing_execution_count": status.live_progress.missing_execution_count,
+                "unresolved_execution_count": status.live_progress.unresolved_execution_count,
+                "planned_chunk_count": status.live_progress.planned_chunk_count,
+                "settled_chunk_count": status.live_progress.settled_chunk_count,
+                "sealed_shard_count": status.live_progress.sealed_shard_count,
                 "failed_chunk_count": status.live_progress.failed_chunk_count,
                 "cancelled_chunk_count": status.live_progress.cancelled_chunk_count,
             },
@@ -1046,6 +1051,7 @@ mod tests {
             average_score: Some(0.72),
             min_score: Some(0.2),
             max_score: Some(1.0),
+            ..Default::default()
         };
         let payload = results::run_results_payload(&run, &summary, None);
 
@@ -1132,6 +1138,7 @@ mod tests {
                 missing_aggregate_count: 0,
                 failed_chunk_count: 0,
                 cancelled_chunk_count: 1,
+                ..Default::default()
             },
             execution_route_count: 2,
             shard_summary_count: 1,
@@ -1180,6 +1187,7 @@ mod tests {
             average_score: Some(1.0),
             min_score: Some(1.0),
             max_score: Some(1.0),
+            ..Default::default()
         };
 
         let executions = vec![Execution {
@@ -1315,6 +1323,60 @@ mod tests {
                 scorecard: None,
             },
         );
+
+        assert_eq!(
+            payload["data"]["executions"][0]["aggregate_authoritative"],
+            true
+        );
+        assert_eq!(
+            payload["data"]["executions"][0]["attempts"][0]["evidence_state"],
+            "authoritative"
+        );
+        // Preserve all artifact rows, but label unfinished and superseded evidence.
+        for (execution_status, attempt_status, current, has_aggregate, expected) in [
+            ("running", "completed", true, true, "partial"),
+            ("failed", "running", true, true, "partial"),
+            ("failed", "cancelled", true, true, "partial"),
+            ("failed", "completed", true, false, "partial"),
+            ("failed", "stale", true, true, "stale"),
+            ("completed", "completed", false, true, "stale"),
+            ("failed", "failed_evaluation", true, true, "authoritative"),
+        ] {
+            let mut execution = executions[0].clone();
+            execution.status = execution_status.into();
+            if !current {
+                execution.current_attempt_id = Some(Uuid::now_v7());
+            }
+            let mut attempt = attempts[0].clone();
+            attempt.status = attempt_status.into();
+            let payload = export::run_export_payload(
+                &run,
+                &summary,
+                &export::RunExportRows {
+                    executions: &[execution],
+                    attempts: &[attempt],
+                    aggregates: if has_aggregate { &aggregates } else { &[] },
+                    evaluator_results: &evaluator_results,
+                    evaluator_diagnostics: &[],
+                    scorecard: None,
+                },
+            );
+            assert_eq!(
+                payload["data"]["executions"][0]["attempts"][0]["evidence_state"],
+                expected
+            );
+            assert_eq!(
+                payload["data"]["executions"][0]["aggregate_authoritative"],
+                expected == "authoritative"
+            );
+            assert_eq!(
+                payload["data"]["executions"][0]["attempts"][0]["evaluator_results"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                3
+            );
+        }
 
         assert_eq!(payload["meta"]["summary_only"], json!(false));
         assert_eq!(payload["meta"]["execution_count"], json!(1));

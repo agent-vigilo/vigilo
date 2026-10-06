@@ -33,6 +33,11 @@ pub(super) fn run_results_payload(
                 "execution_count": summary.execution_count,
                 "aggregate_count": summary.aggregate_count,
                 "missing_aggregate_count": summary.missing_aggregate_count,
+                "missing_execution_count": summary.missing_execution_count,
+                "unresolved_execution_count": summary.unresolved_execution_count,
+                "planned_chunk_count": summary.planned_chunk_count,
+                "settled_chunk_count": summary.settled_chunk_count,
+                "sealed_shard_count": summary.sealed_shard_count,
                 "status_counts": {
                     "passed": summary.passed_execution_count,
                     "failed": summary.failed_execution_count,

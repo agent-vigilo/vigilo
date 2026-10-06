@@ -62,6 +62,8 @@ END $$;
 
 CREATE INDEX idx_executions_run_status ON executions(run_id, run_shard, status);
 
+CREATE INDEX idx_executions_run_chunk ON executions(run_id, run_shard, chunk_id);
+
 CREATE INDEX idx_executions_run_current_attempt_id ON executions(run_id, run_shard, current_attempt_id);
 
 CREATE INDEX idx_executions_run_case_hash ON executions(run_id, run_shard, case_hash);
@@ -72,6 +74,9 @@ CREATE INDEX idx_executions_run_retry
 
 COMMENT ON TABLE executions IS
     'Represents a single evaluation of a dataset case against the target system. Each execution is part of a run, may have multiple attempts due to retries or failures, and is list partitioned by run_shard for chunk-local scale-out.';
+
+COMMENT ON INDEX idx_executions_run_chunk IS
+    'Locates all executions owned by one chunk for receipt totals and retirement of unfinished attempt authority.';
 
 COMMENT ON COLUMN executions.id IS
     'Unique identifier for the execution.';

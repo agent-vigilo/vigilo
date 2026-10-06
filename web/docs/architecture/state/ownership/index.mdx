@@ -38,7 +38,7 @@ generation, and opaque claim token in the target mutation transaction.
 - The create command owns input validation and the first durable `creating`
   transaction; other CLI commands cancel and read eligible state.
 - Coordinators own expired run-creation recovery, expired chunk lease recovery,
-  run dispatch, run finalization, and outbox publishing.
+  run dispatch, receipt aggregation, summary sealing, run finalization, and outbox publishing.
 - Workers own chunk leases, attempt leases, execution attempt allocation, retry scheduling, and execution/attempt terminal transitions. Chunk-local worker state is addressed by `run_id + run_shard + chunk_id`.
 - Chunk-ready messages carry the execution alias and write epoch. Workers use
   the hinted pool without a control lookup on the normal path; a rejected hint
@@ -50,6 +50,13 @@ generation, and opaque claim token in the target mutation transaction.
 - Shard-move takeover installs a higher generation under exclusive target
   admission. In-flight target writes finish before takeover; later writes from
   an older generation are rejected before mutation.
+
+Terminal producers share the chunk-before-attempt lock order with result writers.
+A chunk receipt and its terminal state commit together. Aggregators use a separate
+nonblocking transaction-scoped claim and shared movement admission for each page;
+workers never take the aggregation claim. Sealed summaries and chunk receipts are
+immutable. Movement copies receipts, consumption identities, and checkpoints so
+aggregation resumes at the new owner. See the [settlement contract](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
 ## Related
 

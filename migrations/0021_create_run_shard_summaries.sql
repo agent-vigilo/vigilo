@@ -19,10 +19,21 @@ CREATE TABLE run_shard_summaries (
     scorecard JSONB NOT NULL DEFAULT '{"version":1,"policy_hash":"","entries":[]}'::jsonb,
     failed_chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (failed_chunk_count >= 0),
     cancelled_chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (cancelled_chunk_count >= 0),
+    planned_chunk_hash TEXT NOT NULL DEFAULT '',
+    sealed BOOLEAN NOT NULL DEFAULT false,
+    planned_chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (planned_chunk_count >= 0),
+    settled_chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (settled_chunk_count >= 0),
+    missing_execution_count INTEGER NOT NULL DEFAULT 0 CHECK (missing_execution_count >= 0),
+    unresolved_execution_count INTEGER NOT NULL DEFAULT 0 CHECK (unresolved_execution_count >= 0),
+    aggregation_state JSONB,
     status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
+    CONSTRAINT chk_summary_seal CHECK (
+        NOT sealed OR (status IN ('completed', 'failed')
+            AND planned_chunk_count > 0 AND settled_chunk_count = planned_chunk_count)
+    ),
     CONSTRAINT pk_run_shard_summaries PRIMARY KEY (run_id, run_shard),
     CONSTRAINT fk_run_shard_summaries_snapshot
         FOREIGN KEY (run_id, run_shard)
@@ -40,13 +51,13 @@ COMMENT ON COLUMN run_shard_summaries.expected_execution_count IS
     'Expected execution count for this run shard, copied from the local run snapshot.';
 
 COMMENT ON COLUMN run_shard_summaries.execution_count IS
-    'Executions currently present for this run shard.';
+    'Executions represented by incorporated terminal chunk receipts.';
 
 COMMENT ON COLUMN run_shard_summaries.terminal_execution_count IS
-    'Executions in this run shard that reached a terminal execution_status.';
+    'Terminal executions represented by incorporated chunk receipts.';
 
 COMMENT ON COLUMN run_shard_summaries.aggregate_count IS
-    'Execution aggregate rows currently present for this run shard.';
+    'Authoritative terminal execution aggregates represented by incorporated chunk receipts.';
 
 COMMENT ON COLUMN run_shard_summaries.missing_aggregate_count IS
     'Terminal executions missing the current-attempt aggregate required for final scoring.';
@@ -66,5 +77,30 @@ COMMENT ON COLUMN run_shard_summaries.score_count IS
 COMMENT ON COLUMN run_shard_summaries.scorecard IS
     'Versioned bounded run-gate rollup computed from current authoritative attempts on this shard.';
 
+COMMENT ON COLUMN run_shard_summaries.aggregation_state IS
+    'Resumable canonical receipt-fold checkpoint; updated atomically with summary counters under a transaction-scoped coordinator claim.';
+COMMENT ON COLUMN run_shard_summaries.sealed IS
+    'True only after exact planned chunk membership has settled and been incorporated; execution coverage may remain incomplete.';
+COMMENT ON COLUMN run_shard_summaries.missing_execution_count IS
+    'Planned cases in incorporated terminal chunks for which no execution row was created.';
+COMMENT ON COLUMN run_shard_summaries.unresolved_execution_count IS
+    'Existing executions in incorporated terminal chunks without an authoritative terminal aggregate; retained partial/stale evidence is not scored.';
 COMMENT ON COLUMN run_shard_summaries.status IS
-    'Shard summary status: running while work remains, completed when all expected executions are terminal and passing coverage checks, failed when terminal failures or missing aggregates are present.';
+    'Running until every planned chunk receipt is incorporated; then completed or failed according to retained outcomes and operational completeness.';
+
+CREATE INDEX idx_pending_settlement_summaries
+    ON run_shard_summaries(updated_at, run_id, run_shard)
+    WHERE NOT sealed;
+
+CREATE FUNCTION protect_sealed_shard_summary() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.sealed AND NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'sealed shard summary is immutable for run %, shard %',
+            OLD.run_id, OLD.run_shard;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER protect_sealed_shard_summary
+BEFORE UPDATE ON run_shard_summaries
+FOR EACH ROW EXECUTE FUNCTION protect_sealed_shard_summary();

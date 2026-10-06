@@ -63,12 +63,13 @@ pub(super) async fn claim_chunk_for_processing_in_transaction(
     Ok(updated)
 }
 
+/// Completes an owned lease and returns its locked, persisted receipt identity.
 pub(super) async fn mark_chunk_completed(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chunk: &RunChunk,
     lease_token: Uuid,
-) -> anyhow::Result<u64> {
-    Ok(sqlx::query(
+) -> anyhow::Result<Option<(i32, i32, String)>> {
+    Ok(sqlx::query_as(
         r#"
         UPDATE run_chunks
         SET status = 'completed',
@@ -89,6 +90,7 @@ pub(super) async fn mark_chunk_completed(
               AND admission.write_epoch = $5
               AND admission.state IN ('open', 'draining')
           )
+        RETURNING ordinal_start, ordinal_end, status
         "#,
     )
     .bind(chunk.run_id)
@@ -96,17 +98,17 @@ pub(super) async fn mark_chunk_completed(
     .bind(chunk.id)
     .bind(lease_token)
     .bind(chunk.write_epoch)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected())
+    .fetch_optional(&mut **tx)
+    .await?)
 }
 
+/// Fails an owned lease and returns its locked, persisted receipt identity.
 pub(super) async fn mark_chunk_failed(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chunk: &RunChunk,
     lease_token: Uuid,
-) -> anyhow::Result<u64> {
-    Ok(sqlx::query(
+) -> anyhow::Result<Option<(i32, i32, String)>> {
+    Ok(sqlx::query_as(
         r#"
         UPDATE run_chunks
         SET status = 'failed',
@@ -119,15 +121,19 @@ pub(super) async fn mark_chunk_failed(
           AND status = 'leased'
           AND lease_token = $4::uuid
           AND leased_until >= now()
+          AND EXISTS (SELECT 1 FROM local_shard_admissions a
+              WHERE a.run_id = run_chunks.run_id AND a.run_shard = run_chunks.run_shard
+                AND a.write_epoch = $5 AND a.state IN ('open', 'draining'))
+        RETURNING ordinal_start, ordinal_end, status
         "#,
     )
     .bind(chunk.run_id)
     .bind(chunk.run_shard)
     .bind(chunk.id)
     .bind(lease_token)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected())
+    .bind(chunk.write_epoch)
+    .fetch_optional(&mut **tx)
+    .await?)
 }
 
 /// Extends a currently owned chunk lease and returns the updated lease token.
