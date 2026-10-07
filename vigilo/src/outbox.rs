@@ -80,6 +80,7 @@ enum OutboxPublishOutcome {
 /// implementation without changing claim/reschedule behavior.
 #[async_trait]
 pub(crate) trait EventPublisher: Send + Sync {
+    #[must_use = "the event is published only when this future is awaited"]
     async fn publish(&self, event: &OutboxEvent) -> anyhow::Result<()>;
 }
 
