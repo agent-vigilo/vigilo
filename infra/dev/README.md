@@ -16,7 +16,7 @@ does not create a second copy of `postgres`, `coordinator`, or `worker`.
 
 ## Service Groups
 
-- Infrastructure: `postgres`, `postgres-shard-001`, `rabbitmq`
+- Infrastructure: `postgres`, `postgres-shard-001`, `rabbitmq`, `ceph`
 - Bootstrap: `setup`, `setup-shard-001`, `configure-shard-001`
 - Runtime: `agent`, `coordinator`, `worker`
 
@@ -46,12 +46,12 @@ the local agent container.
 
 ## Single Database
 
-Start only Postgres and RabbitMQ:
+Start Postgres, RabbitMQ, and local S3 storage:
 
 ```bash
 docker compose --env-file infra/dev/.env.single \
   -f infra/dev/docker-compose.single.yml \
-  up -d postgres rabbitmq
+  up -d postgres rabbitmq ceph
 ```
 
 Run setup:
@@ -79,13 +79,13 @@ export MESSAGING_URL=amqp://guest:guest@localhost:5672
 
 ## Sharded Database
 
-Start only Postgres primary, Postgres shard, and RabbitMQ:
+Start Postgres primary, Postgres shard, RabbitMQ, and local S3 storage:
 
 ```bash
 docker compose --env-file infra/dev/.env.sharded \
   -f infra/dev/docker-compose.single.yml \
   -f infra/dev/docker-compose.sharded.yml \
-  up -d postgres postgres-shard-001 rabbitmq
+  up -d postgres postgres-shard-001 rabbitmq ceph
 ```
 
 Bootstrap both databases and register `shard_001` in the control DB:
@@ -144,6 +144,74 @@ cargo test -p vigilo --locked --test multi_database_e2e -- --nocapture
 The E2E harness uses a per-run `VIGILO_MQ_NAMESPACE`, so it does not consume
 messages left by a previous local runtime stack.
 
+## Local Object Storage
+
+Both topologies include [Ceph Object Gateway](https://docs.ceph.com/en/tentacle/radosgw/)
+backed by Ceph `v20.2.4`. A development image adds a pinned Python AWS SDK for S3
+bucket bootstrap, readiness, and infrastructure tests. The container supervises
+one monitor, manager, BlueStore OSD, and S3 gateway. It creates a local S3 user and
+the bucket configured by `DEV_S3_ACCESS_KEY_ID`, `DEV_S3_SECRET_ACCESS_KEY`, and
+`DEV_S3_BUCKET` in the selected env file. These are public development credentials.
+
+Storage uses an 8 GiB sparse BlueStore file in the `agent_vigilo_ceph_data` named
+volume; actual disk usage grows as data is written. No host disks, privileged
+container, or host Ceph installation are required. The OSD targets 1 GiB memory;
+allow approximately 4 GiB for the complete development service. The single-node,
+single-copy layout provides no storage redundancy and is not a production
+configuration. Ceph may report development-layout health warnings; Compose
+readiness uses the signed S3 bucket check.
+
+- Host endpoint: `http://localhost:3900` (override `DEV_S3_PORT` if occupied).
+- Container endpoint: `http://ceph:3900` on the Compose network.
+- Default bucket: `vigilo-dev`.
+- Clients use S3 path-style addressing and region `us-east-1`.
+
+Start just object storage, without databases, Vigilo bootstrap jobs, or an agent
+model (the first start builds the development image):
+
+```bash
+docker compose --env-file infra/dev/.env.single \
+  -f infra/dev/docker-compose.single.yml \
+  up -d ceph --build --wait --wait-timeout 240
+```
+
+The startup script uses a shared readiness deadline, reuses persisted cluster
+identity, and checks stored user credentials. A daemon exit stops its peers;
+shutdown waits for bounded cleanup. The healthcheck uses the AWS SDK to verify
+that the configured credentials can access the configured bucket over S3.
+
+Run the bounded S3 integration smoke suite:
+
+```bash
+docker compose --env-file infra/dev/.env.single \
+  -f infra/dev/docker-compose.single.yml \
+  exec -T ceph python3.12 /opt/vigilo-ceph/test-s3.py
+```
+
+With the AWS CLI installed, connect from the repository root:
+
+```bash
+. infra/dev/.env.single
+export AWS_ACCESS_KEY_ID="$DEV_S3_ACCESS_KEY_ID"
+export AWS_SECRET_ACCESS_KEY="$DEV_S3_SECRET_ACCESS_KEY"
+export AWS_DEFAULT_REGION=us-east-1
+
+aws --endpoint-url "http://localhost:$DEV_S3_PORT" \
+  s3api list-objects-v2 --bucket "$DEV_S3_BUCKET" --max-keys 10
+```
+
+Use `.env.sharded` and the sharded overlay instead for that topology. The selected
+env file supplies Compose settings; it does not automatically export credentials
+to host clients. Data survives container recreation and ordinary `down`;
+`down -v` deletes it. Changing credentials for an initialized volume fails
+startup rather than silently rotating the existing user's keys.
+
+Ceph is available for storage integration development. Vigilo currently stores
+case payloads in PostgreSQL and does not consume these S3 settings. Its runtime
+and database test tiers do not depend on Ceph. Local S3 tests do not prove AWS,
+Azure, or Google Cloud compatibility or cloud capacity; run the storage contract
+against each target provider before release. See the [provider-neutral storage contract](../README.md#object-storage-contract).
+
 ## Runtime Dependencies
 
 This command starts the runtime services:
@@ -191,7 +259,7 @@ docker compose --env-file infra/dev/.env.sharded \
   down --remove-orphans
 ```
 
-Add `-v` when you need fresh databases:
+Add `-v` when you need fresh databases, queues, and object storage:
 
 ```bash
 docker compose --env-file infra/dev/.env.sharded \

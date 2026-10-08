@@ -86,6 +86,11 @@ status = active
 All used run shards route to `primary` until another shard-capable placement is
 added and selected for new or moved run shards.
 
+The development Compose topologies also provide single-node Ceph Object Gateway storage for
+S3 integration testing. It is not part of the runtime routing path shown above:
+case payloads remain in PostgreSQL. See the [local stack guide](/docs/guides/getting-started/#start-the-local-stack)
+for endpoints and development credentials.
+
 ## Control And Execution Databases
 
 Agent Vigilo separates database responsibility from database location.

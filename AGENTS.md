@@ -15,6 +15,8 @@ This file records Vigilo-specific constraints that are easy to miss. A nearer
 
 ## Working Method
 
+- Leave all changes unstaged. Do not stage changes or create commits; the user
+  handles every commit manually.
 - Inspect the relevant contract, implementation, callers, and tests before editing;
   surface consequential ambiguity that the repository cannot resolve.
 - Define observable success and make the smallest compatible change. Match local
