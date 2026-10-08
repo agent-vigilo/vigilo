@@ -59,14 +59,16 @@ pub(crate) async fn settle_locked_chunk_with(
         matches!(disposition.as_str(), "completed" | "failed" | "cancelled"),
         "cannot settle open chunk {chunk_id}"
     );
-    let (snapshot, policy, receipt_matches): (Value, String, Option<bool>) = sqlx::query_as(
-        r#"
+    let (snapshot, policy, receipt_matches, _plan_mode): (Value, String, Option<bool>, String) =
+        sqlx::query_as(
+            r#"
         SELECT snapshot.config_snapshot, snapshot.aggregation_policy_hash,
             CASE WHEN receipt.chunk_id IS NOT NULL THEN
                 receipt.ordinal_start = $4 AND receipt.ordinal_end = $5
                 AND receipt.disposition = $6
                 AND receipt.aggregation_policy_hash = snapshot.aggregation_policy_hash
-            END AS receipt_matches
+            END AS receipt_matches,
+            set_config('plan_cache_mode', 'force_custom_plan', true)
         FROM run_snapshots snapshot
         LEFT JOIN run_chunk_settlements receipt
             ON receipt.run_id = snapshot.run_id
@@ -74,15 +76,19 @@ pub(crate) async fn settle_locked_chunk_with(
             AND receipt.chunk_id = $3
         WHERE snapshot.run_id = $1 AND snapshot.run_shard = $2
         "#,
-    )
-    .bind(run_id)
-    .bind(shard)
-    .bind(chunk_id)
-    .bind(start)
-    .bind(end)
-    .bind(&disposition)
-    .fetch_one(&mut **tx)
-    .await?;
+        )
+        // Generic plans retain every partition lock, including PostgreSQL's internal
+        // foreign-key queries. Keep this read custom and force custom plans for the
+        // remaining transaction; set_config(..., true) resets at commit or rollback.
+        .persistent(false)
+        .bind(run_id)
+        .bind(shard)
+        .bind(chunk_id)
+        .bind(start)
+        .bind(end)
+        .bind(&disposition)
+        .fetch_one(&mut **tx)
+        .await?;
     if let Some(matches) = receipt_matches {
         anyhow::ensure!(matches, "conflicting chunk settlement {chunk_id}");
         return Ok(());

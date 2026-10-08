@@ -8,10 +8,80 @@ use serde_json::{
     Value,
     json,
 };
-use sqlx::PgPool;
+use sqlx::{
+    Acquire,
+    PgPool,
+};
 use uuid::Uuid;
 
 use super::test_support::fixture;
+
+/// A chunk transaction must leave lock-table capacity for other shard workers.
+/// Repeating settlement also exercises PostgreSQL's prepared-plan selection.
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL for settlement relation-lock regression"]
+async fn settlement_relation_locks_stay_bounded_across_repeated_chunks(pool: PgPool) {
+    let (run, dataset) = fixture(&pool, 8).await;
+    let mut chunks = Vec::new();
+    for ordinal in 0..8 {
+        chunks.push(
+            super::test_support::ranged_chunk(&pool, run, dataset, ordinal, ordinal + 1, "failed")
+                .await,
+        );
+    }
+    let mut connection = pool.acquire().await.unwrap();
+    let original_mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    let mut tx = connection.begin().await.unwrap();
+    for chunk in &chunks {
+        super::settle_chunk_with(&mut tx, run, 4, *chunk)
+            .await
+            .unwrap();
+        let locks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='relation'",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert!(
+            locks <= 256,
+            "one shard's settlement held {locks} relation locks; unrelated partitions must not exhaust shared lock capacity"
+        );
+    }
+    tx.commit().await.unwrap();
+    let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        mode, original_mode,
+        "commit must restore the connection's planning policy"
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM run_chunk_settlements WHERE run_id=$1 AND run_shard=4",
+    )
+    .bind(run)
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(count, 8);
+
+    let mut tx = connection.begin().await.unwrap();
+    super::settle_chunk_with(&mut tx, run, 4, chunks[0])
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(
+        mode, original_mode,
+        "rollback must restore the connection's planning policy"
+    );
+}
 
 #[sqlx::test(migrations = "../migrations")]
 #[ignore = "requires PostgreSQL for chunk receipt access-work regression"]

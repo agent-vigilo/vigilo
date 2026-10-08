@@ -1,9 +1,11 @@
+-- Bind the shard explicitly across CTE and outer-join boundaries so custom plans
+-- prune unrelated partitions before acquiring their relation locks.
 -- Chunk-local receipt statistics. Planned cases supply gate denominators even when execution rows are absent.
 WITH snapshot AS (
     SELECT rs.run_id, rs.run_shard, rc.ordinal_end - rc.ordinal_start AS expected_execution_count,
            rs.aggregation_policy_hash, rs.config_snapshot
     FROM run_snapshots rs
-    JOIN run_chunks rc ON rc.run_id = rs.run_id AND rc.run_shard = rs.run_shard AND rc.id = $3
+    JOIN run_chunks rc ON rc.run_id = rs.run_id AND rc.run_shard = $2 AND rc.id = $3
     WHERE rs.run_id = $1::uuid AND rs.run_shard = $2
 ),
 execution_counts AS (
@@ -79,16 +81,16 @@ execution_counts AS (
     FROM snapshot
     LEFT JOIN executions e
       ON e.run_id = snapshot.run_id
-     AND e.run_shard = snapshot.run_shard
+     AND e.run_shard = $2
      AND e.chunk_id = $3
     LEFT JOIN execution_aggregates ea
       ON ea.run_id = e.run_id
-     AND ea.run_shard = e.run_shard
+     AND ea.run_shard = $2
      AND ea.execution_id = e.id
      AND ea.attempt_id = e.current_attempt_id
      AND e.status IN ('completed', 'failed', 'timed_out', 'cancelled')
      AND EXISTS (SELECT 1 FROM execution_attempts a
-         WHERE a.run_id = e.run_id AND a.run_shard = e.run_shard
+         WHERE a.run_id = e.run_id AND a.run_shard = $2
            AND a.execution_id = e.id AND a.id = e.current_attempt_id
            AND a.status IN ('completed', 'failed_agent_call', 'failed_evaluation', 'timed_out'))
     GROUP BY snapshot.run_id, snapshot.run_shard
@@ -103,7 +105,7 @@ chunk_counts AS (
     FROM snapshot
     LEFT JOIN run_chunks rc
       ON rc.run_id = snapshot.run_id
-     AND rc.run_shard = snapshot.run_shard
+     AND rc.run_shard = $2
      AND rc.id = $3
     GROUP BY snapshot.run_id, snapshot.run_shard
 ),
@@ -163,17 +165,17 @@ scorecard_targets AS (
     ) expected ON CARDINALITY(expected.binding_ids) > 0
     LEFT JOIN execution_aggregates ea
       ON ea.run_id = e.run_id
-     AND ea.run_shard = e.run_shard
+     AND ea.run_shard = $2
      AND ea.execution_id = e.id
      AND ea.attempt_id = e.current_attempt_id
      AND e.status IN ('completed', 'failed', 'timed_out', 'cancelled')
      AND EXISTS (SELECT 1 FROM execution_attempts a
-         WHERE a.run_id = e.run_id AND a.run_shard = e.run_shard
+         WHERE a.run_id = e.run_id AND a.run_shard = $2
            AND a.execution_id = e.id AND a.id = e.current_attempt_id
            AND a.status IN ('completed', 'failed_agent_call', 'failed_evaluation', 'timed_out'))
     LEFT JOIN evaluator_results er
       ON er.run_id = e.run_id
-     AND er.run_shard = e.run_shard
+     AND er.run_shard = $2
      AND er.execution_id = e.id
      AND er.attempt_id = e.current_attempt_id
      AND er.binding_id = ANY(expected.binding_ids)

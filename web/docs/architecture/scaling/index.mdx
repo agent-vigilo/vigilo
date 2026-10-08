@@ -226,6 +226,11 @@ Workers stay chunk-local:
 Finalization fans in:
 
 - Each execution placement maintains `run_shard_summaries`.
+- Settlement keeps query plans specific to the current shard, including
+  PostgreSQL's internal foreign-key checks, so unrelated partitions do not consume
+  shared relation-lock capacity. This transaction-local policy resets on commit
+  or rollback and adds no database query. It trades additional planning work for
+  bounded shard-local locking; no server-wide planning setting is required.
 - Coordinators consume bounded immutable receipt pages, publish provisional progress, and seal summaries only after a canonical fold validates exact planned membership. Every configured gate retains its planned denominator, including eligible cases without executions. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 - Aggregation selects shards with indexed pending receipts or a canonical fold
   ready to advance. Idle shards do not open aggregation transactions. Successful
