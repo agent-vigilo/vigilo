@@ -89,6 +89,9 @@ cargo test --workspace --locked --lib --bins
 
 ## Documentation
 
+- Do not reference names, identifiers, or content that exist only in Git-ignored
+  paths from non-ignored files. Documentation-site content must not reference
+  private plans; describe behavior directly and link to non-ignored sources.
 - Give every substantial Rust module `//!` documentation with a high-level
   overview of its system role, responsibilities, boundaries, main flow, and
   important ownership or correctness invariants.

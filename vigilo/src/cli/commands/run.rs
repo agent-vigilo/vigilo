@@ -85,6 +85,9 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+mod identity_tests;
+
 mod cancel;
 mod create;
 mod export;

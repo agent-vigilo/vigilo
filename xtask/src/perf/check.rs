@@ -603,7 +603,7 @@ fn validate_package_contents(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Keeps numbered implementation-roadmap labels confined to the ignored plan directory.
+/// Rejects numbered implementation-roadmap labels in repository source files.
 fn validate_no_roadmap_markers(root: &Path) -> Result<()> {
     let output = command_output(
         root,
@@ -621,7 +621,7 @@ fn validate_no_roadmap_markers(root: &Path) -> Result<()> {
         .filter(|path| !path.is_empty())
     {
         let relative = String::from_utf8_lossy(relative).replace('\\', "/");
-        if relative.starts_with(".agents/plans/") || !is_reviewed_text_path(Path::new(&relative)) {
+        if !is_reviewed_text_path(Path::new(&relative)) {
             continue;
         }
         let path = root.join(&relative);
@@ -631,7 +631,7 @@ fn validate_no_roadmap_markers(root: &Path) -> Result<()> {
         let content = fs::read_to_string(&path)
             .with_context(|| format!("read roadmap policy input {}", path.display()))?;
         if contains_numbered_roadmap_marker(&content) {
-            bail!("numbered implementation roadmap marker outside ignored plan: {relative}");
+            bail!("numbered implementation roadmap marker in repository source: {relative}");
         }
     }
     Ok(())
