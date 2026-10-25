@@ -29,6 +29,10 @@ By default, one worker process keeps one chunk in flight at a time. Set `--max-i
 
 Each worker process uses a stable `worker_id` for attempts it allocates. While processing a chunk, it renews the chunk lease and the running attempt leases; terminal transitions require the current attempt tokens and a live attempt lease for that worker.
 
+Workers retrieve assigned case batches through the
+[storage adapter](/docs/architecture/case-storage/), verify integrity and membership,
+and persist execution evidence in the routed database.
+
 ## Execution Flow
 
 <Mermaid value={executionFlowDiagram} />

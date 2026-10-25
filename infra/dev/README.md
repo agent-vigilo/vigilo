@@ -206,11 +206,11 @@ to host clients. Data survives container recreation and ordinary `down`;
 `down -v` deletes it. Changing credentials for an initialized volume fails
 startup rather than silently rotating the existing user's keys.
 
-Ceph is available for storage integration development. Vigilo currently stores
-case payloads in PostgreSQL and does not consume these S3 settings. Its runtime
-and database test tiers do not depend on Ceph. Local S3 tests do not prove AWS,
-Azure, or Google Cloud compatibility or cloud capacity; run the storage contract
-against each target provider before release. See the [provider-neutral storage contract](../README.md#object-storage-contract).
+Ceph supplies local object storage for immutable case batches and manifests.
+`DEV_S3_*` settings configure the development endpoint and its credentials.
+Each provider is validated through the same
+[storage contract](https://agentvigilo.com/docs/architecture/case-storage/);
+local smoke tests exercise the Ceph endpoint.
 
 ## Runtime Dependencies
 

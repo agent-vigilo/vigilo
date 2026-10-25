@@ -75,6 +75,7 @@ environment, and generated-artifact field reference.
 | Profile | Purpose |
 | --- | --- |
 | `developer-v1` | Fast local diagnosis of explicitly selected workloads using two balanced blocks. |
+| `ingestion-baseline-v1` | Initial run creation across case counts, payload sizes, and reuse of a finalized dataset, with physical row-write counters. |
 | `pr-v1` | Pull-request correctness checks and short, informative timing canaries. |
 | `reference-v1` | Broader repeatable comparison across the complete MVP workload matrix. |
 | `calibration-v1` | Stable no-change campaign used to measure canonical-host and harness noise. |
@@ -239,6 +240,42 @@ cargo perf diagnose --run-dir target/perf/runs/<component-run>
 
 `diagnostics.md` is investigative output and never changes a correctness,
 comparison, budget, or model verdict.
+
+## Ingestion Measurements
+
+`run.create-ingestion.v1` measures one initial `run create` invocation on a
+single PostgreSQL placement that owns both control and execution data. The
+`ingestion-baseline-v1` profile uses 1,000/10,000/50,000-case points, 1/16 KiB
+per-case padding, and fresh/reused datasets. Reuse preparation creates the first
+run before collector reset; only the second run is measured. Counts stay below
+the default 64,000-case creation handoff so all selected runs reach `pending`.
+
+```bash
+cargo perf run --profile ingestion-baseline-v1 \
+  --workload run.create-ingestion.v1 \
+  --bin target/perf/builds/current/release/vigilo \
+  --build-manifest target/perf/builds/current/build-manifest.json \
+  --output target/perf/runs/ingestion-measurement
+```
+
+On Linux, memory is sampled from the child's post-exec `/proc` high-water mark;
+`wait4` provides CPU and exit status. If RSS cannot be observed, it stays
+unavailable and workloads requiring it fail validation.
+
+The exact oracle checks actual case blobs, dataset membership, run-local case
+membership, payload bytes, chunk counts, completed creation, and zero premature
+execution/dispatch. External counters are captured before these oracle reads.
+`sql_rows` includes reads; `table_writes` reports physical inserted/updated/deleted
+tuples independently of bulk statement grouping. SQL calls include the collector's
+WAL-position query, and WAL includes server background work in the isolated
+PostgreSQL instance. Input padding is repeated `x`, so PostgreSQL compression can
+make WAL and database growth much smaller than submitted bytes. Retain this
+fixture characteristic when comparing results; it is not an incompressible-data
+capacity test. Reuse is data reuse in a freshly cloned sample database, not a
+promise of warm operating-system caches.
+
+Local runs provide informative evidence with raw samples and provenance. They do
+not establish fleet throughput or satisfy canonical publication requirements.
 
 ## Calibration And Baselines
 

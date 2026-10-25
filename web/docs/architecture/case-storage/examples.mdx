@@ -1,0 +1,32 @@
+---
+title: Case Storage Example
+sidebar_label: Example
+sidebar_position: 2
+description: Downloadable case-storage objects with verified references and dataset identities.
+keywords:
+  - Agent Vigilo case storage
+  - immutable datasets
+  - blob storage contracts
+---
+
+# Case Storage Example
+
+These files form a complete dataset using the
+[case-storage formats](/docs/architecture/case-storage/formats/).
+
+- [cases.jsonl](/examples/case-storage/cases.jsonl): header and three source-case records.
+- [source-fields.json](/examples/case-storage/source-fields.json): original top-level fields outside `cases`.
+- [batch-index.json](/examples/case-storage/batch-index.json): one leaf index pointing to the batch.
+- [dataset-manifest.json](/examples/case-storage/dataset-manifest.json): finalized-root shape with logical identities.
+- [dataset-reference.json](/examples/case-storage/dataset-reference.json): external reference to that root.
+
+The dataset comes from the
+[identity fixtures](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/cli/commands/run/fixtures/README.md).
+Every reference contains the actual object's byte count and independently
+calculated BLAKE3 digest. JSON objects have no trailing newline; JSONL does.
+The `development` alias and example keys are illustrative, without credentials
+or provider URLs. Storage configuration resolves the alias to a provider and bucket or container.
+
+Source cases preserve omitted fields and original tag ordering. Workers normalize
+and validate them before execution. The manifest records the dataset hash and dataset-version UUID separately
+from object-byte digests.

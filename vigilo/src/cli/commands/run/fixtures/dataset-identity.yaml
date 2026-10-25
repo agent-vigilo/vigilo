@@ -1,0 +1,21 @@
+cases:
+  - metadata:
+      a: trace
+      z: {a: null, z: 0}
+    tags: [zeta, alpha, alpha]
+    context: {a: 1, z: 2}
+    expected: {a: ok, z: true}
+    input:
+      a: {nil: null, number: 1.5}
+      z: [3, {a: "café 🌍", z: false}]
+    case_group: quality
+    task_type: classification
+    id: 018f1111-1111-7111-8111-111111111101
+  - input: {prompt: "line\nbreak"}
+    task_type: generation
+    id: 018f1111-1111-7111-8111-111111111102
+  - input: {prompt: "line\nbreak"}
+    task_type: generation
+    id: 018f1111-1111-7111-8111-111111111103
+dataset_version: release-α
+dataset_id: 018f1111-1111-7111-8111-111111111111

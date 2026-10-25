@@ -17,29 +17,19 @@ Set `VIGILO_AGENT_MODEL` in `infra/dev/.env.single` or
 
 ## Object Storage Contract
 
-The [application blob-storage contract](../vigilo/docs/blob-storage-contract.md)
+The [application blob-storage contract](https://agentvigilo.com/docs/architecture/case-storage/)
 is the source of truth for identity, durable references, bounded I/O, publication,
 and adapter acceptance.
 
-The intended storage boundary is provider-neutral object/blob storage, supporting
-AWS S3, Azure Blob Storage, Google Cloud Storage, and self-hosted services through
-provider adapters. Application workflows must depend on a small storage contract
-for bounded streaming uploads/downloads, required range reads, verified content
-identity, and explicit failure handling. Provider adapters own SDKs, authentication,
-endpoint and bucket/container configuration, and provider-specific behavior.
+Application storage is provider-neutral; adapters own provider APIs and connection
+settings. The adapter boundary targets S3-compatible storage, Azure Blob, and
+native Google Cloud Storage. Object storage holds immutable case batches and
+run plans; PostgreSQL holds coordination metadata and execution evidence.
 
-These services do not share one interchangeable API. Changing an S3 endpoint alone
-does not add Azure Blob or native Google Cloud Storage support. Each adapter must
-prove the required consistency, upload publication, retry, and integrity semantics
-through the same contract tests; unsupported requirements must fail closed.
-
-Ceph Object Gateway supplies the local S3-compatible endpoint. Its configuration and bootstrap
-belong only in local infrastructure; application workflows must not depend on
-Ceph-specific APIs or administration commands. Local infrastructure tests exercise
-S3 operations against Ceph; the application adapter remains planned. Run adapter
-contract tests against each target provider before claiming support. The
-object-storage integration is planned;
-Vigilo's case persistence currently uses PostgreSQL.
+Ceph Object Gateway supplies the local S3-compatible endpoint. Its bootstrap and
+administration belong in infrastructure. See [local object storage](dev/README.md#local-object-storage)
+for startup, credentials, and infrastructure smoke tests. Each application adapter
+requires its own real-backend acceptance before provider support is claimed.
 
 ### Self-Hosted Storage
 
@@ -47,8 +37,8 @@ Vigilo's case persistence currently uses PostgreSQL.
 S3-compatible interface over an open-source Ceph storage cluster. Ceph is the
 self-hosted storage target and supplies the development S3 endpoint. The bundled
 single-node configuration is for local integration testing; production deployment
-sizing, redundancy, and operations require separate validation. Both AWS S3 and
-Ceph use the S3-compatible adapter behind the provider-neutral storage contract.
+sizing, redundancy, and operations require separate validation. AWS S3 and Ceph use the S3-compatible adapter behind the provider-neutral
+storage contract.
 
 ## Performance Compose
 

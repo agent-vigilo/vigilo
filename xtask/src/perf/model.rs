@@ -446,6 +446,9 @@ pub struct ExternalMeasurements {
     pub sql_time_ms: Option<f64>,
     /// Rows observed by scoped PostgreSQL statements.
     pub sql_rows: Option<u64>,
+    /// Physical table-row mutation deltas, aggregated by public table across scoped databases.
+    #[serde(default)]
+    pub table_writes: BTreeMap<String, TableWrites>,
     /// WAL bytes generated during the sample.
     pub wal_bytes: Option<u64>,
     /// Change in durable PostgreSQL database bytes.
@@ -470,6 +473,17 @@ pub struct ExternalMeasurements {
     /// Highest-cost PostgreSQL statement fingerprints captured after timing ends.
     #[serde(default)]
     pub query_diagnostics: Vec<QueryDiagnostic>,
+}
+
+/// PostgreSQL tuple mutation counters, independent of statement batching and read rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableWrites {
+    /// Tuples inserted during the sample, including subsequently deleted tuples.
+    pub inserted: u64,
+    /// Tuple updates during the sample.
+    pub updated: u64,
+    /// Tuples deleted during the sample.
+    pub deleted: u64,
 }
 
 /// Non-gating PostgreSQL statement, buffer, and WAL diagnostics.

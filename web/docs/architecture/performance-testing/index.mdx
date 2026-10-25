@@ -140,6 +140,24 @@ requiring maximum scale. The current coordinator broker publish/confirm path is
 declared unbounded, so the checked-in planning example remains invalid until a
 separately tested production deadline and settlement contract exists.
 
+## Ingestion Measurements
+
+The `ingestion-baseline-v1` profile measures initial run creation with bounded
+case-count and payload-size sweeps plus dataset reuse. A reused-dataset sample
+prepares its first run before measurement, then measures only the second run.
+The exact oracle verifies stored payloads, membership, chunks, and zero premature
+execution or dispatch.
+
+Linux peak-memory samples use the child's post-exec high-water mark; inherited
+harness memory is excluded, and a missed measurement remains unavailable.
+
+Samples separate SQL calls and returned rows from physical table-row insert,
+update, and delete counts. Their external counters are captured before oracle
+reads. The single PostgreSQL placement owns both control and execution metadata;
+WAL is counted once for that server. Repeated-text input padding is compressible,
+so database growth and WAL are interpreted alongside submitted bytes. Local
+results are informative evidence rather than production capacity ratings.
+
 ## Stability And Recovery
 
 Each long-running <GlossaryTerm term="reliability-run">reliability run</GlossaryTerm>

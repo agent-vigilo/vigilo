@@ -363,7 +363,14 @@ impl WorkloadRunner {
         }
         let run_id = if shape.create_run {
             let identity = format!("{workload_id}:{tuple}");
-            let inputs = if workload_id == "shard.move.v1" {
+            let inputs = if workload_id == "run.create-ingestion.v1" {
+                self.inputs_with_payload(
+                    &identity,
+                    shape.cases,
+                    shape.evaluators,
+                    parse_ingestion_tuple(tuple)?.payload_bytes,
+                )?
+            } else if workload_id == "shard.move.v1" {
                 self.inputs_with_payload(
                     &identity,
                     shape.cases,
@@ -473,6 +480,45 @@ impl WorkloadRunner {
             Duration::from_millis(agent_delay_ms),
         )?;
         match workload_id {
+            "run.create-ingestion.v1" => {
+                let shape = parse_ingestion_tuple(tuple)?;
+                let inputs = self.inputs_with_payload(
+                    &format!("{workload_id}:{tuple}"),
+                    cases,
+                    evaluators,
+                    shape.payload_bytes,
+                )?;
+                let baseline = service.begin_measurement(scope)?;
+                let process = invoke(
+                    binary,
+                    create_args(&scope.database_url, &inputs)?,
+                    &env,
+                    watchdog,
+                    stdout_limit,
+                    stderr_limit,
+                )?;
+                product(require_success_ref(&process, "measured ingestion"))?;
+                // Freeze external counters before oracle reads pollute SQL observations.
+                let mut external =
+                    service.finish_measurement(scope, baseline, DurableCounts::new())?;
+                let run_id = product(parse_run_id(&process.stdout.text()))?;
+                external.durable_counts = product(oracle_ingestion(
+                    &scope.database_url,
+                    &run_id,
+                    shape,
+                    cases.div_ceil(fixture.coordinator.cases_per_chunk) as i64,
+                ))?;
+                product(verify_exact_observations(&external, exact))?;
+                if external.http_requests != Some(0)
+                    || external.queue_ready != Some(0)
+                    || external.queue_unacked != Some(0)
+                {
+                    return Err(product_failure(
+                        "ingestion unexpectedly executed or dispatched work",
+                    ));
+                }
+                Ok(WorkloadOutcome { process, external })
+            }
             "run.create.v1" | "run.create-scaling.v1" | "run.create-boundaries.v1" => {
                 let inputs = self.inputs(&format!("{workload_id}:{tuple}"), cases, evaluators)?;
                 let baseline = service.begin_measurement_with_databases(scope, placement_urls)?;
@@ -1579,6 +1625,14 @@ fn workload_shape(
             evaluators: 1,
             create_run: false,
         },
+        "run.create-ingestion.v1" => {
+            let shape = parse_ingestion_tuple(tuple)?;
+            WorkloadShape {
+                cases: shape.cases,
+                evaluators: 1,
+                create_run: shape.reuse,
+            }
+        }
         "run.create-scaling.v1" | "run.create-boundaries.v1" => WorkloadShape {
             cases: parse_single_dimension(tuple, "cases")?,
             evaluators: 1,
@@ -1690,6 +1744,41 @@ fn workload_shape(
         _ => bail!("unsupported service workload: {workload_id}"),
     };
     Ok(shape)
+}
+
+/// Bounded orthogonal input and reuse dimensions for initial creation measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IngestionShape {
+    cases: usize,
+    payload_bytes: usize,
+    reuse: bool,
+}
+
+/// Caps fixture allocation and stays within one default 64-page creation pass.
+fn parse_ingestion_tuple(tuple: &str) -> Result<IngestionShape> {
+    let parts = tuple.split('-').collect::<Vec<_>>();
+    if parts.len() != 5
+        || parts[0] != "cases"
+        || parts[2] != "payload"
+        || !matches!(parts[4], "fresh" | "reuse")
+    {
+        bail!("invalid ingestion tuple: {tuple}");
+    }
+    let cases = parts[1].parse::<usize>()?;
+    let payload_bytes = parts[3].parse::<usize>()?;
+    if !(1..=64_000).contains(&cases)
+        || !(1..=65_536).contains(&payload_bytes)
+        || cases
+            .checked_mul(payload_bytes)
+            .is_none_or(|bytes| bytes > 256 * 1024 * 1024)
+    {
+        bail!("ingestion fixture exceeds case, payload, or aggregate byte bounds");
+    }
+    Ok(IngestionShape {
+        cases,
+        payload_bytes,
+        reuse: parts[4] == "reuse",
+    })
 }
 
 fn parse_single_dimension(tuple: &str, dimension: &str) -> Result<usize> {
@@ -3344,6 +3433,61 @@ fn oracle_create(
     Ok(counts)
 }
 
+/// Proves real stored payload/membership counts and reuse without executing cases.
+fn oracle_ingestion(
+    database_url: &str,
+    run_id: &str,
+    shape: IngestionShape,
+    chunks: i64,
+) -> Result<DurableCounts> {
+    let mut counts = oracle_create(database_url, run_id, shape.cases, chunks)?;
+    let mut client = Client::connect(database_url, NoTls)?;
+    let cases = i64::try_from(shape.cases)?;
+    for (name, query, expected) in [
+        (
+            "total_runs",
+            "SELECT COUNT(*)::bigint FROM runs",
+            if shape.reuse { 2 } else { 1 },
+        ),
+        (
+            "dataset_versions",
+            "SELECT COUNT(*)::bigint FROM dataset_versions",
+            1,
+        ),
+        (
+            "case_blobs",
+            "SELECT COUNT(*)::bigint FROM case_blobs",
+            cases,
+        ),
+        (
+            "dataset_memberships",
+            "SELECT COUNT(*)::bigint FROM dataset_version_cases",
+            cases,
+        ),
+    ] {
+        let actual: i64 = client.query_one(query, &[])?.get(0);
+        counts.insert(name.into(), actual);
+        require_count(&counts, name, expected)?;
+    }
+    let memberships = scalar(
+        &mut client,
+        "SELECT COUNT(*)::bigint FROM run_shard_cases WHERE run_id = $1::text::uuid",
+        run_id,
+    )?;
+    counts.insert("run_case_memberships".into(), memberships);
+    require_count(&counts, "run_case_memberships", cases)?;
+    let matching: i64 = client.query_one(
+        "SELECT COUNT(*)::bigint FROM case_blobs WHERE input_payload->>'payload' = repeat('x', $1)",
+        &[&i32::try_from(shape.payload_bytes)?],
+    )?.get(0);
+    if matching != cases {
+        bail!("ingestion payload oracle found {matching} matching cases; expected {cases}");
+    }
+    require_count(&counts, "attempts", 0)?;
+    require_count(&counts, "evaluator_results", 0)?;
+    Ok(counts)
+}
+
 /// Validates both completed creation and the bounded recovery handoff at 64 pages.
 fn oracle_create_boundary(
     database_url: &str,
@@ -3906,6 +4050,30 @@ mod tests {
             .unwrap()
             .is_empty()
         );
+    }
+
+    #[test]
+    fn ingestion_tuples_bound_allocation_and_distinguish_dataset_reuse() {
+        for mode in ["fresh", "reuse"] {
+            let shape =
+                parse_ingestion_tuple(&format!("cases-10000-payload-16384-{mode}")).unwrap();
+            assert_eq!(shape.cases, 10_000);
+            assert_eq!(shape.payload_bytes, 16_384);
+            assert_eq!(shape.reuse, mode == "reuse");
+        }
+        assert!(parse_ingestion_tuple("cases-64000-payload-1-fresh").is_ok());
+        for tuple in [
+            "cases-0-payload-1-fresh",
+            "cases-64001-payload-1-fresh",
+            "cases-1-payload-0-fresh",
+            "cases-1-payload-65537-fresh",
+            "cases-64000-payload-65536-fresh",
+            "cases-1-payload-1-other",
+            "cases-1-payload-1-fresh-extra",
+            "cases-bad-payload-1-reuse",
+        ] {
+            assert!(parse_ingestion_tuple(tuple).is_err(), "{tuple}");
+        }
     }
 
     #[test]

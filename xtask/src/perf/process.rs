@@ -2,7 +2,9 @@
 //!
 //! The runner drains output concurrently, caps retained bytes, enforces a hard
 //! watchdog, and terminates the complete child tree. Unix process groups and
-//! Windows Job Objects provide platform-specific lifecycle ownership.
+//! Windows Job Objects provide platform-specific lifecycle ownership. Linux RSS
+//! uses sampled post-exec VmHWM; wait4 supplies CPU and exit status. Missing RSS
+//! remains unavailable rather than including the harness heap inherited at fork.
 
 use std::{
     io::{
@@ -442,7 +444,12 @@ impl ProcessGroup {
             }
             if waited == self.process_group_id {
                 let usage = unsafe { usage.assume_init() };
-                if let Some(peak_rss_bytes) = rusage_peak_rss_bytes(&usage) {
+                // Linux wait4 includes the forked harness's pre-exec address space.
+                // VmHWM is reset by exec, so only post-exec /proc observations
+                // measure the product. A missed short process stays unmeasured.
+                if !cfg!(target_os = "linux")
+                    && let Some(peak_rss_bytes) = rusage_peak_rss_bytes(&usage)
+                {
                     self.peak_rss_bytes = self.peak_rss_bytes.max(peak_rss_bytes);
                 }
                 self.completion_usage = Some(usage);
@@ -488,7 +495,7 @@ impl ProcessGroup {
             cpu_time_ns,
             peak_rss_bytes: (self.peak_rss_bytes > 0).then_some(self.peak_rss_bytes),
             source: if cfg!(target_os = "linux") {
-                "linux-proc-wait4-v2"
+                "linux-proc-hwm-wait4-cpu-v3"
             } else {
                 "unix-wait4-v2"
             },
@@ -781,6 +788,50 @@ mod tests {
         assert_eq!(positive_max_rss_kib_to_bytes(-1), None);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_peak_rss_excludes_the_harness_heap_before_exec() {
+        let padding = vec![1_u8; 192 * 1024 * 1024];
+        std::hint::black_box(&padding);
+        let (program, args) = fixture_command();
+        let outcome = execute(&ProcessSpec {
+            program: &program,
+            args: &args,
+            current_dir: None,
+            env: &[("VIGILO_PERF_TEST_DELAY_MS".into(), "50".into())],
+            timeout: Duration::from_secs(30),
+            stdout_limit: 64,
+            stderr_limit: 64,
+        })
+        .unwrap();
+        std::hint::black_box(&padding);
+        let peak = outcome
+            .peak_rss_bytes
+            .expect("observe post-exec child memory");
+        assert!(
+            peak < 128 * 1024 * 1024,
+            "child RSS includes the parent heap: {peak}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missed_post_exec_rss_is_unavailable_instead_of_inherited() {
+        let (program, args) = fixture_command();
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_process_group(&mut command);
+        let mut child = command.spawn().unwrap();
+        let mut group =
+            ProcessGroup::attach(&mut child, capture_resource_baseline().unwrap()).unwrap();
+        assert!(group.wait(&mut child).unwrap().success());
+        assert_eq!(group.resources().peak_rss_bytes, None);
+        assert!(group.resources().cpu_time_ns.is_some());
+    }
+
     #[test]
     fn output_is_drained_and_bounded() {
         let (program, args) = fixture_command();
@@ -810,7 +861,7 @@ mod tests {
             program: &program,
             args: &args,
             current_dir: None,
-            env: &[],
+            env: &[("VIGILO_PERF_TEST_DELAY_MS".into(), "50".into())],
             timeout: Duration::from_secs(30),
             stdout_limit: 64,
             stderr_limit: 64,

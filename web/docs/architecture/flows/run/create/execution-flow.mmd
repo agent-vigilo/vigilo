@@ -11,6 +11,7 @@ sequenceDiagram
     participant Vigilo
     participant ControlDB as Control DB
     participant ExecutionDB as Execution DBs
+    participant Objects as Object Storage
 
     User->>Vigilo: vigilo run create
     activate Vigilo
@@ -21,12 +22,20 @@ sequenceDiagram
     ControlDB-->>Vigilo: Verified evaluator artifacts and ABI identities
     Vigilo->>Vigilo: Hash scoring policy, evaluator execution plan, and per-shard chunk membership
 
-    Vigilo->>Vigilo: Plan case blobs, dataset version, run, chunks, and shard assignments
-    Vigilo->>ControlDB: Commit creating run, routes, placement ledger, and exact chunk plan
+    Vigilo->>ControlDB: Claim durable dataset upload identity
+    loop Bounded case batches
+        Vigilo->>Objects: Conditionally create and verify immutable batch
+        Vigilo->>ControlDB: Acknowledge verified upload progress
+    end
+    Vigilo->>Objects: Create and verify dataset indexes and manifest
+    Vigilo->>ControlDB: Finalize dataset reference under upload lease
+    Vigilo->>Vigilo: Plan run, chunks, and shard assignments from finalized dataset
+    Vigilo->>Objects: Create and verify immutable run-plan objects
+    Vigilo->>ControlDB: Commit creating run, routes, placement ledger, and verified plan reference
     ControlDB-->>Vigilo: Durable run id and creation lease
 
     loop Each pending execution placement
-        Vigilo->>ExecutionDB: Idempotently store prerequisites, hashed run snapshot, and owned chunks
+        Vigilo->>ExecutionDB: Idempotently store prerequisites, hashed run snapshot, and owned chunks with blob references
         alt Seed transaction committed
             ExecutionDB-->>Vigilo: Placement seeded
             Vigilo->>ControlDB: Mark placement seeded
@@ -40,7 +49,7 @@ sequenceDiagram
     end
 
     alt Every placement is seeded
-        Vigilo->>ControlDB: Create dispatch cursors, set pending, and delete temporary chunk plan and retain membership hashes
+        Vigilo->>ControlDB: Create dispatch cursors, set pending, and retain immutable plan reference and membership hashes
         ControlDB-->>Vigilo: Run activated
         Vigilo-->>User: Pending run response
     else Creation remains retryable

@@ -13,13 +13,15 @@ flowchart TD
     Parse{Profile and dataset schemas valid?}
     Cases{Dataset has cases?}
     Executable{Profile executable for dataset?}
-    Plan[Plan case, dataset, run, chunks, and shard assignments]
-    Persist[Commit creating run, frozen membership hashes, ledger, and chunk plan]
+    Dataset[Upload and verify batches, indexes, and finalized dataset manifest]
+    DatasetReady{Dataset finalized?}
+    Plan[Build and verify immutable run plan and shard assignments]
+    Persist[Commit creating run, frozen membership hashes, ledger, and verified plan reference]
     Placement{Pending placement remains?}
     Seed[Idempotently seed the placement]
     SeedResult{Seed result?}
     Record[Record placement seeded]
-    Activate[Create dispatch cursors, set pending, and remove temporary plan; retain membership hashes]
+    Activate[Create dispatch cursors, set pending, and retain plan reference and membership hashes]
     Payload[Build run creation payload]
 
     Success([Success response])
@@ -45,7 +47,10 @@ flowchart TD
     Cases -- Yes --> Executable
 
     Executable -- No --> ExecutabilityFail
-    Executable -- Yes --> Plan
+    Executable -- Yes --> Dataset
+    Dataset --> DatasetReady
+    DatasetReady -- Yes --> Plan
+    DatasetReady -- No --> PersistenceFail
 
     Plan --> Persist
     Plan -. Planning fails .-> PlanningFail
@@ -66,6 +71,6 @@ flowchart TD
 
     class Start command
     class Success success
-    class Sources,Parse,Cases,Executable,Plan,Persist,Placement,Seed,SeedResult,Record,Activate,Payload system
+    class Sources,Parse,Cases,Executable,Dataset,DatasetReady,Plan,Persist,Placement,Seed,SeedResult,Record,Activate,Payload system
     class Creating component
     class SourceFail,ParseFail,EmptyDatasetFail,ExecutabilityFail,PlanningFail,PersistenceFail,CreationFailed error

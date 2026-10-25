@@ -25,6 +25,10 @@ RabbitMQ <GlossaryTerm term="broker">broker</GlossaryTerm>, and the external
 
 ## Notes
 
+- Object storage holds immutable case batches and manifests. The CLI, coordinator,
+  and worker access them through provider-neutral adapters; PostgreSQL retains
+  coordination metadata and execution evidence.
+
 - The CLI, coordinator, and worker are modes of the same Rust application but
   run as separate processes in distributed deployments.
 - Database placements hold durable authority. RabbitMQ carries at-least-once

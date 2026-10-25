@@ -1,0 +1,8 @@
+{
+  "label": "Case Storage",
+  "position": 8,
+  "link": {
+    "type": "doc",
+    "id": "architecture/case-storage/index"
+  }
+}

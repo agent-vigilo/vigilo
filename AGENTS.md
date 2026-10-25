@@ -89,6 +89,10 @@ cargo test --workspace --locked --lib --bins
 
 ## Documentation
 
+- Before v1, public documentation describes one greenfield architecture in present
+  tense. Keep implementation progress and future work in private planning files;
+  do not mix current/target states or promise backward compatibility, upgrades,
+  or migration support unless explicitly requested.
 - Do not reference names, identifiers, or content that exist only in Git-ignored
   paths from non-ignored files. Documentation-site content must not reference
   private plans; describe behavior directly and link to non-ignored sources.

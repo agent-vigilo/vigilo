@@ -1,0 +1,57 @@
+schema_id = "profile/v1"
+id = "ingestion-baseline-v1"
+description = "Bounded case-count, input-byte, and dataset-reuse creation measurements."
+requires_workload_selection = true
+campaign_cap_secs = 3600
+schedule_seed = 20261024
+max_artifact_bytes = 1073741824
+max_stdout_bytes = 262144
+max_stderr_bytes = 262144
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-1000-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-10000-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-50000-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-1000-payload-16384-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-10000-payload-16384-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-10000-payload-1024-reuse"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-50000-payload-1024-reuse"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-10000-payload-16384-reuse"
+blocks = 2
+timing = "informative"

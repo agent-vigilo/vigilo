@@ -72,6 +72,7 @@ use super::{
     model::{
         ExternalMeasurements,
         QueryDiagnostic,
+        TableWrites,
     },
 };
 
@@ -112,9 +113,23 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
         );
     }
     let mut client = PgClient::connect(&scope.database_url, NoTls)?;
+    client.batch_execute("CREATE TABLE collector_rows (id integer PRIMARY KEY); INSERT INTO collector_rows VALUES (1); UPDATE collector_rows SET id = 2; DELETE FROM collector_rows; SELECT pg_stat_force_next_flush()")?;
     client.simple_query("SELECT 42")?;
+    drop(client);
     let first_measurement =
         harness.finish_measurement(&scope, first, BTreeMap::from([("sentinel".into(), 1)]))?;
+    if first_measurement.table_writes.get("collector_rows")
+        != Some(&TableWrites {
+            inserted: 1,
+            updated: 1,
+            deleted: 1,
+        })
+    {
+        bail!(
+            "table mutation sentinel differs: {:?}",
+            first_measurement.table_writes
+        );
+    }
     if first_measurement.http_requests != Some(1)
         || first_measurement.durable_counts.get("sentinel") != Some(&1)
         || !first_measurement
@@ -127,6 +142,9 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
 
     let second = harness.begin_measurement(&scope)?;
     let second_measurement = harness.finish_measurement(&scope, second, BTreeMap::new())?;
+    if second_measurement.table_writes.get("collector_rows") != Some(&TableWrites::default()) {
+        bail!("table mutation delta retained prior sample writes");
+    }
     if second_measurement.http_requests != Some(0)
         || second_measurement.durable_counts.contains_key("sentinel")
     {
@@ -177,6 +195,7 @@ pub struct MeasurementBaseline {
 struct DatabaseBaseline {
     url: String,
     database_bytes: i64,
+    table_writes: BTreeMap<String, TableWrites>,
 }
 
 #[derive(Default)]
@@ -518,10 +537,12 @@ impl ServiceHarness {
             let database_bytes: i64 = client
                 .query_one("SELECT pg_database_size(current_database())", &[])?
                 .get(0);
+            let table_writes = table_write_counts(&mut client)?;
             let _ = client.simple_query("SELECT pg_stat_statements_reset()")?;
             databases.push(DatabaseBaseline {
                 url,
                 database_bytes,
+                table_writes,
             });
         }
         let service_sampler = ServiceSampler::start(&self.root, self.container_ids())?;
@@ -549,6 +570,7 @@ impl ServiceHarness {
         let mut sql_time_ms = 0.0_f64;
         let mut sql_rows = 0_u64;
         let mut database_bytes_delta = 0_i64;
+        let mut table_writes = BTreeMap::<String, TableWrites>::new();
         let mut diagnostics = Vec::new();
         for database in baseline.databases {
             let mut client = PgClient::connect(&database.url, NoTls)?;
@@ -573,6 +595,22 @@ impl ServiceHarness {
                 .get(0);
             database_bytes_delta = database_bytes_delta
                 .saturating_add(database_bytes.saturating_sub(database.database_bytes));
+            for (table, current) in table_write_counts(&mut client)? {
+                let delta = table_write_delta(&current, database.table_writes.get(&table))?;
+                let total = table_writes.entry(table).or_default();
+                total.inserted = total
+                    .inserted
+                    .checked_add(delta.inserted)
+                    .context("insert counter overflow")?;
+                total.updated = total
+                    .updated
+                    .checked_add(delta.updated)
+                    .context("update counter overflow")?;
+                total.deleted = total
+                    .deleted
+                    .checked_add(delta.deleted)
+                    .context("delete counter overflow")?;
+            }
         }
         diagnostics.sort_by(|left, right| {
             right
@@ -587,6 +625,7 @@ impl ServiceHarness {
             sql_calls: Some(sql_calls),
             sql_time_ms: Some(sql_time_ms),
             sql_rows: Some(sql_rows),
+            table_writes,
             wal_bytes: Some(nonnegative_u64(wal_bytes)?),
             database_bytes_delta: Some(database_bytes_delta),
             http_requests: Some(http.requests),
@@ -958,6 +997,41 @@ fn worker_queue_metrics(queues: &[Value]) -> (u64, u64, u64) {
                 ),
             )
         })
+}
+
+/// Reads all public-table counters after the measured child has closed its connections.
+///
+/// PostgreSQL flushes backend counters at connection exit. Fresh collector
+/// transactions avoid retaining a statistics snapshot from baseline collection.
+fn table_write_counts(client: &mut PgClient) -> Result<BTreeMap<String, TableWrites>> {
+    client.query(
+        "SELECT relname, n_tup_ins, n_tup_upd, n_tup_del FROM pg_stat_user_tables WHERE schemaname = 'public' ORDER BY relname",
+        &[],
+    )?.into_iter().map(|row| Ok((row.get(0), TableWrites {
+        inserted: nonnegative_u64(row.get(1))?,
+        updated: nonnegative_u64(row.get(2))?,
+        deleted: nonnegative_u64(row.get(3))?,
+    }))).collect()
+}
+
+/// Rejects resets rather than silently reporting an invalid zero-write sample.
+fn table_write_delta(current: &TableWrites, baseline: Option<&TableWrites>) -> Result<TableWrites> {
+    let zero = TableWrites::default();
+    let baseline = baseline.unwrap_or(&zero);
+    Ok(TableWrites {
+        inserted: current
+            .inserted
+            .checked_sub(baseline.inserted)
+            .context("insert counters reset during sample")?,
+        updated: current
+            .updated
+            .checked_sub(baseline.updated)
+            .context("update counters reset during sample")?,
+        deleted: current
+            .deleted
+            .checked_sub(baseline.deleted)
+            .context("delete counters reset during sample")?,
+    })
 }
 
 /// Captures normalized statement, planning, buffer, and WAL evidence after timing.
@@ -1781,6 +1855,34 @@ fn command_output_owned(root: &Path, program: &str, args: &[String]) -> Result<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn table_write_counters_distinguish_mutations_and_reject_resets() {
+        let current = super::TableWrites {
+            inserted: 8,
+            updated: 5,
+            deleted: 3,
+        };
+        let baseline = super::TableWrites {
+            inserted: 7,
+            updated: 3,
+            deleted: 0,
+        };
+        assert_eq!(
+            super::table_write_delta(&current, Some(&baseline)).unwrap(),
+            super::TableWrites {
+                inserted: 1,
+                updated: 2,
+                deleted: 3
+            }
+        );
+        assert_eq!(super::table_write_delta(&current, None).unwrap(), current);
+        assert_eq!(
+            super::table_write_delta(&current, Some(&current)).unwrap(),
+            super::TableWrites::default()
+        );
+        assert!(super::table_write_delta(&baseline, Some(&current)).is_err());
+    }
+
     use super::*;
 
     #[test]

@@ -1,0 +1,183 @@
+---
+title: Case Storage
+sidebar_label: Case Storage
+sidebar_position: 0
+description: Provider-neutral contracts for case storage, identity, integrity, bounded I/O, and publication.
+keywords:
+  - Agent Vigilo case storage
+  - immutable datasets
+  - blob storage contracts
+---
+
+import Mermaid from '@theme/Mermaid';
+import storageBoundaryDiagram from './diagram.mmd';
+
+# Case Storage
+
+Blob-backed case storage separates immutable case payloads and run plans from
+run coordination. Object storage holds case batches, indexes, and manifests;
+PostgreSQL retains run identity, progress, and settlement metadata. Provider
+adapters isolate storage APIs from application workflows.
+
+The [dataset input format](/docs/configuration/dataset-format) defines submitted
+cases. Storage encodings preserve source fields and logical identity while
+bounding object size, memory, and remote work. PostgreSQL owns run coordination
+and execution evidence; immutable case data and run plans live in object storage.
+
+## Storage Boundary
+
+<Mermaid value={storageBoundaryDiagram} />
+
+See [Formats and Budgets](/docs/architecture/case-storage/formats/) for wire
+layouts and [Example](/docs/architecture/case-storage/examples/) for downloadable
+objects with exact sizes and hashes.
+
+## Ownership and Identity
+
+Application code owns case validation, identity, batching, manifest publication,
+and run settlement. Adapters own remote object I/O, credentials, SDKs, and mapping
+provider failures. They must not depend on evaluator, database, or queue policy.
+S3-compatible endpoints share an adapter. Native Azure Blob and Google Cloud
+Storage APIs require provider-specific adapters behind the same contract.
+
+The executable identity oracle is
+[`identity_tests.rs`](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/cli/commands/run/identity_tests.rs), with independently
+calculated [golden fixtures](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/cli/commands/run/fixtures/README.md). Keep these
+three identities distinct:
+
+| Identity | Definition |
+| --- | --- |
+| Submitted dataset hash | Lowercase hexadecimal BLAKE3 of compact UTF-8 JSON of the parsed input, with recursively sorted object keys. Array order and field presence remain significant. |
+| Case hash | Lowercase hexadecimal BLAKE3 of compact JSON containing `task_type`, `case_group`, `input`, `expected_output`, `context`, `tags`, and `metadata`, with recursively sorted object keys. Missing optional outputs/context/group become null; missing tags/metadata become empty. Tags sort lexicographically and retain duplicates. Case ID is excluded. |
+| Dataset-version UUID | BLAKE3 of compact JSON containing dataset ID, optional dataset version, and ordered membership (`case_id`, zero-based `case_ordinal`, `case_hash`). Use the first 16 digest bytes, set the UUID version nibble to 8, and set the RFC variant bits. |
+
+Equivalent YAML/JSON inputs have the same identities when their parsed values
+are equal. Omitted optional fields and explicit defaults can have equal case
+hashes and version UUIDs while their submitted dataset hashes differ. Reordered
+cases change membership identity. Different case IDs can reference equal content.
+Do not silently replace source identity with a hash of the typed/defaulted model.
+
+Object integrity is separate: use BLAKE3 over the exact stored bytes. Record the
+encoding and hash scheme explicitly; use `blake3-256` for byte integrity. An
+adapter must never treat an ETag or provider checksum as this content identity.
+The [formats and budgets](/docs/architecture/case-storage/formats/) define case
+batches, paged indexes, dataset/run manifests, and resource limits. Logical
+identity and object-byte integrity are validated independently.
+
+## Durable References
+
+A durable object reference contains only:
+
+- A storage owner alias resolved through configuration, and a logical object key.
+- An encoding/schema identifier, hash scheme, expected digest, and exact byte count.
+- A provider revision/version/generation when immutability depends on pinning one.
+
+Aliases identify an owner; changing the default owner does not reinterpret published
+references. Keys must be validated as nonempty logical keys within the adapter's
+published byte limit. They are not file paths or URLs. Reject unknown encoding or
+hash schemes, malformed digests, invalid lengths, unknown owners, and missing
+required revision information before remote work. Credentials and expiring signed
+URLs never appear in references, manifests, SQL catalog fields, or queue messages.
+Provider revision tokens are opaque and must not be interpreted by consumers.
+
+A published dataset reference points to a verified finalized manifest. The
+manifest identifies dataset membership and bounded batch objects. Run plans
+identify assigned ordinal ranges, profile/policy identity, placement coverage,
+and expected settlement counts. The control database retains compact catalog,
+publication/progress, and coordination records. Complete case payloads and
+per-case distribution lists belong in blobs. Batch metadata must be paged or
+indexed so a root manifest cannot grow into a full-memory per-case listing.
+
+## Minimal Operations
+
+Every operation takes an explicit finite request budget and supports cancellation.
+Streams must apply backpressure; SDK types must not cross this boundary.
+
+| Operation | Required behavior |
+| --- | --- |
+| Create immutable object | Consume a bounded byte stream, validate exact byte count and digest, and expose a completed object only after successful completion. Return a verified reference. Never overwrite published content. |
+| Read verified object | Resolve the recorded owner/revision and consume a bounded stream. Verify exact length and digest. Missing, truncated, altered, or excessive bytes cannot be reported as success. |
+| Abort an owned upload | Cancel remote work and release stream resources. Record unfinished multipart upload IDs for exact cleanup. Successful abort is idempotent; an uncertain abort remains cleanup work. |
+
+Object metadata requests may support these operations; do not issue one HEAD per
+case. Readers retrieve complete bounded objects and verify their exact byte
+count and digest before admitting cases. Cleanup operates on recorded object
+keys and upload IDs; it does not enumerate or delete an entire bucket.
+
+Each upload/download checks a configured positive maximum object size and buffer
+size; each caller supplies positive concurrency, maximum attempts, and a finite
+operation deadline. The adapter must reject missing/zero/unusable limits rather
+than running unbounded. Buffering must be independent of dataset size and bounded
+per active stream; concurrency bounds multiply that budget. Validate lengths,
+ordinal ranges, offsets, and counters with checked conversions before I/O or
+publication. Ordinals and counters use the limits in
+[Formats and Budgets](/docs/architecture/case-storage/formats/). Per-process
+reservations account for concurrent streams, verified batches, and spool files.
+
+Workers may not execute unverified streamed records. Verify the complete assigned
+batch before admitting its cases, using a bounded batch buffer or bounded disk
+spool. Only verified immutable content may enter a bounded cache. Hash validation
+must be followed by schema, case, ordinal, membership, and policy validation.
+
+## Immutability and Publication
+
+Objects use atomic conditional creation at unique upload-attempt keys, followed
+by lease-fenced manifest publication. An existence check followed by ordinary
+PUT is insufficient. The adapter declares and tests its publication strategy;
+missing capabilities fail closed before the workflow accepts uploads.
+
+A replay succeeds only after exact stored content is verified to match the
+reference. Different content at an existing immutable key is a conflict. A
+successful object create is visible to a following read of that same reference;
+incomplete uploads never become finalized references. Unknown outcomes after a
+lost response require verification or reconciliation, not blind overwrite.
+
+Ingestion has staging, finalizing, finalized, and aborted/expired states. These
+are workflow states, not provider APIs. A page is acknowledged only after its
+object is complete and verified. An acknowledged page has an ordinal range and
+content identity; replayed content must match. Finalization verifies all objects,
+unique case IDs, contiguous membership, and supported ordinal/count bounds in
+bounded passes. Lease/generation fencing prevents an expired publisher from
+activating a manifest. Run creation accepts finalized references only.
+
+A crash after object completion but before SQL acknowledgement resumes by
+verifying the same attempt object. A crash during finalization resumes under
+current publication authority. Orphans and unfinished uploads remain explicitly
+owned cleanup work. Shared published objects cannot be deleted as upload cleanup.
+Exact cleanup uses recorded keys/upload IDs, never a bucket-wide sweep.
+
+## Errors and Retry Ownership
+
+Errors retain operation and non-secret owner/key context plus the source cause.
+Use these semantic categories independently of provider status codes:
+
+| Category | Caller action |
+| --- | --- |
+| Invalid reference/limits, unknown schema or owner | Reject before I/O; no retry. |
+| Missing object | Fail the read; no generic retry. Reconcile an uncertain create only within its publication budget. |
+| Unauthorized | Fail; no automatic retry. |
+| Conflict | Verify an exact replay or fail; never overwrite. |
+| Corrupt/truncated content or invalid membership | Fail closed; never expose as verified data. |
+| Unsupported capability | Reject the configuration/path; no fallback with weaker guarantees. |
+| Transient service failure or throttling | Retry only inside the caller's attempts/deadline, with bounded backoff. |
+| Timeout/unknown write outcome | Preserve uncertainty; reconcile the exact attempt before retrying publication. |
+| Cancelled | Stop admission and remote work; release streams and preserve cleanup ownership. |
+
+One layer owns retries. SDK retries count toward the same attempt/deadline budget;
+SDK and caller retry loops must not multiply attempts. Cancellation and deadline
+expiry stop backoff and further requests. Diagnostics must exclude credentials,
+signed query strings, and case payloads. Measure object requests, bytes, latency,
+and retries alongside SQL statements, inserted rows, and WAL; moving bytes must
+not hide costs in another service.
+
+## Validation
+
+Object reads validate schema, byte count, content hash, and recorded ownership.
+Dataset publication additionally validates unique case IDs, contiguous ordinals,
+source identity, and the complete membership manifest. Run activation verifies
+exact chunk coverage and settlement denominators, including eligible cases that
+have no execution results. Invalid or incomplete content cannot activate a run.
+
+Storage failures retain their error category and operation context. Transient
+failures consume the caller's bounded retry budget. Cancellation stops remote
+work and transfers any unfinished upload to durable cleanup ownership.

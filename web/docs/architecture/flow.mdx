@@ -124,7 +124,7 @@ The resolved evaluation plan is stored on the execution before the attempt runs:
 - `evaluator_manifest`: the resolved evaluator bindings and, when `persistence.mode: full`, evaluator configs
 - `expected_evaluator_count`: the number of evaluator invocations expected for the execution
 
-The dataset `case_group` value is part of immutable case content. It is loaded from `case_blobs`, passed into evaluator input, and affects the case hash because changing it changes evaluator routing.
+The dataset `case_group` value is part of immutable case content. It is loaded from verified case batches, passed into evaluator input, and affects the case hash because changing it changes evaluator routing.
 
 ### 3. Agent Invocation
 

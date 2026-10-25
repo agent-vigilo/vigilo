@@ -213,10 +213,18 @@ optional reviewed budget policy, and verified build-manifest metadata beneath
 those frozen inputs and refuse escaped paths, incomplete links, or identities
 that differ from the campaign.
 
+### Process Memory
+
+Linux samples use `linux-proc-hwm-wait4-cpu-v3`: post-exec `/proc` VmHWM for
+RSS and `wait4` for CPU/exit status. Missing RSS is unavailable; Linux does not
+substitute `wait4` RSS, which can include the harness address space inherited
+before exec. Required-metric validation rejects missing observations.
+
 ### Sample External Measurements
 
 `sample.external` records PostgreSQL calls/time/rows, WAL bytes, database-size
-delta, HTTP request/byte/peak-concurrency counts, RabbitMQ worker-delivery
+delta, per-public-table `table_writes` deltas (`inserted`, `updated`, `deleted`),
+HTTP request/byte/peak-concurrency counts, RabbitMQ worker-delivery
 ready/unacknowledged counts, peak sampled service memory/CPU observations, and
 an exact `durable_counts` map from the workload oracle. `query_diagnostics`
 retains normalized statement fingerprints, plan count/time, execution time,

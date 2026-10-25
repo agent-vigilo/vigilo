@@ -153,12 +153,12 @@ export MESSAGING_URL='amqp://guest:guest@localhost:5672'
 Inside Compose containers, services use Docker DNS names such as `postgres`,
 `postgres-shard-001`, and `rabbitmq`; see `infra/dev/README.md`.
 
-Both development topologies also include Ceph Object Gateway for S3 storage integration
-development. Its host endpoint is `http://localhost:3900`, its container endpoint
+Both development topologies include Ceph Object Gateway for local object storage. Its host endpoint is `http://localhost:3900`, its container endpoint
 is `http://ceph:3900`, and its default bucket is `vigilo-dev`. Use path-style S3
 addressing with region `us-east-1` and the `DEV_S3_*` credentials in the selected env
-file. Objects persist in a named volume. Vigilo's case payloads currently remain
-in PostgreSQL; coordinator and worker startup do not depend on Ceph.
+file. Objects persist in a named volume. See
+[Case Storage](/docs/architecture/case-storage/) for batch, manifest, and
+publication behavior.
 
 Apply migrations and publish the bundled evaluator:
 

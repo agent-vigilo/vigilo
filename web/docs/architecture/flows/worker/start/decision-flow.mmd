@@ -19,7 +19,7 @@ flowchart TD
     Claim{Chunk claimable?}
     Context[Load run context]
     Warm[Warm evaluator components]
-    Cases[Load chunk case batch]
+    Cases[Fetch assigned blob batches and verify integrity and membership]
     Permit[Acquire Wasm evaluation permits]
     Execute[Execute case evaluations in sandboxed stores]
     Persist[Persist terminal transitions]

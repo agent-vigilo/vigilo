@@ -645,3 +645,26 @@ required_metrics = ["wall_time", "child_cpu", "peak_rss", "sql", "wal"]
 watchdog_ms = 600000
 planning_duration_ms = 90000
 preconditioning = "none"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+owner = "run-creation"
+status = "implemented"
+capability = "run.create.v1"
+fixture = "mvp-v1"
+tuples = [
+  "cases-1000-payload-1024-fresh",
+  "cases-10000-payload-1024-fresh",
+  "cases-50000-payload-1024-fresh",
+  "cases-1000-payload-16384-fresh",
+  "cases-10000-payload-16384-fresh",
+  "cases-10000-payload-1024-reuse",
+  "cases-50000-payload-1024-reuse",
+  "cases-10000-payload-16384-reuse",
+]
+unit = "case_and_run"
+oracle = "exact_control_and_execution_rows"
+required_metrics = ["wall_time", "child_cpu", "peak_rss", "sql", "wal"]
+watchdog_ms = 600000
+planning_duration_ms = 60000
+preconditioning = "none"

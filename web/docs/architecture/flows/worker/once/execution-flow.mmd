@@ -11,6 +11,7 @@ sequenceDiagram
     participant Vigilo
     participant Queue as RabbitMQ
     participant ControlDB as Control DB
+    participant Objects as Object Storage
     participant ExecutionDB as Execution DB
     participant Agent as Agent Target
     participant WASM as Wasm Runtime
@@ -43,8 +44,11 @@ sequenceDiagram
                 Vigilo->>Queue: Acknowledge duplicate or stale message
                 Vigilo-->>User: Success response
             else Chunk claimed
-                Vigilo->>ExecutionDB: Load and verify run snapshot and case batch
-                ExecutionDB-->>Vigilo: Profile, pinned execution plan, and cases
+                Vigilo->>ExecutionDB: Load and verify run snapshot and assigned blob references
+                ExecutionDB-->>Vigilo: Profile, pinned execution plan, and blob references
+                Vigilo->>Objects: Retrieve bounded assigned case batches
+                Objects-->>Vigilo: Immutable batch bytes
+                Vigilo->>Vigilo: Verify byte count, hash, schema, and case membership
                 Vigilo->>ControlDB: Fetch pinned evaluator artifacts by database id
                 ControlDB-->>Vigilo: Exact artifact and ABI records
                 Vigilo->>ExecutionDB: Start chunk and attempt lease heartbeat

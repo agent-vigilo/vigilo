@@ -26,6 +26,10 @@ A process-local
 <GlossaryTerm term="database-circuit-breaker">circuit breaker</GlossaryTerm>
 isolates unavailable aliases without becoming routing authority.
 
+[Case Storage](/docs/architecture/case-storage/) keeps immutable case batches and
+run plans in object storage. PostgreSQL routing governs coordination and execution
+evidence; workers resolve case data through recorded blob references.
+
 ## Routing At A Glance
 
 ```mermaid
@@ -86,10 +90,11 @@ status = active
 All used run shards route to `primary` until another shard-capable placement is
 added and selected for new or moved run shards.
 
-The development Compose topologies also provide single-node Ceph Object Gateway storage for
-S3 integration testing. It is not part of the runtime routing path shown above:
-case payloads remain in PostgreSQL. See the [local stack guide](/docs/guides/getting-started/#start-the-local-stack)
-for endpoints and development credentials.
+The development Compose topologies provide single-node Ceph Object Gateway
+storage for case batches, indexes, and manifests. Object references record their
+storage owner independently of database shard routing. See the
+[local stack guide](/docs/guides/getting-started/#start-the-local-stack) for
+endpoints and development credentials.
 
 ## Control And Execution Databases
 
@@ -217,7 +222,8 @@ Workers stay chunk-local:
   hint requires no control-database route read. Rejected hints invalidate the
   route cache and perform one authoritative refresh.
 - After claiming, the worker loads the
-  local run snapshot and case data, persists attempts/results/aggregates, and
+  local run snapshot, retrieves and verifies assigned case batches from object
+  storage, persists attempts/results/aggregates, and
   commits a terminal chunk receipt in that execution placement.
 - Evaluator registry metadata remains a control-database read.
 - Database operations have bounded client and PostgreSQL deadlines. An
@@ -425,34 +431,33 @@ availability, and whether the route is `dispatchable`, `read_only`, or
 `blocked`. An active move also reports its operation ID, phase, completed page
 count, and copied row and byte counts. It never prints the database URL.
 
-## Shard-Local Case Data
+## Case Storage And Shard Assignment
 
-Control storage owns complete `dataset_version_cases` membership. Each
-execution database receives only the `run_shard_cases` rows routed to it and
-the content-addressed `case_blobs` referenced by those rows.
+Control storage owns finalized dataset and run-plan references, creation progress,
+routing, and settlement metadata. Immutable case batches and ordered membership
+live in object storage. Execution databases retain owned chunks, run metadata,
+attempts, results, and settlement evidence.
 
 ```mermaid
 flowchart LR
-    membership[Control dataset_version_cases]
-    plan[Control creation chunks]
-    page[Bounded projection page]
-    local[Execution run_shard_cases]
-    worker[Worker chunk read]
+    control[Control dataset and run-plan references]
+    blobs[(Immutable batches, indexes, and manifests)]
+    plan[Verified chunk assignment]
+    worker[Worker]
+    local[(Execution attempts, results, and receipts)]
 
-    membership --> page
-    plan --> page
-    page --> local
-    local --> worker
+    control --> plan --> worker
+    blobs -->|Read and verify assigned batches| worker
+    worker -->|Commit execution evidence| local
 ```
 
-Creation stores expected counts, a stable BLAKE3 projection hash, and the last
-acknowledged ordinal per placement. The execution transaction commits before
-the control cursor advances, so an ambiguous response safely replays the same
-immutable page. `VIGILO_RUN_CREATION_CASE_BATCH_SIZE` bounds page rows, and
-`VIGILO_RUN_CREATION_CASE_PAGE_BUDGET` bounds work per coordinator claim. Both
-settings are parsed only by `run create` and `coordinator`, then passed as typed
-workflow configuration rather than read from the environment inside database
-code.
+Creation acknowledges only verified uploaded pages and activates a run only after
+its finalized manifest and placement coverage are complete. An ambiguous response
+replays the same immutable page under its recorded upload identity. Workers fetch
+bounded assigned batches and validate bytes, identity, and membership before
+execution. Moving a database shard changes execution ownership; it does not copy
+or rewrite the dataset's blobs. See [Case Storage](/docs/architecture/case-storage/)
+for publication, resource bounds, and cleanup ownership.
 
 ## Moving A Run Shard
 
@@ -541,8 +546,7 @@ continue. Interrupted `copying`, `draining`, or `moving` work resumes only with
 its persisted target. Target reset occurs once, completed pages resume from
 their last key, and dirty replay stays version guarded. Repeating a move after
 fenced activation returns a verified no-op.
-`--force` remains accepted for CLI compatibility but cannot bypass the
-active-work or write-admission fence.
+`--force` cannot bypass the active-work or write-admission fence.
 
 Dry-run and verify-only output uses `full_fingerprint` verification with
 source/target counts and checksums. Executed moves use
@@ -559,7 +563,6 @@ execution database rejects stale epochs locally.
 Moved shard-owned tables:
 
 ```text
-run_shard_cases
 run_chunks
 run_snapshots
 executions
@@ -572,17 +575,9 @@ run_chunk_settlement_consumptions
 run_shard_summaries
 ```
 
-The move also copies local FK prerequisites needed by the target placement.
-Those prerequisites are:
-
-```text
-case_blobs
-dataset_versions
-runs
-```
-
-Complete `dataset_version_cases` membership remains control-owned and is never
-copied to execution-only databases.
+The move also copies the compact run and dataset identity prerequisites required
+by the target placement. Case payloads and complete dataset membership remain in
+object storage; the target uses the same immutable references.
 
 `run_shard_dispatch_cursors` stays in the control database and is never copied
 between execution placements. Source cleanup is intentionally outside the move
@@ -658,7 +653,6 @@ Implemented today:
 Intentionally deferred:
 
 - Evaluator metadata replication to execution placements.
-- Broader canonical case-data routing and replication.
 - Runtime database-secret and connection-parameter refresh.
 
 These are product and operations contracts, not hidden formulas. Until they are
