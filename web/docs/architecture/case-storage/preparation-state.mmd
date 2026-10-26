@@ -1,14 +1,15 @@
 stateDiagram-v2
-    [*] --> Preparing: Finalized dataset and valid profile
-    Preparing --> Preparing: Claim generation, verify cases, acknowledge files
-    Preparing --> Preparing: Retry same inputs after lease release or expiry
-    Preparing --> Ready: Verified complete manifest, fenced SQL commit
-    Preparing --> Cancelled: run cancel
-    Ready --> Ready: Identical command returns existing reference
-    Ready --> Cancelled: run cancel
-    Ready --> [*]: Preparation complete, run remains creating
-    Cancelled --> [*]: Further publication rejected
-    note right of Ready
-        Plan readiness creates no dispatch cursor
-        and grants no worker authority.
-    end note
+    [*] --> Preparing: Dataset and profile admitted
+    Preparing --> Preparing: Fenced file writes and explicit resume
+    Preparing --> Ready: Verified manifest published
+    Ready --> Ready: Preparation-only run held
+    Ready --> Admitting: Execution requested
+    Admitting --> Admitting: Replay local commits and acknowledge pages
+    Admitting --> Failed: Immutable seed conflict
+    Failed --> [*]: No dispatch
+    Admitting --> Pending: Exact local coverage and fenced activation
+    Preparing --> Cancelled: Cancellation fences publication
+    Ready --> Cancelled: Cancellation revokes execution intent
+    Admitting --> Cancelled: Close partial local admission
+    Pending --> [*]: Coordinator dispatch owns execution
+    Cancelled --> [*]: Delayed creators rejected

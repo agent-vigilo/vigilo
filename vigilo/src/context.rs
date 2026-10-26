@@ -14,6 +14,7 @@ pub(crate) mod http;
 pub(crate) mod messaging;
 pub(crate) mod output;
 pub(crate) mod registry;
+pub(crate) mod storage;
 pub(crate) mod wasm;
 
 struct ContextInner {
@@ -23,6 +24,7 @@ struct ContextInner {
     pub out: output::Context,
     pub reg: registry::Context,
     pub wasm: wasm::Context,
+    pub storage: storage::Context,
 }
 
 #[derive(Clone)]
@@ -36,6 +38,7 @@ impl Context {
         output_format: output::OutputFormat,
     ) -> Self {
         Self(Arc::new(ContextInner {
+            storage: storage::Context::default(),
             dbr: database::Context {
                 config: database_config,
                 cell: Default::default(),
@@ -59,6 +62,14 @@ impl Context {
                 config: wasm_config,
             },
         }))
+    }
+
+    pub(crate) async fn storage(
+        &self,
+        binding: &str,
+        limits: &crate::contracts::case_storage::FormatLimits,
+    ) -> anyhow::Result<Arc<dyn crate::blob_storage::BlobStorage>> {
+        self.0.storage.get(binding, limits).await
     }
 
     pub(crate) async fn dbr(&self) -> anyhow::Result<&database::DatabaseRouter> {

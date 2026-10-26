@@ -39,13 +39,23 @@ use super::{
     },
     shard,
 };
+#[cfg(test)]
+use crate::contracts::case_storage::identity::normalized_case_payload;
+#[cfg(test)]
+use crate::models::{
+    case_blob::CaseBlobDraft,
+    dataset_version_case::DatasetVersionCaseDraft,
+    run_chunk::{
+        RunChunkDraft,
+        run_shard_for_chunk_index,
+    },
+};
 use crate::{
     context::Context,
     contracts::{
         case_storage::identity::{
             canonical_json,
             hash_serialized_json,
-            normalized_case_payload,
             uuid_from_json,
         },
         evaluator_abi::EvaluatorExecutionPlan,
@@ -59,7 +69,6 @@ use crate::{
         workflows::{
             run_cancel,
             run_create,
-            run_creation,
             run_export as run_export_workflow,
             run_profile_validation,
             run_results::{
@@ -70,8 +79,6 @@ use crate::{
         },
     },
     models::{
-        case_blob::CaseBlobDraft,
-        dataset_version_case::DatasetVersionCaseDraft,
         evaluator_result::{
             EvaluatorDiagnostic,
             EvaluatorResult,
@@ -83,13 +90,8 @@ use crate::{
             Run,
             RunDraft,
         },
-        run_chunk::{
-            RunChunkDraft,
-            run_shard_for_chunk_index,
-        },
     },
 };
-
 #[cfg(test)]
 mod identity_tests;
 
@@ -151,6 +153,7 @@ fn parse_structured_payload(raw: &str, field: &str) -> anyhow::Result<Value> {
 /// Returns:
 /// - case blob rows keyed by `case_hash`
 /// - dataset-version membership rows preserving case order
+#[cfg(test)]
 fn build_case_plans(
     dataset: &RunDataset,
 ) -> anyhow::Result<(Vec<CaseBlobDraft>, Vec<DatasetVersionCaseDraft>)> {
@@ -184,6 +187,7 @@ fn build_case_plans(
 }
 
 /// Computes a deterministic dataset version id from logical membership.
+#[cfg(test)]
 fn compute_dataset_version_id(
     dataset: &RunDataset,
     dataset_cases: &[DatasetVersionCaseDraft],
@@ -235,6 +239,7 @@ fn compute_aggregation_policy_hash(profile: &RunProfile) -> anyhow::Result<Strin
 ///
 /// Chunks are ordinal scheduling ranges and may contain mixed case groups.
 /// Per-case profile routing is resolved later by workers from stored case data.
+#[cfg(test)]
 fn build_chunks(total_cases: usize, chunk_size: usize) -> Vec<RunChunkDraft> {
     let mut chunks = Vec::new();
     let mut start = 0usize;
@@ -545,19 +550,19 @@ pub(crate) enum SubCommand {
         )]
         dataset_file: Option<PathBuf>,
         /// Finalized dataset catalog/upload ID; stores a non-dispatchable run plan
-        #[arg(long, conflicts_with_all=["dataset","dataset_file"], requires_all=["storage_config","prepare_only"])]
+        #[arg(long, conflicts_with_all=["dataset","dataset_file"], requires="storage_config")]
         dataset_upload_id: Option<Uuid>,
 
         /// Storage owner TOML used to resolve the finalized dataset and plan files
-        #[arg(long, requires = "dataset_upload_id")]
-        storage_config: Option<PathBuf>,
+        #[arg(long, env = "VIGILO_STORAGE_CONFIG")]
+        storage_config: PathBuf,
 
         /// Retain this ID when retrying interrupted plan preparation
-        #[arg(long, requires = "dataset_upload_id")]
+        #[arg(long)]
         run_id: Option<Uuid>,
 
         /// Prepare and verify the immutable plan without admitting execution work
-        #[arg(long, requires = "dataset_upload_id")]
+        #[arg(long)]
         prepare_only: bool,
     },
 
@@ -682,16 +687,18 @@ impl Executable for Command {
                 dataset_upload_id,
                 storage_config,
                 run_id,
-                prepare_only: _,
+                prepare_only,
             }) => {
                 if let Some(upload_id) = dataset_upload_id {
                     return create_blob::exec(
                         context,
+                        run_creation.config(),
                         profile,
                         profile_file,
                         upload_id,
-                        storage_config.expect("clap requires storage configuration"),
+                        storage_config,
                         run_id,
+                        prepare_only,
                     )
                     .await;
                 }
@@ -703,6 +710,9 @@ impl Executable for Command {
                     profile_file,
                     dataset,
                     dataset_file,
+                    storage_config,
+                    run_id,
+                    prepare_only,
                 )
                 .await
             }

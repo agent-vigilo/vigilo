@@ -2,7 +2,7 @@ flowchart TD
     bytes["Downloaded object bytes + expected reference"]
     verify["Verify<br/>limits, byte count, BLAKE3 digest"]
     decode["Decode<br/>canonical JSON and field types"]
-    validate["Validate<br/>ranges, counts, case content<br/>all cases at ingestion; assigned cases at execution"]
+    validate["Validate<br/>ranges, counts, case content<br/>complete files at ingestion and execution"]
     ready["Use locally validated content<br/>publication checks still apply"]
     reject["Reject content"]
 

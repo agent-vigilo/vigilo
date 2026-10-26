@@ -2,245 +2,28 @@
 
 use super::*;
 
-/// Inserts or verifies immutable case blob rows.
-///
-/// Query behavior: bulk inserts content-addressed payloads in bounded batches,
-/// then verifies conflicts contain the same immutable data. Matching blobs are
-/// reusable across runs; a hash collision or inconsistent row fails creation.
-pub(crate) async fn bulk_insert_case_blobs(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    case_blobs: &[CaseBlobDraft],
-) -> anyhow::Result<()> {
-    if case_blobs.is_empty() {
-        return Ok(());
-    }
-
-    for chunk in case_blobs.chunks(CASE_BLOB_INSERT_CHUNK_SIZE) {
-        let mut query_builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO case_blobs (case_hash, task_type, case_group, input_payload, expected_output, context_payload, tags, metadata) ",
-        );
-
-        query_builder.push_values(chunk, |mut b, row| {
-            b.push_bind(&row.case_hash)
-                .push_bind(&row.task_type)
-                .push_bind(&row.case_group)
-                .push_bind(jsonb_text(&row.input_payload))
-                .push_unseparated("::jsonb")
-                .push_bind(jsonb_text(&row.expected_output))
-                .push_unseparated("::jsonb")
-                .push_bind(jsonb_text(&row.context_payload))
-                .push_unseparated("::jsonb")
-                .push_bind(jsonb_text(&row.tags))
-                .push_unseparated("::jsonb")
-                .push_bind(jsonb_text(&row.metadata))
-                .push_unseparated("::jsonb");
-        });
-
-        query_builder.push(" ON CONFLICT (case_hash) DO NOTHING");
-        query_builder.build().execute(tx.as_mut()).await?;
-
-        let mut validation_query = QueryBuilder::<Postgres>::new(
-            r#"
-            WITH input (
-                case_hash,
-                task_type,
-                case_group,
-                input_payload,
-                expected_output,
-                context_payload,
-                tags,
-                metadata
-            ) AS (
-            "#,
-        );
-        validation_query.push_values(chunk, |mut b, row| {
-            b.push_bind(&row.case_hash)
-                .push_bind(&row.task_type)
-                .push_bind(&row.case_group)
-                .push_bind(jsonb_text(&row.input_payload))
-                .push_unseparated("::jsonb")
-                .push_bind(jsonb_text(&row.expected_output))
-                .push_unseparated("::jsonb")
-                .push_bind(jsonb_text(&row.context_payload))
-                .push_unseparated("::jsonb")
-                .push_bind(jsonb_text(&row.tags))
-                .push_unseparated("::jsonb")
-                .push_bind(jsonb_text(&row.metadata))
-                .push_unseparated("::jsonb");
-        });
-        validation_query.push(
-            r#"
-            )
-            SELECT input.case_hash
-            FROM input
-            LEFT JOIN case_blobs stored USING (case_hash)
-            WHERE stored.case_hash IS NULL
-               OR stored.task_type IS DISTINCT FROM input.task_type
-               OR stored.case_group IS DISTINCT FROM input.case_group
-               OR stored.input_payload IS DISTINCT FROM input.input_payload
-               OR stored.expected_output IS DISTINCT FROM input.expected_output
-               OR stored.context_payload IS DISTINCT FROM input.context_payload
-               OR stored.tags IS DISTINCT FROM input.tags
-               OR stored.metadata IS DISTINCT FROM input.metadata
-            LIMIT 1
-            "#,
-        );
-
-        if let Some(case_hash) = validation_query
-            .build_query_scalar::<String>()
-            .fetch_optional(tx.as_mut())
-            .await?
-        {
-            return Err(seed_invariant_error(format!(
-                "case_hash '{}' already exists with different immutable content",
-                case_hash
-            )));
-        }
-    }
-
-    Ok(())
-}
-
 /// Creates or verifies a dataset version identity.
 ///
 /// Existing dataset version ids must refer to the same dataset and version
 /// value; otherwise run creation fails to preserve immutable dataset identity.
 ///
-/// Query behavior: upserts by `dataset_version_id` but only allows the conflict
-/// update when the existing row has the same dataset identity. A zero affected
-/// row count means the id already belongs to different dataset content.
+/// Reuse performs no UPDATE: independent runs must not serialize on this shared
+/// immutable row or generate WAL merely to verify an existing identity.
 pub(crate) async fn upsert_dataset_version(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     dataset_version_id: Uuid,
     dataset_id: Uuid,
     dataset_version: &str,
 ) -> anyhow::Result<()> {
-    let rows_affected = sqlx::query(
-        r#"
-        INSERT INTO dataset_versions (dataset_version_id, dataset_id, dataset_version)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (dataset_version_id) DO UPDATE
-        SET dataset_id = EXCLUDED.dataset_id,
-            dataset_version = EXCLUDED.dataset_version,
-            updated_at = now()
-        WHERE dataset_versions.dataset_id = EXCLUDED.dataset_id
-          AND dataset_versions.dataset_version = EXCLUDED.dataset_version
-        "#,
-    )
-    .bind(dataset_version_id)
-    .bind(dataset_id)
-    .bind(dataset_version)
-    .execute(tx.as_mut())
-    .await?
-    .rows_affected();
-
-    if rows_affected != 1 {
+    sqlx::query("INSERT INTO dataset_versions(dataset_version_id,dataset_id,dataset_version) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+        .bind(dataset_version_id).bind(dataset_id).bind(dataset_version).execute(&mut **tx).await?;
+    let matches:bool=sqlx::query_scalar("SELECT dataset_id=$2 AND dataset_version=$3 FROM dataset_versions WHERE dataset_version_id=$1")
+        .bind(dataset_version_id).bind(dataset_id).bind(dataset_version).fetch_one(&mut **tx).await?;
+    if !matches {
         return Err(seed_invariant_error(format!(
-            "dataset_version_id '{}' already exists with different dataset identity",
-            dataset_version_id
+            "dataset_version_id '{dataset_version_id}' already exists with different dataset identity"
         )));
     }
-
-    Ok(())
-}
-
-/// Inserts or verifies dataset membership rows for a versioned dataset.
-///
-/// Existing rows are left untouched to avoid rewriting shared dataset versions
-/// for every model run. A follow-up validation query checks that all requested
-/// memberships exist with the expected ordinal and case hash.
-///
-/// Query behavior:
-/// - Bulk inserts membership rows in bounded batches with conflict no-op.
-/// - For each batch, builds an inline input table and left joins persisted rows
-///   to detect missing or mismatched membership.
-/// - Fails if the dataset version id already describes different case
-///   ordering/content.
-pub(crate) async fn bulk_insert_dataset_membership(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    dataset_version_id: Uuid,
-    cases: &[DatasetVersionCaseDraft],
-) -> anyhow::Result<()> {
-    if cases.is_empty() {
-        return Ok(());
-    }
-
-    for chunk in cases.chunks(DATASET_MEMBERSHIP_INSERT_CHUNK_SIZE) {
-        let mut query_builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO dataset_version_cases (dataset_version_id, case_id, case_ordinal, case_hash) ",
-        );
-
-        query_builder.push_values(chunk, |mut b, row| {
-            b.push_bind(dataset_version_id)
-                .push_bind(row.case_id)
-                .push_bind(row.case_ordinal)
-                .push_bind(&row.case_hash);
-        });
-
-        query_builder.push(" ON CONFLICT DO NOTHING");
-        query_builder.build().execute(tx.as_mut()).await?;
-
-        let mut validation_query = QueryBuilder::<Postgres>::new(
-            r#"
-            WITH input (case_id, case_ordinal, case_hash) AS (
-            "#,
-        );
-        validation_query.push_values(chunk, |mut b, row| {
-            b.push_bind(row.case_id)
-                .push_bind(row.case_ordinal)
-                .push_bind(&row.case_hash);
-        });
-        validation_query.push(
-            r#"
-            )
-            SELECT input.case_id
-            FROM input
-            LEFT JOIN dataset_version_cases dvc
-              ON dvc.dataset_version_id =
-            "#,
-        );
-        validation_query.push_bind(dataset_version_id);
-        validation_query.push(
-            r#"
-             AND dvc.case_id = input.case_id
-            WHERE dvc.case_id IS NULL
-               OR dvc.case_ordinal <> input.case_ordinal
-               OR dvc.case_hash <> input.case_hash
-            LIMIT 1
-            "#,
-        );
-
-        let mismatch = validation_query
-            .build_query_scalar::<Uuid>()
-            .fetch_optional(tx.as_mut())
-            .await?;
-        if let Some(case_id) = mismatch {
-            return Err(seed_invariant_error(format!(
-                "dataset_version_id '{}' already exists with different membership near case '{}'; dataset versions are immutable",
-                dataset_version_id, case_id
-            )));
-        }
-    }
-
-    let stored_count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM dataset_version_cases
-        WHERE dataset_version_id = $1::uuid
-        "#,
-    )
-    .bind(dataset_version_id)
-    .fetch_one(tx.as_mut())
-    .await?;
-    if stored_count != cases.len() as i64 {
-        return Err(seed_invariant_error(format!(
-            "dataset_version_id '{}' has {} persisted memberships but the seed contains {}; dataset versions are immutable",
-            dataset_version_id,
-            stored_count,
-            cases.len()
-        )));
-    }
-
     Ok(())
 }
 

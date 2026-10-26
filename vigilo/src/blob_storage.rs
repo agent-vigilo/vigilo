@@ -1,7 +1,7 @@
 //! Bounded immutable object I/O, independent of provider and ingestion policy.
 //!
-//! A connected store proves conditional creation and immediate visibility using
-//! an exactly owned probe. Each operation shares admission and disk reservations,
+//! A publishing store proves conditional creation and immediate visibility using
+//! an exactly owned probe. Runtime readers connect without write probes. Each operation shares admission and disk reservations,
 //! validates references before I/O, and stages bytes in private RAII spools.
 //! Only fully hashed files escape this boundary. Provider retries are disabled;
 //! one request counter and deadline cover admission, transfer and reconciliation.

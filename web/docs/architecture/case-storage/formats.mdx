@@ -169,7 +169,7 @@ Use compact JSON containing exactly `schema`, `run_id`, `chunk_index_start`,
 - `chunk_index`, `chunk_id`, `run_shard`, `ordinal_start`, `ordinal_end`, and
   `profile_group_id`, identifying the scheduling unit and its assigned range.
 - `case_projection_hash`, using the
-  [`projection_hash`](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/db/workflows/case_projection.rs) binary encoding over
+  [`update_projection_hash`](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/db/workflows/case_projection.rs) binary encoding over
   the chunk's assigned cases in ordinal order.
 
 Do not embed case payloads or per-case assignment lists. Chunk ranges resolve

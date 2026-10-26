@@ -12,6 +12,9 @@ erDiagram
         json execution_plan
         json assignments
         bigint generation
+        boolean execution_requested
+        int admission_cursor
+        json admission_state
         int chunk_cursor
         json manifest
     }
@@ -34,3 +37,18 @@ erDiagram
         text planned_chunk_hash
         text case_projection_hash
     }
+    run_snapshots {
+        uuid run_id PK
+        int run_shard PK
+        json config_snapshot
+        int expected_execution_count
+    }
+    run_chunks {
+        uuid run_id PK
+        int run_shard PK
+        uuid id PK
+        int ordinal_start
+        int ordinal_end
+        text status
+    }
+    run_snapshots ||--o{ run_chunks : admits

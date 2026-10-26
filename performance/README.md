@@ -9,7 +9,8 @@ named deployment capacity projections with limit provenance, and confirmed
 regression gates. It also owns resident-process soak and controlled-recovery
 checks. Startup remains service-free; run creation,
 coordinator, HTTP agent, worker/Wasm, persistence, and lifecycle measurements
-use a fresh run-owned PostgreSQL database clone, RabbitMQ vhost/namespace, and
+use a fresh run-owned PostgreSQL database clone, RabbitMQ vhost/namespace,
+campaign-owned Ceph bucket, and
 deterministic HTTP agent for every sample.
 Cancellation, terminal reads, exports, shard movement, rebalance, and logical
 placement workloads add routed database clones only when their selected tuple
@@ -53,7 +54,7 @@ requires them. Their setup remains outside the measured process boundary.
   amplification assumptions, boundedness, and independently sourced limits.
 - `performance/suppressions-v1.toml` is the only suppression registry. Entries
   must identify one workload tuple and metric, owner, issue, reason, and expiry.
-- `infra/performance/compose.yml` defines the private PostgreSQL and RabbitMQ
+- `infra/performance/compose.yml` defines the private PostgreSQL, RabbitMQ, and Ceph object-storage
   topology created for one campaign; infrastructure definitions remain under
   `infra`.
 - `infra/performance/aws/template.yaml` provisions the pinned ephemeral EC2 host
@@ -75,7 +76,7 @@ environment, and generated-artifact field reference.
 | Profile | Purpose |
 | --- | --- |
 | `developer-v1` | Fast local diagnosis of explicitly selected workloads using two balanced blocks. |
-| `ingestion-baseline-v1` | Initial run creation across case counts, payload sizes, and reuse of a finalized dataset, with physical row-write counters. |
+| `ingestion-baseline-v1` | Initial run creation across case counts, payload sizes, and reuse of a finalized dataset, with physical row-write counters and independently verified immutable case files. |
 | `pr-v1` | Pull-request correctness checks and short, informative timing canaries. |
 | `reference-v1` | Broader repeatable comparison across the complete MVP workload matrix. |
 | `calibration-v1` | Stable no-change campaign used to measure canonical-host and harness noise. |
@@ -636,3 +637,13 @@ and component labels. Failed startup permits only a bounded subset of that fixed
 topology before rollback. Both paths verify that no project-owned or run-owned
 resources remain after Compose removal; any unexpected resource refuses
 destructive cleanup.
+
+The service topology owns its Ceph container and volume under the same checked
+campaign inventory as PostgreSQL and RabbitMQ. Child commands receive a generated
+storage-owner configuration. Large dataset fixtures use JSONL admission; small
+YAML fixtures retain the same logical source fields. Ingestion correctness checks
+verify stored byte counts, BLAKE3 digests, normalized case hashes, ordinal order,
+payload sizes, catalog reuse, and absence of per-case SQL tables after timing
+counters are frozen. Synthetic administration fixtures read the same verified
+files before seeding execution evidence. Cleanup removes only the exact recorded
+campaign resources, including its object-storage volume.

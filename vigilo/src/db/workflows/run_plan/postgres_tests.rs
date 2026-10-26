@@ -343,12 +343,24 @@ async fn interrupted_chunk_and_manifest_writes_resume_exactly_without_control_ca
     .await
     .unwrap();
     assert_eq!(replay.status, "ready");
-    let (status,cases,membership,chunks,cursors,shards):(String,i64,i64,i64,i64,i64)=sqlx::query_as("SELECT status::text,(SELECT count(*) FROM case_blobs),(SELECT count(*) FROM dataset_version_cases),(SELECT count(*) FROM run_creation_chunks),(SELECT count(*) FROM run_shard_dispatch_cursors),(SELECT count(*) FROM run_plan_shards WHERE run_id=$1) FROM runs WHERE id=$1").bind(f.plan.run_id).fetch_one(&db).await.unwrap();
-    assert_eq!(status, "creating");
-    assert_eq!(
-        (cases, membership, chunks, cursors, shards),
-        (0, 0, 0, 0, 3)
-    );
+    let (status,cursors,shards):(String,i64,i64)=sqlx::query_as("SELECT status::text,(SELECT count(*) FROM run_shard_dispatch_cursors),(SELECT count(*) FROM run_plan_shards WHERE run_id=$1) FROM runs WHERE id=$1").bind(f.plan.run_id).fetch_one(&db).await.unwrap();
+    assert_eq!((status.as_str(), cursors, shards), ("creating", 0, 3));
+    let projection: serde_json::Value =
+        sqlx::query_scalar("SELECT config_snapshot->'settlement_plan' FROM runs WHERE id=$1")
+            .bind(f.plan.run_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    let shards:Vec<(i16,i32,i32,String)>=sqlx::query_as("SELECT run_shard,case_count,chunk_count,planned_chunk_hash FROM run_plan_shards WHERE run_id=$1 ORDER BY run_shard").bind(f.plan.run_id).fetch_all(&db).await.unwrap();
+    assert_eq!(projection["version"], 1);
+    for (shard, cases, chunks, hash) in shards {
+        assert_eq!(
+            projection["shards"][shard.to_string()],
+            json!({"hash":hash,"case_count":cases,"chunk_count":chunks})
+        );
+    }
+    let old_tables:i64=sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name=ANY(ARRAY['case_blobs','dataset_version_cases','run_shard_cases','run_creation_chunks','run_creation_placements'])").fetch_one(&db).await.unwrap();
+    assert_eq!(old_tables, 0);
     assert!(
         f.memory
             .0
@@ -662,4 +674,269 @@ async fn reused_dataset_identity_does_not_require_a_row_write_lock(db: PgPool) {
         "reusing immutable dataset identity waited for a row write lock"
     );
     assert!(result.unwrap().is_ok());
+}
+
+fn runtime_context(db: &PgPool) -> crate::context::Context {
+    use sqlx::ConnectOptions;
+
+    use crate::context::{
+        database,
+        output::OutputFormat,
+        wasm,
+    };
+    crate::context::Context::new(
+        database::Config::new(
+            db.connect_options().to_url_lossy().to_string(),
+            5,
+            std::time::Duration::from_secs(10),
+            database::CircuitBreakerConfig::default(),
+            database::PlacementConfig::default_single_database(),
+        ),
+        None,
+        wasm::Config::default(),
+        OutputFormat::Json,
+    )
+}
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn blob_admission_resumes_bounded_pages_and_reads_exact_cross_file_chunks(db: PgPool) {
+    let f = Fixture::new(&db).await;
+    let lease = claim(&db, f.plan.run_id).await.unwrap();
+    let root = f.prepare(&db, lease).await.unwrap();
+    let plan = load(&db, f.plan.run_id).await.unwrap().unwrap();
+    let context = runtime_context(&db);
+    let memory = f.memory.clone();
+    let store: Arc<dyn crate::blob_storage::BlobStorage> = Arc::new(f.store);
+    assert!(
+        !crate::run_admission::resume(
+            &context,
+            &plan,
+            store.clone(),
+            crate::db::workflows::run_creation::Config {
+                case_page_budget: 1,
+                ..Default::default()
+            },
+            &f.cancel
+        )
+        .await
+        .unwrap()
+    );
+    let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*) FROM run_chunks WHERE run_id=$1),(SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1)").bind(plan.run_id).fetch_one(&db).await.unwrap();
+    assert_eq!(counts, (2, 0));
+    assert!(
+        crate::run_admission::resume(
+            &context,
+            &plan,
+            store.clone(),
+            crate::db::workflows::run_creation::Config {
+                case_page_budget: 1,
+                ..Default::default()
+            },
+            &f.cancel
+        )
+        .await
+        .unwrap()
+    );
+    let reader = crate::case_reader::RunReader::open(
+        store,
+        &root,
+        plan.limits.0.clone(),
+        plan.run_id,
+        &f.cancel,
+    )
+    .await
+    .unwrap();
+    let chunks: Vec<crate::models::run_chunk::RunChunk> =
+        sqlx::query_as("SELECT * FROM run_chunks WHERE run_id=$1 ORDER BY ordinal_start")
+            .bind(plan.run_id)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(chunks.len(), 3);
+    for chunk in &chunks {
+        let cases = reader.cases(chunk, &f.cancel).await.unwrap();
+        assert_eq!(
+            cases.len(),
+            (chunk.ordinal_end - chunk.ordinal_start) as usize
+        );
+        assert_eq!(cases[0].case_ordinal, chunk.ordinal_start);
+        assert_eq!(cases.last().unwrap().case_ordinal, chunk.ordinal_end - 1);
+        assert!(
+            cases
+                .iter()
+                .all(|c| c.expected_output.is_null() && c.context_payload.is_null())
+        );
+    }
+    let mut wrong = chunks[0].clone();
+    wrong.id = Uuid::now_v7();
+    assert!(reader.cases(&wrong, &f.cancel).await.is_err());
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(reader.cases(&chunks[0], &cancelled).await.is_err());
+    let key = memory
+        .0
+        .lock()
+        .unwrap()
+        .objects
+        .keys()
+        .find(|key| key.contains("/batch/"))
+        .unwrap()
+        .clone();
+    memory.0.lock().unwrap().objects.get_mut(&key).unwrap()[0] ^= 1;
+    let mut rejected = false;
+    for chunk in &chunks {
+        rejected |= reader.cases(chunk, &f.cancel).await.is_err();
+    }
+    assert!(rejected, "corrupt assigned case file was accepted");
+    let snapshot: serde_json::Value = sqlx::query_scalar(
+        "SELECT config_snapshot FROM run_snapshots WHERE run_id=$1 AND run_shard=0",
+    )
+    .bind(plan.run_id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert!(snapshot["profile"].get("case_groups").is_none());
+    assert_eq!(snapshot["gate_planned_counts"]["gate_0"], 100);
+}
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn admission_cancellation_fences_old_owner_and_partial_local_metadata(db: PgPool) {
+    let f = Fixture::new(&db).await;
+    let lease = claim(&db, f.plan.run_id).await.unwrap();
+    f.prepare(&db, lease).await.unwrap();
+    let plan = load(&db, f.plan.run_id).await.unwrap().unwrap();
+    let context = runtime_context(&db);
+    let store: Arc<dyn crate::blob_storage::BlobStorage> = Arc::new(f.store);
+    assert!(
+        !crate::run_admission::resume(
+            &context,
+            &plan,
+            store.clone(),
+            crate::db::workflows::run_creation::Config {
+                case_page_budget: 1,
+                ..Default::default()
+            },
+            &f.cancel
+        )
+        .await
+        .unwrap()
+    );
+    let old = admission::claim(&db, plan.run_id).await.unwrap();
+    let result = crate::db::workflows::run_cancel::cancel_run_routed(
+        context.dbr().await.unwrap(),
+        plan.run_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(result.run.status, "cancelled");
+    assert!(admission::renew(&db, old).await.is_err());
+    assert!(
+        crate::run_admission::resume(
+            &context,
+            &plan,
+            store,
+            crate::db::workflows::run_creation::Config {
+                case_page_budget: 1,
+                ..Default::default()
+            },
+            &f.cancel
+        )
+        .await
+        .is_err()
+    );
+    let states: Vec<String> =
+        sqlx::query_scalar("SELECT state FROM local_shard_admissions WHERE run_id=$1")
+            .bind(plan.run_id)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(states.len(), 3);
+    assert!(states.iter().all(|s| s == "closed"));
+    let dispatch: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1")
+            .bind(plan.run_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(dispatch, 0);
+}
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn preparation_only_is_held_until_execution_is_requested(db: PgPool) {
+    let f = Fixture::new(&db).await;
+    let lease = claim(&db, f.plan.run_id).await.unwrap();
+    f.prepare(&db, lease).await.unwrap();
+    assert!(admission::claim(&db, f.plan.run_id).await.is_err());
+    let context = runtime_context(&db);
+    let stats = crate::run_admission::recover(
+        &context,
+        1,
+        crate::db::workflows::run_creation::Config::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(stats.claimed_runs, 0);
+    admission::request(&db, f.plan.run_id).await.unwrap();
+    let lease = admission::claim(&db, f.plan.run_id).await.unwrap();
+    assert!(
+        admission::activate(&db, lease, &std::collections::BTreeMap::new())
+            .await
+            .is_err()
+    );
+    release(&db, lease, None).await.unwrap();
+    let cursors: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1")
+            .bind(f.plan.run_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(cursors, 0);
+}
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn admission_rejects_changed_local_membership_after_acknowledgement(db: PgPool) {
+    let f = Fixture::new(&db).await;
+    let lease = claim(&db, f.plan.run_id).await.unwrap();
+    f.prepare(&db, lease).await.unwrap();
+    let plan = load(&db, f.plan.run_id).await.unwrap().unwrap();
+    let context = runtime_context(&db);
+    let store: Arc<dyn crate::blob_storage::BlobStorage> = Arc::new(f.store);
+    let config = crate::db::workflows::run_creation::Config {
+        case_page_budget: 1,
+        ..Default::default()
+    };
+    assert!(
+        !crate::run_admission::resume(&context, &plan, store.clone(), config, &f.cancel)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE run_chunks SET id=$2 WHERE run_id=$1 AND run_shard=0")
+        .bind(plan.run_id)
+        .bind(Uuid::now_v7())
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        crate::run_admission::resume(&context, &plan, store, config, &f.cancel)
+            .await
+            .is_err()
+    );
+    let status: String = sqlx::query_scalar("SELECT status::text FROM runs WHERE id=$1")
+        .bind(plan.run_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(status, "failed");
+    let cursors: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1")
+            .bind(plan.run_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(cursors, 0);
 }

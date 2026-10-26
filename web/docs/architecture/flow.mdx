@@ -75,8 +75,8 @@ A run is created with:
 At creation, every evaluator reference is resolved to an immutable
 <GlossaryTerm term="evaluator-execution-plan">evaluator execution plan</GlossaryTerm>.
 The plan pins registry id, artifact hash, evaluator ABI, host adapter, runtime
-version, and the complete scoring-policy hash. Each execution placement receives
-the same plan and workers verify its hash before use.
+version, and the complete scoring-policy hash. The immutable run configuration stores this plan. Execution placements retain
+its verified reference, and workers verify its hash before use.
 
 Reference formats:
 
@@ -173,7 +173,7 @@ Each evaluator invocation result records:
 Each diagnostic records severity, category, reason, tags, and evidence. It has
 no dimension, score, judgment, weight, or blocking authority.
 
-When `persistence.mode: summary`, execution-level case payload snapshots and evaluator binding config are replaced with redaction markers. Dataset case blobs remain durable for retry execution and reproducibility.
+When `persistence.mode: summary`, execution-level case payload snapshots and evaluator binding config are replaced with redaction markers. Immutable dataset case files remain durable in object storage for retries and reproducibility.
 When `persistence.persist_evaluator_evidence: false`, raw evaluator output is also redacted because raw output may contain embedded evidence.
 
 If evaluation fails:

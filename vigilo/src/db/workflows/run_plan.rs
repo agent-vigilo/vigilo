@@ -18,6 +18,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+pub(crate) mod admission;
 mod queries;
 
 use super::{
@@ -42,6 +43,9 @@ pub(crate) struct Plan {
     pub execution_plan: Json<EvaluatorExecutionPlan>,
     pub assignments: Json<Vec<run_create::RunShardPlacementAssignment>>,
     pub chunk_cursor: i32,
+    pub execution_requested: bool,
+    pub admission_cursor: i32,
+    pub admission_state: Json<serde_json::Value>,
     pub manifest: Option<Json<ObjectRef>>,
 }
 #[derive(Clone, Copy)]
@@ -92,26 +96,13 @@ pub(crate) async fn begin(
     );
     bounded(async {
         let mut tx = db.begin().await?;
-        // Reuse is a read of immutable identity. An unconditional upsert would
-        // serialize independent runs on one dataset row and emit needless WAL.
-        sqlx::query(queries::INSERT_DATASET_VERSION)
-            .bind(draft.dataset_version_id)
-            .bind(draft.dataset_id)
-            .bind(&draft.dataset_version)
-            .execute(&mut *tx)
-            .await?;
-        let matches: bool = sqlx::query_scalar(queries::VERIFY_DATASET_VERSION)
-            .bind(draft.dataset_version_id)
-            .bind(draft.dataset_id)
-            .bind(&draft.dataset_version)
-            .fetch_one(&mut *tx)
-            .await?;
-        if !matches {
-            return Err(run_create::seed_invariant_error(format!(
-                "dataset_version_id '{}' already exists with different dataset identity",
-                draft.dataset_version_id
-            )));
-        }
+        run_create::upsert_dataset_version(
+            &mut tx,
+            draft.dataset_version_id,
+            draft.dataset_id,
+            &draft.dataset_version,
+        )
+        .await?;
         // Serialize competing begins on the same public run key. Existing run
         // inserts retain their own conflict checks and cannot be overwritten.
         sqlx::query(queries::LOCK_IDENTITY)
@@ -126,10 +117,7 @@ pub(crate) async fn begin(
             .fetch_optional(&mut *tx)
             .await?
         {
-            ensure!(
-                existing.3 == "creating",
-                "run is terminal or already activated"
-            );
+            ensure!(existing.3 != "cancelled", "run was cancelled");
             ensure!(
                 existing.0 == draft.profile_hash
                     && existing.1 == draft.aggregation_policy_hash
@@ -143,16 +131,18 @@ pub(crate) async fn begin(
                             .as_object_mut()
                             .expect("object checked")
                             .remove("plan_status");
+                        // Publication derives this bounded finalization read
+                        // projection from the same immutable shard metadata.
+                        snapshot
+                            .as_object_mut()
+                            .expect("object checked")
+                            .remove("settlement_plan");
                         snapshot == draft.config_snapshot
                     },
                 "run replay changed profile, dataset, or storage owner"
             );
         } else {
             run_create::insert_run_create(&mut tx, id, draft, "creating").await?;
-            sqlx::query(queries::SET_CREATION_KIND)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
             sqlx::query(queries::INSERT_PLAN)
                 .bind(id)
                 .bind(dataset)

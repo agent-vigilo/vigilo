@@ -44,7 +44,7 @@ COMMENT ON COLUMN run_snapshots.dataset_version_id IS
     'Dataset version used by local run chunks in this execution placement.';
 
 COMMENT ON COLUMN run_snapshots.config_snapshot IS
-    'Frozen run configuration/profile snapshot needed by workers without reading control storage.';
+    'Verified immutable plan references, storage binding and limits, exact settlement manifest, and bounded gate policy/counts needed locally without reading control storage.';
 
 COMMENT ON COLUMN run_snapshots.expected_execution_count IS
     'Expected execution count for this run shard in this execution placement.';

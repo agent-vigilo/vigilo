@@ -286,7 +286,6 @@ async fn gated_receipts_keep_64_row_pages_and_exact_missing_case_populations(poo
     .unwrap();
     for ordinal in 0..65 {
         ranged_chunk(&pool, run, dataset, ordinal, ordinal + 1, "failed").await;
-        seed_planned_case(&pool, run, 4, dataset, Uuid::now_v7(), ordinal).await;
     }
     let mut tx = pool.begin().await.unwrap();
     settle_terminal_chunks_with(&mut tx, run, 4).await.unwrap();
@@ -303,10 +302,7 @@ async fn gated_receipts_keep_64_row_pages_and_exact_missing_case_populations(poo
             .unwrap();
         assert_eq!(summary.settled_chunk_count, expected);
         assert_eq!(summary.missing_execution_count, expected);
-        assert_eq!(
-            summary.scorecard["entries"][0]["expected_count"],
-            json!(expected)
-        );
+        assert_eq!(summary.scorecard["entries"][0]["expected_count"], json!(65));
         assert_eq!(summary.scorecard["entries"][0]["scored_count"], json!(0));
         assert!(!summary.sealed);
     }

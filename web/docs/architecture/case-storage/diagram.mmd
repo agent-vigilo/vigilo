@@ -11,3 +11,9 @@ flowchart LR
     app -->|"Write immutable objects"| adapter
     adapter --> blobs
     control -->|"Read compact progress and references"| inspection
+    worker["Workers<br/>verify assigned ranges and frozen configuration"]
+    execution[("Execution PostgreSQL<br/>chunks, references, gate counts, results")]
+    control -->|"Admit exact plan"| execution
+    execution -->|"Chunk leases and immutable references"| worker
+    worker -->|"Verified bounded reads"| adapter
+    worker -->|"Attempts and results"| execution

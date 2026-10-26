@@ -75,6 +75,7 @@ Host-side commands use published ports:
 ```bash
 export DATABASE_URL=postgresql://postgres:password@localhost:5432/agent_vigilo
 export MESSAGING_URL=amqp://guest:guest@localhost:5672
+export VIGILO_STORAGE_CONFIG="$PWD/infra/dev/storage.toml"
 ```
 
 ## Sharded Database
@@ -113,6 +114,7 @@ export DATABASE_URL=postgresql://postgres:password@localhost:5432/agent_vigilo
 export VIGILO_TEST_SHARD_001_DATABASE_URL=postgresql://postgres:password@localhost:5433/agent_vigilo
 export VIGILO_SHARD_001_DATABASE_URL=postgresql://postgres:password@localhost:5433/agent_vigilo
 export MESSAGING_URL=amqp://guest:guest@localhost:5672
+export VIGILO_STORAGE_CONFIG="$PWD/infra/dev/storage.toml"
 ```
 
 Run integration tests against infrastructure and bootstrap services only. Stop
@@ -143,6 +145,14 @@ cargo test -p vigilo --locked --test multi_database_e2e -- --nocapture
 
 The E2E harness uses a per-run `VIGILO_MQ_NAMESPACE`, so it does not consume
 messages left by a previous local runtime stack.
+
+The shared `infra/dev/storage.toml` configures host publication and runtime reads.
+Export `DEV_S3_ACCESS_KEY_ID` and `DEV_S3_SECRET_ACCESS_KEY` from the selected env
+file for host commands. Containers use `VIGILO_S3_READ_ENDPOINT=http://ceph:3900`
+through the owner's `read_endpoint_variable`; the canonical endpoint still pins
+the same namespace as the host. Every read verifies immutable object hashes.
+When changing the development bucket, prefix or published port, update the
+owner file to match. Coordinators and workers wait for healthy object storage.
 
 ## Local Object Storage
 

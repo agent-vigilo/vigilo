@@ -164,13 +164,14 @@ waits create tail latency.
 
 ## Run Creation Paging
 
-Immediate creation and coordinator recovery use the same explicitly validated
-paging policy.
+Immediate creation and coordinator recovery use the same bounded metadata
+paging policy. Case payloads stay in object storage; these limits govern chunk
+scheduling metadata.
 
 | Flag | Environment | Scope | Default | Purpose |
 | --- | --- | --- | ---: | --- |
-| `--run-creation-case-batch-size` | `VIGILO_RUN_CREATION_CASE_BATCH_SIZE` | `run create`, `coordinator` | `1000` | Maximum cases written in one creation page. |
-| `--run-creation-case-page-budget` | `VIGILO_RUN_CREATION_CASE_PAGE_BUDGET` | `run create`, `coordinator` | `64` | Maximum pages written for one placement attempt. |
+| `--run-creation-case-batch-size` | `VIGILO_RUN_CREATION_CASE_BATCH_SIZE` | `run create`, `coordinator` | `1000` | Maximum planned cases represented by one chunk-metadata insert, with at least one whole chunk. |
+| `--run-creation-case-page-budget` | `VIGILO_RUN_CREATION_CASE_PAGE_BUDGET` | `run create`, `coordinator` | `64` | Maximum immutable chunk pages admitted per creation attempt. |
 | `--default-shard-database-alias` | `VIGILO_DEFAULT_SHARD_DATABASE_ALIAS` | `setup`, `run create` | `primary` | Default target for `single-default` assignment. |
 | `--shard-assignment-policy` | `VIGILO_SHARD_ASSIGNMENT_POLICY` | `setup`, `run create` | `single-default` | Placement policy used for newly created runs. |
 

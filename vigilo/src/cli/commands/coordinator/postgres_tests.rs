@@ -149,7 +149,6 @@ async fn failed_evaluation_waits_for_live_work_then_finalizes_missing_results(po
         let attempt = Uuid::now_v7();
         seed_execution(&pool, run, 4, done, execution, attempt, "completed").await;
         seed_aggregate(&pool, run, 4, execution, attempt, "failed").await;
-        seed_planned_case(&pool, run, 4, dataset, Uuid::now_v7(), 1).await;
         let mut tx = pool.begin().await.unwrap();
         run_shard_summary::settle_chunk_with(&mut tx, run, 4, done)
             .await

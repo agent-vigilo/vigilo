@@ -44,14 +44,15 @@ sequenceDiagram
                 Vigilo->>Queue: Acknowledge duplicate or stale message
                 Vigilo-->>User: Success response
             else Chunk claimed
-                Vigilo->>ExecutionDB: Load and verify run snapshot and assigned blob references
-                ExecutionDB-->>Vigilo: Profile, pinned execution plan, and blob references
+                Vigilo->>ExecutionDB: Extend chunk lease and start heartbeat
+                Vigilo->>ExecutionDB: Read compact snapshot and immutable plan reference
+                ExecutionDB-->>Vigilo: Compact plan, binding and gate metadata
+                Vigilo->>Objects: Verify frozen configuration and chunk plan
                 Vigilo->>Objects: Retrieve bounded assigned case batches
                 Objects-->>Vigilo: Immutable batch bytes
-                Vigilo->>Vigilo: Verify byte count, hash, schema, and case membership
+                Vigilo->>Vigilo: Verify complete files and exact assigned case membership
                 Vigilo->>ControlDB: Fetch pinned evaluator artifacts by database id
                 ControlDB-->>Vigilo: Exact artifact and ABI records
-                Vigilo->>ExecutionDB: Start chunk and attempt lease heartbeat
                 Vigilo->>WASM: Warm evaluator components
                 WASM-->>Vigilo: Warmup result
                 Vigilo->>Queue: Hold delivery unacked while chunk is owned

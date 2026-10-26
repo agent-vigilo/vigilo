@@ -171,25 +171,22 @@ terminal executions, so the index covers every execution status.
 
 ## Routing Lifecycle
 
-Run creation persists a recoverable control plan before it writes to any remote
-execution placement:
+Run creation publishes a verified immutable plan before admitting execution:
 
-- The control database receives the canonical dataset metadata, a non-dispatchable
-  `creating` run, shard placements, one creation-ledger row per selected
-  database, and the exact temporary chunk plan.
-- The shard assignment policy chooses the execution placement for each used
-  `run_shard` and persists the result in `shard_placements`.
-- Each selected execution placement receives local prerequisites and only its
-  pending chunks in one idempotent transaction. A committed seed can therefore
-  be applied again safely if the process fails before the control database records
-  that placement as seeded.
-- After every placement is seeded, one control transaction creates dispatch
-  cursors, changes the run to `pending`, and removes the temporary chunk plan.
-  No coordinator or worker can dispatch a partially seeded run.
-- Before normal lease recovery and dispatch, coordinators claim expired
-  `creating` runs and continue their remaining placement work. Retryable
-  failures remain recoverable; incompatible persisted data fails the run
-  without creating dispatch cursors.
+- The control database stores a `creating` run, dataset/plan references, exact
+  file ownership, and at most 128 shard summaries of planned work.
+- The assignment policy freezes initial execution placements in the plan.
+- Bounded metadata pages seed execution-local chunks and compact snapshots.
+  They contain storage references, settlement hashes, gate policy and expected
+  gate counts. Cases and per-case membership remain in object storage.
+- Local commits precede contiguous control acknowledgements. Retries verify
+  immutable identity and replay safely after lost acknowledgements.
+- Admission independently verifies exact local chunk coverage. One fenced
+  transaction publishes shard routes and dispatch cursors and sets `pending`.
+- Coordinators resume only ready plans with execution requested. Prepared-only
+  runs stay held. Cancellation closes partial local admission before a stale
+  creator can restore work. See
+  [Run Preparation](/docs/architecture/case-storage/run-preparation).
 - The default policy is explicit and conservative:
   `VIGILO_SHARD_ASSIGNMENT_POLICY=single-default` assigns all new run shards to
   `VIGILO_DEFAULT_SHARD_DATABASE_ALIAS`.

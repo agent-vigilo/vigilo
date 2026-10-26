@@ -6338,6 +6338,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-s3",
  "blake3",
  "chrono",
  "clap",
@@ -6349,6 +6350,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "tokio",
  "toml 1.1.2+spec-1.1.0",
  "url",
  "uuid",

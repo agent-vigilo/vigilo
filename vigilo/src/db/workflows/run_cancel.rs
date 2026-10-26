@@ -300,6 +300,43 @@ async fn finalize_control_cancellation(
     Ok(outcome)
 }
 
+/// Fences partially seeded placements before activation has published routes.
+/// Closed tombstones also reject an old creator whose remote transaction starts
+/// after cancellation. Exclusive shard fences serialize those local writes.
+async fn cancel_unadmitted_plan(
+    router: &database::DatabaseRouter,
+    run_id: Uuid,
+) -> anyhow::Result<ExecutionCancellationOutcome> {
+    let db = router.control().await?;
+    let rows:Vec<(i16,String)>=sqlx::query_as("SELECT run_shard,database_alias FROM run_plan_shards WHERE run_id=$1 ORDER BY database_alias,run_shard")
+        .bind(run_id).fetch_all(db).await?;
+    let mut placements = BTreeMap::<String, Vec<i16>>::new();
+    for (shard, alias) in rows {
+        placements.entry(alias).or_default().push(shard);
+    }
+    let mut combined = ExecutionCancellationOutcome::default();
+    for (alias, shards) in placements {
+        let local = router.execution_database(&alias).await?;
+        let mut tx = local.begin().await?;
+        sqlx::query("SET LOCAL statement_timeout='30s'")
+            .execute(&mut *tx)
+            .await?;
+        for shard in &shards {
+            crate::db::shard_write_fence::lock_exclusive(&mut tx, run_id, *shard).await?;
+            sqlx::query("INSERT INTO local_shard_admissions(run_id,run_shard,database_alias,write_epoch,state) VALUES($1,$2,$3,1,'closed') ON CONFLICT(run_id,run_shard) DO UPDATE SET state='closed',updated_at=now() WHERE local_shard_admissions.write_epoch=1")
+                .bind(run_id).bind(shard).bind(&alias).execute(&mut *tx).await?;
+        }
+        sqlx::query("UPDATE runs SET status='cancelled' WHERE id=$1")
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await?;
+        let seeded:Vec<i16>=sqlx::query_scalar("SELECT run_shard FROM run_snapshots WHERE run_id=$1 AND run_shard=ANY($2) ORDER BY run_shard")
+            .bind(run_id).bind(&shards).fetch_all(&mut *tx).await?;
+        combined.add(cancel_execution_target_with_transaction(run_id, seeded, tx).await?);
+    }
+    Ok(combined)
+}
+
 /// Cancels a pending/running/finalizing run through routed execution databases.
 ///
 /// Returns `Ok(None)` when the run does not exist. Repeated cancellation of an
@@ -331,7 +368,11 @@ pub(crate) async fn cancel_run_routed(
         .await?;
     let execution_route_count = routes.len();
     let targets = group_execution_routes(routes);
-    let execution_outcome = cancel_execution_targets(database_router, run_id, targets).await?;
+    let execution_outcome = if execution_route_count == 0 {
+        cancel_unadmitted_plan(database_router, run_id).await?
+    } else {
+        cancel_execution_targets(database_router, run_id, targets).await?
+    };
 
     finalize_control_cancellation(control_db, state, execution_outcome, execution_route_count)
         .await

@@ -557,33 +557,13 @@ async fn force_cannot_move_a_shard_with_active_work(pool: PgPool) {
 }
 #[sqlx::test(migrations = "../migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
-async fn copy_case_blob_rows_preserves_json_null_context(pool: PgPool) {
-    let case_hash = format!("case-{}", Uuid::now_v7());
-    let source_rows = vec![
-        serde_json::json!({         "case_hash": case_hash,         "task_type": "classification",         "case_group": null,         "input_payload": {"text": "hello"},         "expected_output": null,         "context_payload": null,         "tags": [],         "metadata": {},         "created_at": Utc::now(),     }),
-    ];
-    let mut tx = pool.begin().await.unwrap();
-    copy_json_rows(&mut tx, "case_blobs", source_rows)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    let context_payload = sqlx::query_scalar::<_, Value>(         r#"             SELECT context_payload             FROM case_blobs             WHERE case_hash = $1             "#,     )     .bind(case_hash)     .fetch_one(&pool)     .await     .unwrap();
-    assert_eq!(context_payload, Value::Null);
-}
-#[sqlx::test(migrations = "../migrations")]
-#[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn prerequisite_fingerprints_ignore_local_timestamps_and_run_lifecycle(pool: PgPool) {
     let run_id = Uuid::now_v7();
     let dataset_id = Uuid::now_v7();
     let dataset_version_id = Uuid::now_v7();
-    let case_id = Uuid::now_v7();
-    let case_hash = format!("case-{}", Uuid::now_v7());
     seed_run(&pool, run_id, dataset_id, dataset_version_id).await;
-    seed_case(&pool, dataset_version_id, case_id, &case_hash).await;
     let before = prerequisite_fingerprints(&pool, run_id).await;
-    sqlx::query(         r#"             UPDATE case_blobs             SET created_at = created_at + interval '1 second'             WHERE case_hash = $1             "#,     )     .bind(&case_hash)     .execute(&pool)     .await     .unwrap();
     sqlx::query(         r#"             UPDATE dataset_versions             SET created_at = created_at + interval '1 second',                 updated_at = updated_at + interval '1 second'             WHERE dataset_version_id = $1::uuid             "#,     )     .bind(dataset_version_id)     .execute(&pool)     .await     .unwrap();
-    sqlx::query(         r#"             UPDATE dataset_version_cases             SET created_at = created_at + interval '1 second',                 updated_at = updated_at + interval '1 second'             WHERE dataset_version_id = $1::uuid               AND case_id = $2::uuid             "#,     )     .bind(dataset_version_id)     .bind(case_id)     .execute(&pool)     .await     .unwrap();
     sqlx::query(         r#"             UPDATE runs             SET status = 'completed'::run_status,                 gate_status = 'pass'::gate_status,                 terminal_execution_count = 1,                 passed_execution_count = 1,                 summary = '{"local":"changed"}'::jsonb,                 completed_at = now(),                 updated_at = now()             WHERE id = $1::uuid             "#,     )     .bind(run_id)     .execute(&pool)     .await     .unwrap();
     let after = prerequisite_fingerprints(&pool, run_id).await;
     assert_eq!(before, after);

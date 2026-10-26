@@ -1,0 +1,14 @@
+# Shared host/container identity for the bundled development bucket.
+provider = "s3"
+alias = "case-storage"
+bucket = "vigilo-dev"
+prefix = "vigilo"
+region = "us-east-1"
+endpoint = "http://127.0.0.1:3900"
+read_endpoint_variable = "VIGILO_S3_READ_ENDPOINT"
+allow_http = true
+path_style = true
+
+[credential_variables]
+access_key = "DEV_S3_ACCESS_KEY_ID"
+secret_key = "DEV_S3_SECRET_ACCESS_KEY"

@@ -237,6 +237,12 @@ jobs:
       DATABASE_URL: postgresql://postgres:password@localhost:5432/agent_vigilo
       VIGILO_TEST_SHARD_001_DATABASE_URL: postgresql://postgres:password@localhost:5433/agent_vigilo
       MESSAGING_URL: amqp://guest:guest@localhost:5672
+      DEV_S3_ACCESS_KEY_ID: vigilo-ci-runtime
+      DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-runtime-secret
+      DEV_S3_BUCKET: vigilo-ci-runtime
+      DEV_S3_PORT: 13900
+      COMPOSE_PROJECT_NAME: vigilo-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+      VIGILO_STORAGE_CONFIG: ${{ github.workspace }}/target/runtime-storage.toml
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -245,6 +251,23 @@ jobs:
           targets: wasm32-wasip2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Start isolated runtime object storage
+        run: |
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f infra/dev/docker-compose.single.yml up -d --build --wait --wait-timeout 240 ceph
+          mkdir -p target
+          cat > "$VIGILO_STORAGE_CONFIG" <<'EOF'
+          provider = 's3'
+          alias = 'cases'
+          bucket = 'vigilo-ci-runtime'
+          prefix = 'runtime-tests'
+          region = 'us-east-1'
+          endpoint = 'http://127.0.0.1:13900'
+          allow_http = true
+          path_style = true
+          [credential_variables]
+          access_key = 'DEV_S3_ACCESS_KEY_ID'
+          secret_key = 'DEV_S3_SECRET_ACCESS_KEY'
+          EOF
       - name: Reset coverage data
         run: cargo llvm-cov clean --workspace
       - name: Build the end-to-end evaluator
@@ -271,6 +294,12 @@ jobs:
           path: lcov-e2e.info
           if-no-files-found: error
           retention-days: 1
+      - name: Remove isolated runtime object storage
+        if: always()
+        run: >-
+          docker compose -p "$COMPOSE_PROJECT_NAME"
+          -f infra/dev/docker-compose.single.yml
+          down --volumes --remove-orphans --timeout 45
 
   blob-storage-services:
     name: Blob Storage Acceptance

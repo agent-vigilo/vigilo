@@ -49,6 +49,33 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
 
+  ceph:
+    build:
+      context: ../dev/ceph
+    entrypoint: ["/bin/bash", "/opt/vigilo-ceph/start.sh"]
+    init: true
+    hostname: perf-ceph
+    mem_limit: 4g
+    environment:
+      DEV_S3_ACCESS_KEY_ID: vigilo_perf
+      DEV_S3_SECRET_ACCESS_KEY: vigilo_perf_storage_secret
+      DEV_S3_BUCKET: vigilo-perf
+    ports:
+      - "127.0.0.1::3900"
+    volumes:
+      - ../dev/ceph:/opt/vigilo-ceph:ro
+      - ceph-data:/var/lib/ceph/dev
+    healthcheck:
+      test: ["CMD", "python3.12", "/opt/vigilo-ceph/bucket.py", "check"]
+      interval: 5s
+      timeout: 10s
+      retries: 36
+      start_period: 30s
+    stop_grace_period: 45s
+    labels:
+      io.vigilo.performance: "true"
+      io.vigilo.run-id: ${VIGILO_PERF_RUN_ID}
+
 networks:
   default:
     labels:
@@ -61,6 +88,10 @@ volumes:
       io.vigilo.performance: "true"
       io.vigilo.run-id: ${VIGILO_PERF_RUN_ID}
   rabbitmq-data:
+    labels:
+      io.vigilo.performance: "true"
+      io.vigilo.run-id: ${VIGILO_PERF_RUN_ID}
+  ceph-data:
     labels:
       io.vigilo.performance: "true"
       io.vigilo.run-id: ${VIGILO_PERF_RUN_ID}

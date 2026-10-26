@@ -1,7 +1,7 @@
 //! Bounded SQL operations for run-plan ownership and publication.
 
 pub(super) const SELECT_PLAN: &str = r#"
-    SELECT run_id,dataset_upload_id,status,storage_binding_hash,limits,execution_plan,assignments,chunk_cursor,manifest
+    SELECT run_id,dataset_upload_id,status,storage_binding_hash,limits,execution_plan,assignments,chunk_cursor,execution_requested,admission_cursor,admission_state,manifest
     FROM run_plans
     WHERE run_id=$1
 "#;
@@ -182,21 +182,7 @@ pub(super) const PUBLISH_PLAN: &str = r#"
 
 pub(super) const RELEASE_PUBLISHED_RUN: &str = r#"
     UPDATE runs
-    SET coordinator_id=NULL,coordinator_leased_until=NULL,coordinator_heartbeat_at=NULL,error_message=NULL,config_snapshot=config_snapshot || jsonb_build_object('run_plan',$2::jsonb,'plan_status','ready'),updated_at=clock_timestamp()
+    SET coordinator_id=NULL,coordinator_leased_until=NULL,coordinator_heartbeat_at=NULL,error_message=NULL,config_snapshot=config_snapshot || jsonb_build_object('run_plan',$2::jsonb,'plan_status','ready',
+        'settlement_plan',(SELECT jsonb_build_object('version',1,'shards',jsonb_object_agg(run_shard::text,jsonb_build_object('hash',planned_chunk_hash,'case_count',case_count,'chunk_count',chunk_count))) FROM run_plan_shards WHERE run_id=$1)),updated_at=clock_timestamp()
     WHERE id=$1
-"#;
-
-pub(super) const SET_CREATION_KIND: &str = r#"
-    UPDATE runs SET creation_kind='blob-plan' WHERE id=$1
-"#;
-
-pub(super) const INSERT_DATASET_VERSION: &str = r#"
-    INSERT INTO dataset_versions(dataset_version_id,dataset_id,dataset_version)
-    VALUES($1,$2,$3)
-    ON CONFLICT DO NOTHING
-"#;
-
-pub(super) const VERIFY_DATASET_VERSION: &str = r#"
-    SELECT dataset_id=$2 AND dataset_version=$3
-    FROM dataset_versions WHERE dataset_version_id=$1
 "#;

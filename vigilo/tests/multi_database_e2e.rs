@@ -128,11 +128,7 @@ async fn run_creation_recovers_after_cross_database_seed_status_failure() -> any
     );
     assert_eq!(
         run_creation_placement_state(&fixture.primary, recoverable_run_id, SHARD_ALIAS).await?,
-        ("seeded".to_string(), 2)
-    );
-    assert_eq!(
-        run_creation_chunk_plan_count(&fixture.primary, recoverable_run_id).await?,
-        0
+        ("seeded".to_string(), 3)
     );
 
     Ok(())
@@ -924,9 +920,7 @@ async fn install_seed_status_failure(primary: &PgPool) -> anyhow::Result<()> {
         LANGUAGE plpgsql
         AS $$
         BEGIN
-            IF OLD.status = 'pending'
-               AND NEW.status = 'seeded'
-               AND NEW.database_alias = 'shard_001'
+            IF NEW.admission_cursor > OLD.admission_cursor
             THEN
                 RAISE EXCEPTION 'injected failure after execution seed commit';
             END IF;
@@ -940,7 +934,7 @@ async fn install_seed_status_failure(primary: &PgPool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TRIGGER fail_run_creation_seed_status
-        BEFORE UPDATE ON run_creation_placements
+        BEFORE UPDATE ON run_plans
         FOR EACH ROW
         EXECUTE FUNCTION fail_run_creation_seed_status()
         "#,
@@ -951,7 +945,7 @@ async fn install_seed_status_failure(primary: &PgPool) -> anyhow::Result<()> {
 }
 
 async fn remove_seed_status_failure(primary: &PgPool) -> anyhow::Result<()> {
-    sqlx::query("DROP TRIGGER IF EXISTS fail_run_creation_seed_status ON run_creation_placements")
+    sqlx::query("DROP TRIGGER IF EXISTS fail_run_creation_seed_status ON run_plans")
         .execute(primary)
         .await?;
     sqlx::query("DROP FUNCTION IF EXISTS fail_run_creation_seed_status()")
@@ -1693,23 +1687,14 @@ async fn run_creation_placement_state(
 ) -> anyhow::Result<(String, i32)> {
     Ok(sqlx::query_as::<_, (String, i32)>(
         r#"
-        SELECT status, attempt_count
-        FROM run_creation_placements
+        SELECT CASE WHEN admission_cursor=chunk_cursor THEN 'seeded' ELSE 'pending' END, generation::int
+        FROM run_plans
         WHERE run_id = $1::uuid
-          AND database_alias = $2
+          AND EXISTS(SELECT 1 FROM run_plan_shards WHERE run_id=$1 AND database_alias=$2)
         "#,
     )
     .bind(run_id)
     .bind(database_alias)
-    .fetch_one(db)
-    .await?)
-}
-
-async fn run_creation_chunk_plan_count(db: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM run_creation_chunks WHERE run_id = $1::uuid",
-    )
-    .bind(run_id)
     .fetch_one(db)
     .await?)
 }

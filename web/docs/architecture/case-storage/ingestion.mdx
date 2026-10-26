@@ -119,6 +119,14 @@ Credential-variable names and credential values can rotate without changing the
 physical binding. The connector returns the provider-neutral storage interface;
 ingestion does not depend on an SDK or provider-specific file type.
 
+An optional S3 `read_endpoint_variable` names an environment variable containing
+an alternate read URL, such as an internal container address. If unset, reads use
+`endpoint`. It affects only read connections; publication and the immutable
+physical binding use the canonical endpoint. The alternate route must serve the
+same bucket/prefix and exact immutable objects. It undergoes the same URL
+validation, and every object read still verifies its expected digest and size.
+This lets host creators and container workers share one owner configuration.
+
 ## Authority and Publication
 
 <Mermaid value={ingestionState} />

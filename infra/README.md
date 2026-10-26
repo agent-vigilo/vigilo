@@ -42,7 +42,7 @@ storage contract.
 
 ## Performance Compose
 
-`infra/performance/compose.yml` defines the private PostgreSQL and RabbitMQ
+`infra/performance/compose.yml` defines the private PostgreSQL, RabbitMQ, and Ceph object-storage
 topology used by `cargo perf`. The harness creates a unique Compose project,
 loopback ports, database namespace, broker scope, labelled network, and labelled
 volumes for each campaign. Operators do not start this topology directly;

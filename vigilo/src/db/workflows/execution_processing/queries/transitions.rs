@@ -411,9 +411,9 @@ pub(crate) async fn summarize_chunk_execution_state(
     db: &PgPool,
     run_id: Uuid,
     run_shard: i16,
-    cases: &[chunk_processing::WorkerCaseBatchItem],
+    case_ids: &[Uuid],
 ) -> anyhow::Result<ChunkExecutionState> {
-    if cases.is_empty() {
+    if case_ids.is_empty() {
         return Ok(ChunkExecutionState {
             open_execution_count: 0,
             retry_scheduled_count: 0,
@@ -421,7 +421,6 @@ pub(crate) async fn summarize_chunk_execution_state(
         });
     }
 
-    let case_ids = cases.iter().map(|case| case.case_id).collect::<Vec<_>>();
     let state = sqlx::query_as::<_, ChunkExecutionState>(
         r#"
         SELECT
@@ -447,7 +446,7 @@ pub(crate) async fn summarize_chunk_execution_state(
     )
     .bind(run_id)
     .bind(run_shard)
-    .bind(&case_ids)
+    .bind(case_ids)
     .fetch_one(db)
     .await?;
 

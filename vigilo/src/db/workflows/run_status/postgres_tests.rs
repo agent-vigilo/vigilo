@@ -86,23 +86,6 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
-        r#"
-            INSERT INTO run_creation_placements (
-                run_id, database_alias, status, attempt_count,
-                expected_case_count, seeded_case_count,
-                case_projection_hash, last_error
-            )
-            VALUES (
-                $1, 'unseeded', 'failed', 1,
-                1, 0, 'fixture-projection-hash', 'immutable seed mismatch'
-            )
-            "#,
-    )
-    .bind(run_id)
-    .execute(&pool)
-    .await
-    .unwrap();
     let database_router = database_router_with_control_pool(pool);
 
     let status = select_run_status(&database_router, run_id)
@@ -116,7 +99,7 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
             .creation_progress
             .as_ref()
             .map(|progress| progress.failed_placement_count),
-        Some(1)
+        Some(0)
     );
 }
 

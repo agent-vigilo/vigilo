@@ -44,6 +44,9 @@ pub(crate) enum OwnerConfig {
         prefix: String,
         region: String,
         endpoint: Option<String>,
+        /// Optional environment variable for a read route to the same namespace. The canonical
+        /// endpoint remains the binding identity; every read verifies its hash.
+        read_endpoint_variable: Option<String>,
         #[serde(default)]
         allow_http: bool,
         #[serde(default)]
@@ -52,6 +55,20 @@ pub(crate) enum OwnerConfig {
     },
 }
 impl OwnerConfig {
+    /// Reads a bounded owner configuration. Secrets remain environment references.
+    pub fn load(path: &std::path::Path) -> Result<Self> {
+        use std::io::Read;
+        ensure!(
+            std::fs::metadata(path)?.is_file(),
+            "storage config must be a regular file"
+        );
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(64 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= 64 * 1024, "storage config exceeds 64 KiB");
+        Ok(toml::from_str(std::str::from_utf8(&bytes)?)?)
+    }
     pub fn alias(&self) -> &str {
         match self {
             Self::S3 { alias, .. } => alias,
@@ -99,6 +116,7 @@ impl OwnerConfig {
                 prefix,
                 region,
                 endpoint,
+                read_endpoint_variable,
                 allow_http,
                 ..
             } => {
@@ -126,6 +144,16 @@ impl OwnerConfig {
                             .all(|c| c.is_ascii_alphanumeric() || c == b'-'),
                     "invalid storage region"
                 );
+                if let Some(variable) = read_endpoint_variable {
+                    ensure!(
+                        !variable.is_empty()
+                            && variable.len() <= 128
+                            && variable
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || c == b'_'),
+                        "invalid read endpoint variable"
+                    );
+                }
                 if let Some(endpoint) = endpoint {
                     let url = reqwest::Url::parse(endpoint)?;
                     ensure!(
@@ -142,6 +170,63 @@ impl OwnerConfig {
         }
         Ok(())
     }
+    /// Connects to an admitted namespace without issuing write probes.
+    pub async fn reader(
+        &self,
+        limits: FormatLimits,
+        budget: Budget,
+        cancel: &CancellationToken,
+    ) -> Result<Box<dyn super::BlobStorage>> {
+        self.validate(&limits)?;
+        let Self::S3 {
+            alias,
+            bucket,
+            prefix,
+            region,
+            endpoint,
+            read_endpoint_variable,
+            allow_http,
+            path_style,
+            credential_variables,
+        } = self;
+        let read_endpoint = read_endpoint_variable
+            .as_ref()
+            .map(|name| match std::env::var(name) {
+                Ok(value) => Ok(Some(value)),
+                Err(std::env::VarError::NotPresent) => Ok(None),
+                Err(error) => Err(anyhow::anyhow!(
+                    "invalid read endpoint variable {name}: {error}"
+                )),
+            })
+            .transpose()?
+            .flatten();
+        Ok(Box::new(
+            S3Storage::reader(
+                S3Config {
+                    alias: alias.clone(),
+                    probe_key: String::new(),
+                    bucket: bucket.clone(),
+                    prefix: prefix.clone(),
+                    region: region.clone(),
+                    endpoint: read_endpoint.or_else(|| endpoint.clone()),
+                    allow_http: *allow_http,
+                    path_style: *path_style,
+                    credential_variables: credential_variables.as_ref().map(|v| {
+                        (
+                            v.access_key.clone(),
+                            v.secret_key.clone(),
+                            v.session_token.clone(),
+                        )
+                    }),
+                },
+                limits,
+                RESOURCES.get_or_init(Resources::standard).clone(),
+                budget,
+                cancel,
+            )
+            .await?,
+        ))
+    }
     pub async fn open(
         &self,
         probe_key: String,
@@ -157,6 +242,7 @@ impl OwnerConfig {
                 prefix,
                 region,
                 endpoint,
+                read_endpoint_variable: _,
                 allow_http,
                 path_style,
                 credential_variables,
@@ -199,7 +285,7 @@ mod tests {
         let a: OwnerConfig = toml::from_str(text).unwrap();
         a.validate(&FormatLimits::default()).unwrap();
         let b: OwnerConfig = toml::from_str(&format!(
-            "{text}\n[credential_variables]\naccess_key='A'\nsecret_key='B'\n"
+            "{text}\nread_endpoint_variable='INTERNAL_READ_ROUTE'\n[credential_variables]\naccess_key='A'\nsecret_key='B'\n"
         ))
         .unwrap();
         assert_eq!(a.binding_hash().unwrap(), b.binding_hash().unwrap());

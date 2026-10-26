@@ -10,10 +10,10 @@ flowchart TD
     Registry[Versioned workload and model registry]
     Profile[Explicit profile tuples]
     Build[Immutable release build and setup assets]
-    Isolation[Fresh database clone, broker scope, and HTTP agent]
+    Isolation[Fresh database clone, broker scope, owned object storage and HTTP agent]
     Routed[Optional routed database clones]
     Process[Supported release CLI processes]
-    Oracle{Exact correctness oracle}
+    Oracle{Exact SQL and immutable-object oracle}
     Sample[Raw timed sample]
     Diagnostics[Post-timing query, buffer, and WAL diagnostics]
     DataEvidence[Export stream and per-table page evidence]

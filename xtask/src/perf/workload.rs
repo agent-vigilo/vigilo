@@ -36,6 +36,7 @@ use anyhow::{
     Context,
     Result,
     bail,
+    ensure,
 };
 use postgres::{
     Client,
@@ -217,7 +218,7 @@ impl WorkloadRunner {
         let template = service.owned_database_name(&prepared.url)?;
         let database_url = service.clone_database(&template, request.workload_id)?;
         let mut placement_urls = Vec::with_capacity(prepared.placements.len());
-        let mut route_env = Vec::with_capacity(prepared.placements.len() + 1);
+        let mut route_env = service.storage_env();
         for placement in &prepared.placements {
             let template = service.owned_database_name(&placement.url)?;
             let url = service.clone_database(&template, request.workload_id)?;
@@ -326,7 +327,11 @@ impl WorkloadRunner {
         let shape = workload_shape(&fixture, workload_id, tuple)?;
         let route_count = required_routes(workload_id, tuple)?;
         let mut placements = Vec::with_capacity(route_count.saturating_sub(1));
-        let mut route_env = Vec::with_capacity(route_count.saturating_sub(1));
+        let mut route_env = self
+            .service
+            .as_ref()
+            .context("service topology was not started")?
+            .storage_env();
         for index in 1..route_count {
             let alias = format!("perf_{index:02}");
             let env_key = format!("VIGILO_PERF_DATABASE_URL_{index:02}");
@@ -407,7 +412,13 @@ impl WorkloadRunner {
                         &route_env,
                         limits,
                     )?;
-                    seed_open_executions(&route_urls, run_id)?;
+                    seed_open_executions(
+                        self.service
+                            .as_ref()
+                            .context("service topology was not started")?,
+                        &route_urls,
+                        run_id,
+                    )?;
                 }
                 "run.read.v1" | "run.export.v1" => prepare_terminal_run(
                     self.service
@@ -503,6 +514,7 @@ impl WorkloadRunner {
                     service.finish_measurement(scope, baseline, DurableCounts::new())?;
                 let run_id = product(parse_run_id(&process.stdout.text()))?;
                 external.durable_counts = product(oracle_ingestion(
+                    service,
                     &scope.database_url,
                     &run_id,
                     shape,
@@ -2795,46 +2807,55 @@ fn ensure_execution_routes(
     Ok(())
 }
 
-fn seed_open_executions(database_urls: &[String], run_id: &str) -> Result<()> {
-    for database_url in database_urls {
-        let mut client = Client::connect(database_url, NoTls)?;
-        client.execute(
-            r#"
-            INSERT INTO executions (
-                run_id, run_shard, chunk_id, case_id, case_hash,
-                profile_group_id, task_type, tags, input_payload,
-                expected_output, case_metadata, evaluation_profile_id,
-                evaluation_profile_version, evaluator_manifest,
-                expected_evaluator_count, status
-            )
-            SELECT
-                membership.run_id, membership.run_shard, chunk.id,
-                membership.case_id, membership.case_hash, 'sentiment',
-                blob.task_type, blob.tags, blob.input_payload,
-                blob.expected_output, blob.metadata,
-                run.evaluation_profile_id, run.evaluation_profile_version,
-                '[]'::jsonb, 0, 'pending'::execution_status
-            FROM run_shard_cases membership
-            JOIN run_chunks chunk
-              ON chunk.run_id = membership.run_id
-             AND chunk.run_shard = membership.run_shard
-             AND membership.case_ordinal >= chunk.ordinal_start
-             AND membership.case_ordinal < chunk.ordinal_end
-            JOIN case_blobs blob ON blob.case_hash = membership.case_hash
-            JOIN runs run ON run.id = membership.run_id
-            WHERE membership.run_id = $1::text::uuid
-            ON CONFLICT (run_id, run_shard, case_id) DO NOTHING
-            "#,
+fn seed_open_executions(
+    service: &ServiceHarness,
+    database_urls: &[String],
+    run_id: &str,
+) -> Result<()> {
+    let reader = service.storage_reader()?;
+    let control = database_urls
+        .first()
+        .context("missing fixture control database")?;
+    let mut owners = std::collections::BTreeMap::new();
+    for (index, url) in database_urls.iter().enumerate() {
+        let mut client = Client::connect(url, NoTls)?;
+        for row in client.query(
+            "SELECT DISTINCT run_shard FROM run_chunks WHERE run_id=$1::text::uuid",
             &[&run_id],
-        )?;
+        )? {
+            let shard: i16 = row.get(0);
+            ensure!(
+                owners.insert(shard, index).is_none(),
+                "fixture shard is stored in multiple databases"
+            );
+        }
     }
+    reader.batches(control,run_id,|records|{
+        let mut batches=std::collections::BTreeMap::<usize,Vec<Value>>::new();
+        for record in records {
+            let ordinal=record["case_ordinal"].as_i64().context("missing fixture case ordinal")?;
+            let owner=owners.get(&((ordinal/100%128) as i16)).context("case has no fixture execution placement")?;
+            batches.entry(*owner).or_default().push(record);
+        }
+        for (index,records) in batches {
+            let mut client=Client::connect(&database_urls[index],NoTls)?;
+            client.execute(r#"
+                INSERT INTO executions(run_id,run_shard,chunk_id,case_id,case_hash,profile_group_id,task_type,tags,input_payload,expected_output,case_metadata,evaluation_profile_id,evaluation_profile_version,evaluator_manifest,expected_evaluator_count,status)
+                SELECT c.run_id,c.run_shard,c.id,(r->'source'->>'id')::uuid,r->>'case_hash','sentiment',r->'source'->>'task_type',COALESCE(r->'source'->'tags','[]'::jsonb),r->'source'->'input',COALESCE(r->'source'->'expected','null'::jsonb),COALESCE(r->'source'->'metadata','{}'::jsonb),run.evaluation_profile_id,run.evaluation_profile_version,'[]'::jsonb,0,'pending'::execution_status
+                FROM jsonb_array_elements($2::jsonb) r
+                JOIN run_chunks c ON c.run_id=$1::text::uuid AND (r->>'case_ordinal')::int>=c.ordinal_start AND (r->>'case_ordinal')::int<c.ordinal_end
+                JOIN runs run ON run.id=c.run_id ON CONFLICT(run_id,run_shard,case_id) DO NOTHING
+            "#,&[&run_id,&serde_json::json!(records)])?;
+        }
+        Ok(())
+    })?;
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
 /// Completes a reusable routed run and adds deterministic diagnostic rows.
 fn prepare_terminal_run(
-    _service: &mut ServiceHarness,
+    service: &mut ServiceHarness,
     _binary: &Path,
     control_database_url: &str,
     run_id: &str,
@@ -2844,7 +2865,7 @@ fn prepare_terminal_run(
     _worker_pass_limit: usize,
     _limits: ExecutionLimits,
 ) -> Result<()> {
-    seed_open_executions(database_urls, run_id)?;
+    seed_open_executions(service, database_urls, run_id)?;
     for database_url in database_urls {
         let mut client = Client::connect(database_url, NoTls)?;
         client.execute(
@@ -3073,10 +3094,6 @@ fn consolidate_shard_rows(database_url: &str, run_id: &str) -> Result<()> {
     let mut client = Client::connect(database_url, NoTls)?;
     client.execute(
         "UPDATE run_chunks SET run_shard = 0 WHERE run_id = $1::text::uuid AND run_shard <> 0",
-        &[&run_id],
-    )?;
-    client.execute(
-        "UPDATE run_shard_cases SET run_shard = 0 WHERE run_id = $1::text::uuid AND run_shard <> 0",
         &[&run_id],
     )?;
     Ok(())
@@ -3435,6 +3452,7 @@ fn oracle_create(
 
 /// Proves real stored payload/membership counts and reuse without executing cases.
 fn oracle_ingestion(
+    service: &ServiceHarness,
     database_url: &str,
     run_id: &str,
     shape: IngestionShape,
@@ -3446,43 +3464,50 @@ fn oracle_ingestion(
     for (name, query, expected) in [
         (
             "total_runs",
-            "SELECT COUNT(*)::bigint FROM runs",
+            "SELECT count(*)::bigint FROM runs",
             if shape.reuse { 2 } else { 1 },
         ),
         (
             "dataset_versions",
-            "SELECT COUNT(*)::bigint FROM dataset_versions",
+            "SELECT count(*)::bigint FROM dataset_versions",
             1,
         ),
         (
-            "case_blobs",
-            "SELECT COUNT(*)::bigint FROM case_blobs",
-            cases,
+            "dataset_catalogs",
+            "SELECT count(*)::bigint FROM dataset_catalog",
+            1,
         ),
         (
-            "dataset_memberships",
-            "SELECT COUNT(*)::bigint FROM dataset_version_cases",
-            cases,
+            "referenced_datasets",
+            "SELECT count(DISTINCT dataset_upload_id)::bigint FROM run_plans",
+            1,
         ),
     ] {
         let actual: i64 = client.query_one(query, &[])?.get(0);
         counts.insert(name.into(), actual);
         require_count(&counts, name, expected)?;
     }
-    let memberships = scalar(
-        &mut client,
-        "SELECT COUNT(*)::bigint FROM run_shard_cases WHERE run_id = $1::text::uuid",
-        run_id,
-    )?;
-    counts.insert("run_case_memberships".into(), memberships);
-    require_count(&counts, "run_case_memberships", cases)?;
-    let matching: i64 = client.query_one(
-        "SELECT COUNT(*)::bigint FROM case_blobs WHERE input_payload->>'payload' = repeat('x', $1)",
-        &[&i32::try_from(shape.payload_bytes)?],
-    )?.get(0);
-    if matching != cases {
-        bail!("ingestion payload oracle found {matching} matching cases; expected {cases}");
-    }
+    let stored = service
+        .storage_reader()?
+        .batches(database_url, run_id, |records| {
+            for record in records {
+                let payload = record["source"]["input"]["payload"]
+                    .as_str()
+                    .context("fixture payload missing")?;
+                if payload.len() != shape.payload_bytes || !payload.bytes().all(|c| c == b'x') {
+                    bail!("stored fixture payload changed");
+                }
+                if record["source"]["metadata"]["ordinal"] != record["case_ordinal"] {
+                    bail!("stored fixture order changed");
+                }
+            }
+            Ok(())
+        })?;
+    counts.insert("stored_cases".into(), stored);
+    require_count(&counts, "stored_cases", cases)?;
+    let sql_cases:i64=client.query_one("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name=ANY(ARRAY['case_blobs','dataset_version_cases','run_shard_cases'])",&[])?.get(0);
+    counts.insert("case_payload_tables".into(), sql_cases);
+    require_count(&counts, "case_payload_tables", 0)?;
     require_count(&counts, "attempts", 0)?;
     require_count(&counts, "evaluator_results", 0)?;
     Ok(counts)
@@ -3498,31 +3523,21 @@ fn oracle_create_boundary(
     let mut counts = structural_counts(database_url, Some(run_id))?;
     let mut client = Client::connect(database_url, NoTls)?;
     let status = run_status_with(&mut client, run_id)?;
-    let materialized_cases = scalar(
-        &mut client,
-        "SELECT COUNT(*)::bigint FROM run_shard_cases WHERE run_id = $1::text::uuid",
-        run_id,
-    )?;
-    let expected_materialized = cases.min(64_000) as i64;
-    let expected_status = if cases > 64_000 {
-        "creating"
-    } else {
-        "pending"
-    };
-    require_status_value(&status, expected_status)?;
+    require_status_value(&status, "pending")?;
     require_count(&counts, "runs", 1)?;
     require_count(&counts, "chunks", chunks)?;
     require_count(&counts, "executions", 0)?;
-    if materialized_cases != expected_materialized {
-        bail!(
-            "creation boundary materialized {materialized_cases} cases; expected {expected_materialized}"
-        );
+    let admitted: i32 = client
+        .query_one(
+            "SELECT admission_cursor FROM run_plans WHERE run_id=$1::text::uuid",
+            &[&run_id],
+        )?
+        .get(0);
+    if i64::from(admitted) != chunks {
+        bail!("creation boundary admitted {admitted} chunks, expected {chunks}");
     }
-    counts.insert("cases".into(), materialized_cases);
-    counts.insert(
-        "creation_recovery_pending".into(),
-        i64::from(cases > 64_000),
-    );
+    counts.insert("cases".into(), cases as i64);
+    counts.insert("creation_recovery_pending".into(), 0);
     Ok(counts)
 }
 

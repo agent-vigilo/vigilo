@@ -26,7 +26,6 @@ use queries::{
 };
 pub(crate) use queries::{
     extend_chunk_lease,
-    load_chunk_case_batch,
     release_chunk_as_pending,
 };
 
@@ -93,45 +92,6 @@ pub(crate) struct WorkerCaseBatchItem {
     pub(crate) context_payload: serde_json::Value,
     pub(crate) tags: serde_json::Value,
     pub(crate) metadata: serde_json::Value,
-}
-
-fn validate_chunk_case_ordinals(
-    ordinal_start: i32,
-    ordinal_end: i32,
-    ordinals: impl IntoIterator<Item = i32>,
-) -> anyhow::Result<()> {
-    if ordinal_end < ordinal_start {
-        anyhow::bail!(
-            "chunk projection range is invalid: ordinal end {} is before start {}",
-            ordinal_end,
-            ordinal_start
-        );
-    }
-    let mut expected = ordinal_start;
-    for actual in ordinals {
-        if expected == ordinal_end {
-            anyhow::bail!(
-                "chunk projection contains case ordinal {} after exclusive end {}",
-                actual,
-                ordinal_end
-            );
-        }
-        if actual != expected {
-            anyhow::bail!(
-                "chunk projection is incomplete: expected case ordinal {}, found {}",
-                expected,
-                actual
-            );
-        }
-        expected += 1;
-    }
-    if expected != ordinal_end {
-        anyhow::bail!(
-            "chunk projection is incomplete: expected case ordinal {}, found end of projection",
-            expected
-        );
-    }
-    Ok(())
 }
 
 /// Marks a leased chunk complete if the caller still owns the same lease.
@@ -204,9 +164,6 @@ fn require_chunk_lease_token(chunk: &RunChunk) -> anyhow::Result<Uuid> {
 }
 
 #[cfg(test)]
-#[path = "chunk_processing/postgres_tests.rs"]
-mod postgres_tests;
-#[cfg(test)]
 mod tests {
     use chrono::{
         DateTime,
@@ -215,47 +172,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-
-    #[test]
-    fn chunk_projection_accepts_exact_contiguous_range() {
-        validate_chunk_case_ordinals(4, 7, [4, 5, 6]).unwrap();
-        validate_chunk_case_ordinals(4, 4, []).unwrap();
-    }
-
-    #[test]
-    fn chunk_projection_rejects_missing_first_case() {
-        let error = validate_chunk_case_ordinals(4, 7, [5, 6]).unwrap_err();
-        assert!(error.to_string().contains("expected case ordinal 4"));
-    }
-
-    #[test]
-    fn chunk_projection_rejects_internal_gap() {
-        let error = validate_chunk_case_ordinals(4, 7, [4, 6]).unwrap_err();
-        assert!(error.to_string().contains("expected case ordinal 5"));
-    }
-
-    #[test]
-    fn chunk_projection_rejects_early_end() {
-        let error = validate_chunk_case_ordinals(4, 7, [4, 5]).unwrap_err();
-        assert!(error.to_string().contains("expected case ordinal 6"));
-    }
-
-    #[test]
-    fn chunk_projection_rejects_invalid_or_excess_ranges() {
-        let reversed = validate_chunk_case_ordinals(7, 4, []).unwrap_err();
-        assert!(reversed.to_string().contains("end 4 is before start 7"));
-
-        for ordinals in [vec![4, 4, 5], vec![4, 5, 6, 7]] {
-            assert!(validate_chunk_case_ordinals(4, 7, ordinals).is_err());
-        }
-    }
-
-    #[test]
-    fn chunk_projection_rejects_max_ordinal_without_overflowing() {
-        let error = validate_chunk_case_ordinals(i32::MAX, i32::MAX, [i32::MAX]).unwrap_err();
-
-        assert!(error.to_string().contains("after exclusive end"));
-    }
 
     #[test]
     fn chunk_operations_require_an_ownership_token() {

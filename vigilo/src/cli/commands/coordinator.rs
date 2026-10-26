@@ -284,12 +284,10 @@ async fn run_coordinator_cycle(
 
     // --- Resume incomplete run creation ---
     let creation_recovery_started = Instant::now();
-    let creation_recovery = run_creation::recover_creating_runs(
-        database_router,
-        config.run_creation,
-        coordinator_id,
-        config.lease_seconds,
+    let creation_recovery = crate::run_admission::recover(
+        &context,
         config.max_create_recovery_per_cycle,
+        config.run_creation,
     )
     .await?;
     let creation_recovery_ms = creation_recovery_started.elapsed().as_millis() as u64;

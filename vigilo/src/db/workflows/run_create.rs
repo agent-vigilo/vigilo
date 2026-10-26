@@ -1,15 +1,14 @@
 //! Run creation planning and idempotent seed persistence helpers.
 //!
-//! Durable creation orchestration lives in `run_creation`; this module owns the
+//! Durable execution admission lives in `run_admission`; this module owns the
 //! placement policy and repeatable writes used for control and execution seed
 //! transactions. Dispatch owns chunk-ready event creation, so seed retries
 //! cannot make work visible to workers. Bulk paths keep statement size and bind
 //! counts bounded for large datasets.
 
-use std::collections::{
-    BTreeMap,
-    BTreeSet,
-};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use sqlx::{
     Postgres,
@@ -23,12 +22,10 @@ use crate::{
         ShardAssignmentPolicy,
     },
     models::{
-        case_blob::CaseBlobDraft,
         database_placement::{
             DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
             DATABASE_PLACEMENT_ROLE_SHARD,
         },
-        dataset_version_case::DatasetVersionCaseDraft,
         run::RunDraft,
         run_chunk::RunChunkDraft,
         shard_placement::SHARD_PLACEMENT_STATUS_ACTIVE,
@@ -38,8 +35,6 @@ use crate::{
 mod queries;
 
 pub(crate) use queries::{
-    bulk_insert_case_blobs,
-    bulk_insert_dataset_membership,
     bulk_insert_run_chunks,
     bulk_insert_run_shard_dispatch_cursors,
     bulk_insert_shard_placements,
@@ -47,8 +42,6 @@ pub(crate) use queries::{
     upsert_dataset_version,
 };
 
-const CASE_BLOB_INSERT_CHUNK_SIZE: usize = 500;
-const DATASET_MEMBERSHIP_INSERT_CHUNK_SIZE: usize = 2_000;
 const RUN_CHUNK_INSERT_CHUNK_SIZE: usize = 2_000;
 
 /// Deterministic seed data differs from a row already stored under the same id.
@@ -62,10 +55,6 @@ pub(crate) fn seed_invariant_error(message: impl Into<String>) -> anyhow::Error 
 
 pub(crate) fn is_seed_invariant_error(error: &anyhow::Error) -> bool {
     error.downcast_ref::<RunSeedInvariantError>().is_some()
-}
-
-fn jsonb_text(value: &serde_json::Value) -> String {
-    serde_json::to_string(value).expect("serializing serde_json::Value should not fail")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -133,6 +122,7 @@ pub(crate) fn assign_run_shards_to_aliases(
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn group_chunks_by_assigned_alias(
     chunks: &[RunChunkDraft],
     assignments: &[RunShardPlacementAssignment],

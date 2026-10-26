@@ -16,6 +16,7 @@ use crate::{
         dataset_upload,
         run_plan,
     },
+    models::run_chunk::RunChunkDraft,
     run_planning::{
         self,
         Request,
@@ -25,7 +26,10 @@ use crate::{
 
 /// A bounded profile source; input configuration cannot become a dataset-sized
 /// allocation merely because a wrong file was supplied to plan preparation.
-fn profile_input(inline: Option<String>, file: Option<PathBuf>) -> anyhow::Result<Value> {
+pub(super) fn profile_input(
+    inline: Option<String>,
+    file: Option<PathBuf>,
+) -> anyhow::Result<Value> {
     use std::io::Read;
     let raw = match (inline, file) {
         (Some(raw), None) => raw,
@@ -46,13 +50,16 @@ fn profile_input(inline: Option<String>, file: Option<PathBuf>) -> anyhow::Resul
     );
     Ok(value)
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn exec(
     context: Context,
+    config: crate::db::workflows::run_creation::Config,
     profile: Option<String>,
     profile_file: Option<PathBuf>,
     upload_id: Uuid,
     storage_config: PathBuf,
     run_id: Option<Uuid>,
+    prepare_only: bool,
 ) -> anyhow::Result<()> {
     let id = run_id.unwrap_or_else(Uuid::now_v7);
     let cancel = CancellationToken::new();
@@ -64,11 +71,13 @@ pub(super) async fn exec(
     });
     let result = prepare(
         context,
+        config,
         profile,
         profile_file,
         upload_id,
         storage_config,
         id,
+        prepare_only,
         &cancel,
     )
     .await
@@ -76,13 +85,16 @@ pub(super) async fn exec(
     task.abort();
     result
 }
+#[allow(clippy::too_many_arguments)]
 async fn prepare(
     context: Context,
+    config: crate::db::workflows::run_creation::Config,
     profile: Option<String>,
     profile_file: Option<PathBuf>,
     upload_id: Uuid,
     storage_config: PathBuf,
     id: Uuid,
+    prepare_only: bool,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let payload = profile_input(profile, profile_file)?;
@@ -185,6 +197,15 @@ async fn prepare(
         &assignments,
     )
     .await?;
+    if !prepare_only {
+        let status: String = sqlx::query_scalar("SELECT status::text FROM runs WHERE id=$1")
+            .bind(id)
+            .fetch_one(db)
+            .await?;
+        if status == "creating" {
+            run_plan::admission::request(db, id).await?;
+        }
+    }
     ensure!(
         (plan.status == "ready") == plan.manifest.is_some(),
         "inconsistent run-plan publication state"
@@ -224,7 +245,56 @@ async fn prepare(
         release?;
         reference
     };
-    context.out().await?.write_value(&json!({"data":{"run_id":id,"run_key":id.to_string(),"status":"creating","plan_status":"ready","run_plan":reference,"dataset_version_id":identity.dataset_version_id,"profile_hash":draft.profile_hash,"dataset_hash":identity.dataset_hash,"aggregation_policy_hash":draft.aggregation_policy_hash,"execution_plan_hash":execution.hash()?},"meta":{"case_count":identity.case_count,"chunk_count":(identity.case_count-1)/100+1,"chunk_size":100,"dispatchable":false}}))?;
+    let plan = run_plan::load(db, id)
+        .await?
+        .context("published plan disappeared")?;
+    let store = std::sync::Arc::from(
+        owner
+            .reader(
+                upload.limits.0.clone(),
+                crate::blob_storage::Budget::standard(),
+                cancel,
+            )
+            .await?,
+    );
+    let reader =
+        crate::case_reader::RunReader::open(store, &reference, upload.limits.0.clone(), id, cancel)
+            .await?;
+    let initial_status: String = sqlx::query_scalar("SELECT status::text FROM runs WHERE id=$1")
+        .bind(id)
+        .fetch_one(db)
+        .await?;
+    if !prepare_only
+        && initial_status == "creating"
+        && let Err(error) =
+            crate::run_admission::resume_verified(&context, &plan, &reader, config, cancel).await
+    {
+        tracing::warn!(run_id=%id,error=%error,"execution admission stopped before dispatch");
+    }
+    let (status, error): (String, Option<String>) =
+        sqlx::query_as("SELECT status::text,error_message FROM runs WHERE id=$1")
+            .bind(id)
+            .fetch_one(db)
+            .await?;
+    let progress = crate::db::workflows::run_creation::select_creation_progress(db, id).await?;
+    let aliases = plan
+        .assignments
+        .iter()
+        .map(|a| &a.database_alias)
+        .collect::<std::collections::BTreeSet<_>>();
+    let executable = &reader.configuration.snapshot["executability"];
+    context.out().await?.write_value(&json!({
+        "data":{"run_id":id,"run_key":id.to_string(),"status":status,"error_message":error,"plan_status":"ready","run_plan":reference,
+            "dataset_version_id":identity.dataset_version_id,"profile_version_id":draft.profile_version_id,"profile_hash":draft.profile_hash,
+            "dataset_hash":identity.dataset_hash,"aggregation_policy_hash":draft.aggregation_policy_hash,"execution_plan_hash":execution.hash()?},
+        "meta":{"case_count":identity.case_count,"chunk_count":reader.manifest.chunk_count,"chunk_size":100,
+            "dispatchable":matches!(status.as_str(),"pending"|"running"),"shard_placement_count":plan.assignments.len(),
+            "shard_assignment_policy":router.shard_assignment_policy().as_str(),"default_execution_database_alias":router.default_execution_database_alias(),
+            "execution_database_aliases":aliases,"creation_placement_count":progress.placement_count,"creation_placements_pending":progress.pending_placement_count,
+            "creation_placements_seeded":progress.seeded_placement_count,"creation_placements_failed":progress.failed_placement_count,
+            "creation_seed_attempt_count":progress.attempt_count,"expected_evaluator_executions":executable["expected_evaluator_execution_count"],
+            "resolved_evaluator_refs":executable["runnable_evaluator_ref_count"]}
+    }))?;
     Ok(())
 }
 
@@ -235,7 +305,7 @@ mod tests {
     use super::*;
     use crate::cli::App;
     #[test]
-    fn blob_run_sources_require_explicit_preparation_and_owner_without_changing_direct_inputs() {
+    fn blob_run_sources_require_owner_and_allow_optional_preparation() {
         let id = "018f1111-1111-7111-8111-111111111111";
         let base = [
             "vigilo",
@@ -252,7 +322,7 @@ mod tests {
             "--prepare-only",
         ];
         assert!(App::try_parse_from(base).is_ok());
-        assert!(App::try_parse_from(&base[..base.len() - 1]).is_err());
+        assert!(App::try_parse_from(&base[..base.len() - 1]).is_ok());
         assert!(
             App::try_parse_from([
                 "vigilo",
@@ -263,7 +333,9 @@ mod tests {
                 "--profile",
                 "{}",
                 "--dataset",
-                "{}"
+                "{}",
+                "--storage-config",
+                "storage.toml"
             ])
             .is_ok()
         );

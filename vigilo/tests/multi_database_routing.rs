@@ -66,16 +66,11 @@ async fn multi_database_routing_flow() -> anyhow::Result<()> {
         "dispatch cursors are control-plane state"
     );
     assert_eq!(dispatch_cursor_count(&shard, default_run_id).await?, 0);
-    assert_eq!(dataset_version_case_count(&shard, default_run_id).await?, 0);
-    assert_eq!(run_shard_case_count(&shard, default_run_id).await?, 0);
-    assert_eq!(case_blob_count(&shard, default_run_id).await?, 0);
+    assert_eq!(snapshot_case_count(&shard, default_run_id).await?, 0);
+    assert_eq!(plan_reference_count(&shard, default_run_id).await?, 0);
     assert_eq!(
         run_creation_placement_state(&primary, default_run_id, PRIMARY_ALIAS).await?,
-        ("seeded".to_string(), 1)
-    );
-    assert_eq!(
-        run_creation_chunk_plan_count(&primary, default_run_id).await?,
-        0
+        ("seeded".to_string(), 2)
     );
 
     let moved_default_payload = run_vigilo(
@@ -96,19 +91,14 @@ async fn multi_database_routing_flow() -> anyhow::Result<()> {
         SHARD_ALIAS
     );
     assert_eq!(
-        dataset_version_case_count(&shard, default_run_id).await?,
-        0,
-        "canonical dataset membership remains control-owned"
+        snapshot_case_count(&shard, default_run_id).await?,
+        1,
+        "shard move preserves the planned case count"
     );
     assert_eq!(
-        run_shard_case_count(&shard, default_run_id).await?,
+        plan_reference_count(&shard, default_run_id).await?,
         1,
-        "shard move copies only the routed execution projection"
-    );
-    assert_eq!(
-        case_blob_count(&shard, default_run_id).await?,
-        1,
-        "shard move copies case blobs needed by workers"
+        "shard move copies the immutable plan reference"
     );
     let moved_default_route = run_vigilo(
         &config,
@@ -177,11 +167,7 @@ async fn multi_database_routing_flow() -> anyhow::Result<()> {
     assert_eq!(dispatch_cursor_count(&shard, routed_run_id).await?, 0);
     assert_eq!(
         run_creation_placement_state(&primary, routed_run_id, SHARD_ALIAS).await?,
-        ("seeded".to_string(), 1)
-    );
-    assert_eq!(
-        run_creation_chunk_plan_count(&primary, routed_run_id).await?,
-        0
+        ("seeded".to_string(), 2)
     );
 
     let cancelled_run_id = create_run(&config, SHARD_ALIAS, 101).await?;
@@ -229,9 +215,8 @@ async fn multi_database_routing_flow() -> anyhow::Result<()> {
     );
     assert_eq!(run_chunk_count(&primary, spread_run_id).await?, 2);
     assert_eq!(run_chunk_count(&shard, spread_run_id).await?, 1);
-    assert_eq!(run_shard_case_count(&primary, spread_run_id).await?, 101);
-    assert_eq!(run_shard_case_count(&shard, spread_run_id).await?, 100);
-    assert_eq!(dataset_version_case_count(&shard, spread_run_id).await?, 0);
+    assert_eq!(snapshot_case_count(&primary, spread_run_id).await?, 101);
+    assert_eq!(snapshot_case_count(&shard, spread_run_id).await?, 100);
 
     let rebalance_plan = run_vigilo(
         &config,
@@ -1203,10 +1188,10 @@ async fn run_creation_placement_state(
 ) -> anyhow::Result<(String, i32)> {
     Ok(sqlx::query_as::<_, (String, i32)>(
         r#"
-        SELECT status, attempt_count
-        FROM run_creation_placements
+        SELECT CASE WHEN admission_cursor=chunk_cursor THEN 'seeded' ELSE 'pending' END, generation::int
+        FROM run_plans
         WHERE run_id = $1::uuid
-          AND database_alias = $2
+          AND EXISTS(SELECT 1 FROM run_plan_shards WHERE run_id=$1 AND database_alias=$2)
         "#,
     )
     .bind(run_id)
@@ -1215,55 +1200,11 @@ async fn run_creation_placement_state(
     .await?)
 }
 
-async fn run_creation_chunk_plan_count(db: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM run_creation_chunks WHERE run_id = $1::uuid",
-    )
-    .bind(run_id)
-    .fetch_one(db)
-    .await?)
+async fn snapshot_case_count(db: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar("SELECT COALESCE(sum(expected_execution_count),0)::bigint FROM run_snapshots WHERE run_id=$1").bind(run_id).fetch_one(db).await?)
 }
-
-async fn dataset_version_case_count(db: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM dataset_version_cases cvc
-        JOIN runs r
-          ON r.dataset_version_id = cvc.dataset_version_id
-        WHERE r.id = $1::uuid
-        "#,
-    )
-    .bind(run_id)
-    .fetch_one(db)
-    .await?)
-}
-
-async fn run_shard_case_count(db: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM run_shard_cases WHERE run_id = $1::uuid",
-    )
-    .bind(run_id)
-    .fetch_one(db)
-    .await?)
-}
-
-async fn case_blob_count(db: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM case_blobs cb
-        WHERE EXISTS (
-            SELECT 1
-            FROM run_shard_cases projected
-            WHERE projected.run_id = $1::uuid
-              AND projected.case_hash = cb.case_hash
-        )
-        "#,
-    )
-    .bind(run_id)
-    .fetch_one(db)
-    .await?)
+async fn plan_reference_count(db: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar("SELECT count(*)::bigint FROM run_snapshots WHERE run_id=$1 AND config_snapshot ? 'run_plan'").bind(run_id).fetch_one(db).await?)
 }
 
 async fn dispatch_cursor_status_count(

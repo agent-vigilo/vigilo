@@ -51,6 +51,7 @@ mod scaling;
 mod schedule;
 mod service;
 mod stats;
+mod storage;
 mod workload;
 
 use std::{

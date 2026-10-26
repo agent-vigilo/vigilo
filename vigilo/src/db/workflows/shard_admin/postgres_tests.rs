@@ -178,42 +178,6 @@ async fn seed_rebalance_operation(pool: &PgPool, item_count: usize) -> (Uuid, Ve
     (operation_id, items)
 }
 
-async fn seed_case(pool: &PgPool, dataset_version_id: Uuid, case_id: Uuid, case_hash: &str) {
-    sqlx::query(
-        r#"
-            INSERT INTO case_blobs (
-                case_hash,
-                task_type,
-                input_payload,
-                expected_output
-            )
-            VALUES ($1, 'classification', '{"text":"hello"}'::jsonb, 'null'::jsonb)
-            "#,
-    )
-    .bind(case_hash)
-    .execute(pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        r#"
-            INSERT INTO dataset_version_cases (
-                dataset_version_id,
-                case_id,
-                case_ordinal,
-                case_hash
-            )
-            VALUES ($1::uuid, $2::uuid, 0, $3)
-            "#,
-    )
-    .bind(dataset_version_id)
-    .bind(case_id)
-    .bind(case_hash)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
 async fn prerequisite_fingerprints(pool: &PgPool, run_id: Uuid) -> Vec<(i64, String)> {
     let mut fingerprints = Vec::new();
 

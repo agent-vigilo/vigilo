@@ -45,6 +45,31 @@ pub(crate) struct S3Transport {
 }
 pub(crate) type S3Storage = Store<S3Transport>;
 impl S3Storage {
+    /// Opens an existing immutable namespace for reads without creating probe
+    /// objects. Publication has already checked write capabilities; readers
+    /// need only GET permissions and verify every requested object's identity.
+    pub async fn reader(
+        config: S3Config,
+        limits: FormatLimits,
+        resources: Arc<Resources>,
+        budget: Budget,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        limits
+            .validate()
+            .map_err(|_| StorageError::new(ErrorKind::Invalid))?;
+        if resources.capacity as usize > limits.staging_spool_bytes {
+            return Err(StorageError::new(ErrorKind::Invalid));
+        }
+        let op = Operation::new(budget, cancel)?;
+        let transport = op.wait(S3Transport::build(&config)).await?;
+        Ok(Store {
+            transport,
+            alias: config.alias,
+            limits,
+            resources,
+        })
+    }
     /// Resolve credentials within the caller deadline and prove endpoint
     /// capabilities. The caller retains its recorded probe key for crash cleanup.
     pub async fn open(

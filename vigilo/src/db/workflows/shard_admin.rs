@@ -391,12 +391,8 @@ struct ShardMoveInspection {
     copied_byte_count: i64,
 }
 
-const PREREQUISITE_TABLES: &[&str] = &["case_blobs", "dataset_versions", "runs"];
+const PREREQUISITE_TABLES: &[&str] = &["dataset_versions", "runs"];
 const SHARD_TABLES: &[ShardTable] = &[
-    ShardTable {
-        name: "run_shard_cases",
-        key_columns: &["run_id", "run_shard", "case_id"],
-    },
     ShardTable {
         name: "run_chunks",
         key_columns: &["run_id", "run_shard", "id"],
@@ -2788,7 +2784,6 @@ async fn reserve_active_move_target_and_mark_copying(
 
 fn move_table_key_columns(table: &str) -> anyhow::Result<&'static [&'static str]> {
     match table {
-        "case_blobs" => Ok(&["case_hash"]),
         "dataset_versions" => Ok(&["dataset_version_id"]),
         "runs" => Ok(&["id"]),
         _ => SHARD_TABLES
@@ -3376,7 +3371,6 @@ fn normalized_prerequisite_row(table: &str, mut row: Value) -> anyhow::Result<Va
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("{} prerequisite row is not an object", table))?;
     let ignored: &[&str] = match table {
-        "case_blobs" => &["created_at"],
         "dataset_versions" => &["created_at", "updated_at"],
         "runs" => &[
             "status",
@@ -3597,7 +3591,6 @@ mod tests {
 
     #[test]
     fn move_table_metadata_covers_prerequisites_and_shard_rows() {
-        assert_eq!(move_table_key_columns("case_blobs").unwrap(), ["case_hash"]);
         assert_eq!(move_table_key_columns("runs").unwrap(), ["id"]);
         assert_eq!(
             move_table_key_columns("run_chunks").unwrap(),

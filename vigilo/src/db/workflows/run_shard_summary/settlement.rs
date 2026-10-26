@@ -15,13 +15,6 @@ use sqlx::{
 use uuid::Uuid;
 
 use super::RunShardSummary;
-use crate::{
-    contracts::run::RunProfile,
-    db::workflows::{
-        chunk_processing::WorkerCaseBatchItem,
-        execution_processing,
-    },
-};
 
 /// Creates a receipt only after locking terminal chunk state and retiring writers.
 /// Replays verify immutable identity and leave the original evidence unchanged.
@@ -125,37 +118,26 @@ pub(crate) async fn settle_locked_chunk_with(
         .and_then(Value::as_array)
         .is_some_and(|g| !g.is_empty());
     let planned = if has_gates {
-        let profile: RunProfile = serde_json::from_value(snapshot["profile"].clone())?;
-        let cases = sqlx::query_as::<_, WorkerCaseBatchItem>(
-            r#"
-        SELECT p.case_id, p.case_hash, p.case_ordinal, b.task_type, b.case_group, 'null'::jsonb AS input_payload, 'null'::jsonb AS expected_output, 'null'::jsonb AS context_payload, b.tags, '{}'::jsonb AS metadata
-        FROM run_shard_cases p
-        JOIN case_blobs b USING (case_hash)
-        WHERE p.run_id = $1
-        AND p.run_shard = $2
-        AND p.case_ordinal >= $3
-        AND p.case_ordinal < $4
-        ORDER BY p.case_ordinal
-        "#,
-        ).bind(run_id).bind(shard).bind(start).bind(end).fetch_all(&mut **tx).await?;
+        let gates = snapshot
+            .pointer("/profile/scorecard/gates")
+            .and_then(Value::as_array)
+            .expect("gates checked");
+        let counts = snapshot
+            .get("gate_planned_counts")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow::anyhow!("missing planned gate counts"))?;
         anyhow::ensure!(
-            cases.len() == usize::try_from(end - start)?
-                && cases
+            counts.len() == gates.len()
+                && gates
                     .iter()
-                    .enumerate()
-                    .all(|(i, c)| c.case_ordinal == start + i as i32),
-            "chunk {chunk_id} has incomplete planned scorecard membership"
+                    .all(|g| g["id"].as_str().is_some_and(|id| counts
+                        .get(id)
+                        .and_then(Value::as_i64)
+                        .is_some_and(|c| c >= 0))),
+            "incomplete planned gate counts"
         );
-        cases
-            .iter()
-            .map(|case| {
-                let plan = execution_processing::evaluation_plan_for_case(&profile, case)?;
-                Ok(
-                    json!({"case_id": case.case_id, "profile_group_id": plan.profile_group_id,
-                "tags": case.tags, "evaluator_manifest": plan.evaluator_bindings}),
-                )
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?
+        sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('case_id',case_id,'profile_group_id',profile_group_id,'tags',tags,'evaluator_manifest',evaluator_manifest) FROM executions WHERE run_id=$1 AND run_shard=$2 AND chunk_id=$3 ORDER BY id")
+            .bind(run_id).bind(shard).bind(chunk_id).fetch_all(&mut **tx).await?
     } else {
         Vec::new()
     };

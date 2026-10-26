@@ -143,6 +143,9 @@ pub(crate) async fn freeze_plan(pool: &PgPool, run: Uuid, shard: i16) {
         manifest.push(&chunk).unwrap();
     }
     let plan = json!({"version": 1, "shards": {shard.to_string(): manifest}});
+    sqlx::query("UPDATE run_snapshots SET config_snapshot=config_snapshot || jsonb_build_object('gate_planned_counts',COALESCE((SELECT jsonb_object_agg(g->>'id',expected_execution_count) FROM jsonb_array_elements(COALESCE(config_snapshot #> '{profile,scorecard,gates}','[]')) g),'{}'::jsonb)) WHERE run_id=$1 AND run_shard=$2")
+        .bind(run).bind(shard).execute(pool).await.unwrap();
+
     sqlx::query("UPDATE run_snapshots SET config_snapshot=jsonb_set(config_snapshot,'{settlement_plan}',$3) WHERE run_id=$1 AND run_shard=$2")
         .bind(run).bind(shard).bind(&plan).execute(pool).await.unwrap();
     sqlx::query("UPDATE runs SET config_snapshot=jsonb_set(config_snapshot,'{settlement_plan}',$2) WHERE id=$1")
@@ -348,6 +351,8 @@ pub(crate) async fn seed_execution(
                 case_id,
                 case_hash,
                 profile_group_id,
+                tags,
+                evaluator_manifest,
                 task_type,
                 evaluation_profile_id,
                 evaluation_profile_version,
@@ -363,7 +368,9 @@ pub(crate) async fn seed_execution(
                 $4::uuid,
                 $5::uuid,
                 'case-hash',
-                'default',
+                'sentiment',
+                '["release"]'::jsonb,
+                '[{"id":"quality_eval","required":true,"dimension":"quality"}]'::jsonb,
                 'classification',
                 'profile',
                 '1.0.0',
@@ -384,10 +391,6 @@ pub(crate) async fn seed_execution(
     .execute(pool)
     .await
     .unwrap();
-
-    let (dataset, ordinal): (Uuid, i32) = sqlx::query_as("SELECT c.dataset_version_id, c.ordinal_start + (SELECT COUNT(*)::int - 1 FROM executions e WHERE e.run_id = c.run_id AND e.run_shard = c.run_shard AND e.chunk_id = c.id) FROM run_chunks c WHERE c.run_id = $1 AND c.run_shard = $2 AND c.id = $3")
-        .bind(run_id).bind(run_shard).bind(chunk_id).fetch_one(pool).await.unwrap();
-    seed_planned_case(pool, run_id, run_shard, dataset, case_id, ordinal).await;
 
     sqlx::query(
         r#"
@@ -450,19 +453,4 @@ pub(crate) fn profile_snapshot(gates: serde_json::Value) -> serde_json::Value {
     profile["case_groups"][0]["evaluators"][0]["id"] = json!("quality_eval");
     profile["scorecard"]["gates"] = gates;
     json!({"profile": profile})
-}
-
-pub(crate) async fn seed_planned_case(
-    pool: &PgPool,
-    run_id: Uuid,
-    shard: i16,
-    dataset: Uuid,
-    case: Uuid,
-    ordinal: i32,
-) {
-    let hash = case.to_string();
-    sqlx::query("INSERT INTO case_blobs (case_hash, task_type, case_group, input_payload, expected_output, tags) VALUES ($1,'classification','sentiment','null','null','[\"release\"]')")
-        .bind(&hash).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO run_shard_cases (run_id,run_shard,dataset_version_id,case_id,case_ordinal,case_hash) VALUES ($1,$2,$3,$4,$5,$6)")
-        .bind(run_id).bind(shard).bind(dataset).bind(case).bind(ordinal).bind(hash).execute(pool).await.unwrap();
 }

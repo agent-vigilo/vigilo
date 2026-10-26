@@ -25,6 +25,7 @@ use tracing_subscriber::{
 
 mod agent_client;
 mod blob_storage;
+mod case_reader;
 mod circuit_breaker;
 mod cli;
 use cli::{
@@ -42,6 +43,7 @@ mod manifest;
 mod models;
 mod mq;
 mod outbox;
+mod run_admission;
 mod run_planning;
 mod runtime;
 
@@ -99,7 +101,7 @@ async fn main() -> ExitCode {
 
             match app.exec(context).await {
                 Err(e) => {
-                    error!(error = %e, "command execution failed");
+                    error!(error = %format!("{e:#}"), "command execution failed");
                     ExitCode::FAILURE
                 }
                 Ok(()) => ExitCode::SUCCESS,

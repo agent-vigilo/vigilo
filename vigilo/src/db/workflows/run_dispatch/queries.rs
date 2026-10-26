@@ -561,7 +561,8 @@ pub(super) async fn dispatch_run_window(
                 agent_version = EXCLUDED.agent_version,
                 prompt_config_id = EXCLUDED.prompt_config_id,
                 prompt_config_version = EXCLUDED.prompt_config_version,
-                config_snapshot = EXCLUDED.config_snapshot,
+                config_snapshot = CASE WHEN run_snapshots.config_snapshot ? 'run_plan'
+                    THEN run_snapshots.config_snapshot ELSE EXCLUDED.config_snapshot END,
                 expected_execution_count = EXCLUDED.expected_execution_count,
                 updated_at = now()
             RETURNING run_id, run_shard, run_key

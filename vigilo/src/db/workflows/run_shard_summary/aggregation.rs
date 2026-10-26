@@ -349,6 +349,7 @@ async fn advance_shard_summary_page(
             progressed = true;
         }
     }
+    apply_gate_counts(&mut summary, &snapshot)?;
     summary.planned_chunk_count = state.plan.chunk_count;
     summary.planned_chunk_hash = state.plan.hash.clone();
     if progressed {
@@ -398,6 +399,32 @@ async fn load_context(
         "shard {shard} aggregation lost local write admission"
     );
     Ok(context)
+}
+
+/// Uses immutable shard denominators instead of inferring planned cases from
+/// execution rows. In particular, absent executions never improve coverage.
+fn apply_gate_counts(summary: &mut RunShardSummary, snapshot: &Value) -> anyhow::Result<()> {
+    let Some(counts) = snapshot.get("gate_planned_counts") else {
+        return Ok(());
+    };
+    let counts: std::collections::BTreeMap<String, i64> = serde_json::from_value(counts.clone())?;
+    if summary.settled_chunk_count == 0 {
+        return Ok(());
+    }
+    let mut scorecard: ShardScorecard = serde_json::from_value(summary.scorecard.clone())?;
+    anyhow::ensure!(
+        scorecard.entries.len() == counts.len(),
+        "settled gates differ from planned gate counts"
+    );
+    for entry in &mut scorecard.entries {
+        entry.expected_count = *counts
+            .get(&entry.id)
+            .ok_or_else(|| anyhow::anyhow!("missing planned count for gate {}", entry.id))?;
+    }
+    merge_shard_scorecards(&scorecard.policy_hash, std::slice::from_ref(&scorecard))
+        .map_err(anyhow::Error::msg)?;
+    summary.scorecard = serde_json::to_value(scorecard)?;
+    Ok(())
 }
 
 async fn chunk_page(

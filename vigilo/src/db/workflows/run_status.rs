@@ -143,7 +143,7 @@ pub(crate) async fn select_run_status(
     if creation_owned_status {
         let live_progress = RunProgressSummary::from_control_run(&run);
         let creation_progress = select_creation_progress(control_db, run_id).await?;
-        if run.status == RUN_STATUS_CREATING || creation_progress.placement_count > 0 {
+        {
             return Ok(Some(RunStatusProjection {
                 run,
                 live_progress,

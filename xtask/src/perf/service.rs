@@ -1,4 +1,4 @@
-//! Run-scoped PostgreSQL, RabbitMQ, and deterministic HTTP-agent services.
+//! Run-scoped PostgreSQL, RabbitMQ, object storage and deterministic agent services.
 //!
 //! Docker Compose resources are created under a unique project and carry the
 //! campaign marker as a live label. Destructive database, vhost, and topology
@@ -98,6 +98,7 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
     let run_dir = root.join("target/perf/service-tests").join(&run_id);
     fs::create_dir_all(&run_dir)?;
     let mut harness = ServiceHarness::start(root, &run_dir, &run_id, "good", 256)?;
+    harness.storage_reader()?.probe()?;
     let database_url = harness.create_database("sentinel")?;
     let scope = harness.create_sample_scope(database_url, "sentinel")?;
 
@@ -234,6 +235,8 @@ pub struct ServiceHarness {
     project: String,
     compose_file: PathBuf,
     environment_file: PathBuf,
+    storage_endpoint: String,
+    storage_config: PathBuf,
     postgres_admin_url: String,
     rabbit_management_url: String,
     rabbit_amqp_port: u16,
@@ -293,6 +296,15 @@ impl ServiceHarness {
         }
         let initialized = (|| {
             let agent = DeterministicAgent::start(run_id, agent_response, agent_payload_bytes)?;
+            let storage_port = compose_port(root, &compose_args, "ceph", 3900)?;
+            let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
+            let storage_config = run_dir.join("storage.toml");
+            atomic_text(
+                &storage_config,
+                &format!(
+                    "provider='s3'\nalias='cases'\nbucket='vigilo-perf'\nprefix='{project}'\nregion='us-east-1'\nendpoint='{storage_endpoint}'\nallow_http=true\npath_style=true\n[credential_variables]\naccess_key='VIGILO_PERF_S3_ACCESS_KEY'\nsecret_key='VIGILO_PERF_S3_SECRET_KEY'\n"
+                ),
+            )?;
             let postgres_port = compose_port(root, &compose_args, "postgres", 5432)?;
             let rabbit_amqp_port = compose_port(root, &compose_args, "rabbitmq", 5672)?;
             let rabbit_management_port = compose_port(root, &compose_args, "rabbitmq", 15672)?;
@@ -326,6 +338,8 @@ impl ServiceHarness {
             };
             atomic_json(&run_dir.join("services.json"), &manifest)?;
             Ok::<_, anyhow::Error>((
+                storage_endpoint,
+                storage_config,
                 agent,
                 rabbit_amqp_port,
                 postgres_admin_url,
@@ -334,7 +348,16 @@ impl ServiceHarness {
                 manifest,
             ))
         })();
-        let (agent, rabbit_amqp_port, postgres_admin_url, rabbit_management_url, http, manifest) =
+        let (
+            storage_endpoint,
+            storage_config,
+            agent,
+            rabbit_amqp_port,
+            postgres_admin_url,
+            rabbit_management_url,
+            http,
+            manifest,
+        ) =
             match initialized {
                 Ok(initialized) => initialized,
                 Err(error) => {
@@ -354,6 +377,8 @@ impl ServiceHarness {
             project,
             compose_file,
             environment_file,
+            storage_endpoint,
+            storage_config,
             postgres_admin_url,
             rabbit_management_url,
             rabbit_amqp_port,
@@ -365,6 +390,24 @@ impl ServiceHarness {
             agent,
             stopped: false,
         })
+    }
+
+    /// Child storage configuration points only into this owned campaign bucket.
+    pub fn storage_env(&self) -> Vec<(String, String)> {
+        vec![
+            (
+                "VIGILO_STORAGE_CONFIG".into(),
+                self.storage_config.display().to_string(),
+            ),
+            ("VIGILO_PERF_S3_ACCESS_KEY".into(), "vigilo_perf".into()),
+            (
+                "VIGILO_PERF_S3_SECRET_KEY".into(),
+                "vigilo_perf_storage_secret".into(),
+            ),
+        ]
+    }
+    pub(super) fn storage_reader(&self) -> Result<super::storage::Reader> {
+        super::storage::Reader::new(&self.storage_endpoint, &self.project)
     }
 
     /// Returns the deterministic run-scoped agent endpoint.
@@ -1561,7 +1604,7 @@ fn verify_resource_labels(
         "container" => (
             "{{json .Config.Labels}}",
             "com.docker.compose.service",
-            &["postgres", "rabbitmq"],
+            &["postgres", "rabbitmq", "ceph"],
         ),
         "network" => (
             "{{json .Labels}}",
@@ -1571,7 +1614,7 @@ fn verify_resource_labels(
         "volume" => (
             "{{json .Labels}}",
             "com.docker.compose.volume",
-            &["postgres-data", "rabbitmq-data"],
+            &["postgres-data", "rabbitmq-data", "ceph-data"],
         ),
         _ => bail!("unsupported Compose resource kind: {kind}"),
     };
@@ -1611,16 +1654,16 @@ fn verify_resource_labels(
     Ok(())
 }
 
-/// Requires the exact two-container, one-network, two-volume service topology.
+/// Requires the exact three-container, one-network, three-volume service topology.
 fn validate_inventory(
     run_id: &str,
     containers: &[OwnedResource],
     networks: &[OwnedResource],
     volumes: &[OwnedResource],
 ) -> Result<()> {
-    if containers.len() != 2 || networks.len() != 1 || volumes.len() != 2 {
+    if containers.len() != 3 || networks.len() != 1 || volumes.len() != 3 {
         bail!(
-            "performance topology inventory mismatch for {run_id}: expected 2 containers, 1 network, and 2 volumes; found {}, {}, and {}",
+            "performance topology inventory mismatch for {run_id}: expected 3 containers, 1 network, and 3 volumes; found {}, {}, and {}",
             containers.len(),
             networks.len(),
             volumes.len()
@@ -1636,9 +1679,9 @@ fn validate_partial_inventory(
     networks: &[OwnedResource],
     volumes: &[OwnedResource],
 ) -> Result<()> {
-    if containers.len() > 2 || networks.len() > 1 || volumes.len() > 2 {
+    if containers.len() > 3 || networks.len() > 1 || volumes.len() > 3 {
         bail!(
-            "partial performance topology inventory exceeded bounds for {run_id}: expected at most 2 containers, 1 network, and 2 volumes; found {}, {}, and {}",
+            "partial performance topology inventory exceeded bounds for {run_id}: expected at most 3 containers, 1 network, and 3 volumes; found {}, {}, and {}",
             containers.len(),
             networks.len(),
             volumes.len()
@@ -2104,6 +2147,16 @@ mod tests {
                 name: "b".into(),
             },
         ];
+        let mut containers = containers;
+        containers.push(OwnedResource {
+            id: "ceph".into(),
+            name: "ceph".into(),
+        });
+        let mut volumes = volumes;
+        volumes.push(OwnedResource {
+            id: "ceph-volume".into(),
+            name: "ceph-data".into(),
+        });
         assert!(validate_inventory("run", &containers, &network, &volumes).is_ok());
         assert!(validate_inventory("run", &[], &network, &volumes).is_err());
         assert!(validate_partial_inventory("run", &[], &[], &[]).is_ok());

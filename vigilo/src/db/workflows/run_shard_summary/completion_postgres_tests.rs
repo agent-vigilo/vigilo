@@ -85,7 +85,6 @@ async fn worker_settlement_preserves_mixed_outcomes_and_stored_chunk_identity(po
         sqlx::query("UPDATE execution_aggregates SET aggregate_score=0.5,dimension_scores='{\"quality\":0.5}' WHERE run_id=$1")
             .bind(run).execute(&pool).await.unwrap();
         let entries = if gates {
-            seed_planned_case(&pool, run, 4, dataset, Uuid::now_v7(), 6).await;
             sqlx::query(
                 "UPDATE run_snapshots SET config_snapshot=config_snapshot || $2 WHERE run_id=$1",
             )
@@ -96,12 +95,13 @@ async fn worker_settlement_preserves_mixed_outcomes_and_stored_chunk_identity(po
             .execute(&pool)
             .await
             .unwrap();
+            freeze_plan(&pool, run, 4).await;
             json!([{
                 "id":"quality", "dimension":"quality", "binding_id":null,
                 "case_group":null, "tags_all":[], "min_mean_score":null,
                 "score_threshold":0.5, "min_pass_rate":null, "min_coverage":1,
                 "max_error_rate":null, "max_abstention_rate":null,
-                "expected_count":7, "scored_count":2, "passed_count":2,
+                "expected_count":6, "scored_count":2, "passed_count":2,
                 "error_count":0, "abstained_count":0, "score_sum":1,
                 "min_score":0.5, "max_score":0.5
             }])
@@ -355,7 +355,7 @@ async fn worker_settlement_rolls_back_when_local_snapshot_is_missing(pool: PgPoo
 
 #[sqlx::test(migrations = "../migrations")]
 #[ignore = "requires PostgreSQL"]
-async fn incomplete_gate_membership_rolls_back_worker_and_attempt_retirement(pool: PgPool) {
+async fn missing_gate_counts_roll_back_worker_and_attempt_retirement(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 2).await;
     let chunk_id = ranged_chunk(&pool, run, dataset, 0, 2, "pending").await;
     let execution = Uuid::now_v7();
@@ -379,11 +379,7 @@ async fn incomplete_gate_membership_rolls_back_worker_and_attempt_retirement(poo
     let error = mark_chunk_failed_and_settle(&pool, &chunk)
         .await
         .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("incomplete planned scorecard membership")
-    );
+    assert!(error.to_string().contains("incomplete planned gate counts"));
     let states: (String, String, String, Option<Uuid>) = sqlx::query_as(
         "SELECT e.status::text,a.status::text,c.status,c.lease_token FROM executions e JOIN execution_attempts a ON a.run_id=e.run_id AND a.run_shard=e.run_shard AND a.id=e.current_attempt_id JOIN run_chunks c ON c.run_id=e.run_id AND c.run_shard=e.run_shard AND c.id=e.chunk_id WHERE e.run_id=$1 AND e.id=$2",
     ).bind(run).bind(execution).fetch_one(&pool).await.unwrap();

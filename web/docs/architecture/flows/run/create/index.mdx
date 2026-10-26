@@ -20,24 +20,23 @@ import decisionFlowDiagram from './decision-flow.mmd';
 `vigilo run create` validates profile and dataset inputs and records a durable
 `creating` run before work can become visible to workers.
 
-With inline or file dataset inputs, creation stores canonical case membership,
-assigns execution placements, and seeds those placements idempotently. If
-immediate seeding cannot finish, the same run ID remains available for coordinator
-recovery. Dispatch cursors appear only in the transaction that changes a fully
-seeded run to `pending`.
+Inline and file YAML/JSON inputs are admitted through bounded dataset ingestion;
+`--dataset-upload-id` reuses a finalized catalog entry. Both paths publish the
+same verified immutable configuration and run plan. Case payloads and ordered
+membership remain in blob storage.
 
-With `--dataset-upload-id`, `--storage-config`, and `--prepare-only`, creation
-consumes a finalized catalog reference and publishes a verified immutable run
-plan in bounded passes. It stores compact file references and shard totals,
-without copying case payloads into control storage. The run remains `creating`
-with a ready plan and no dispatch cursors. Explicit retries retain the same run
-ID; the SQL seed-recovery coordinator does not claim this preparation path.
-See [Run Preparation](/docs/architecture/case-storage/run-preparation).
+Execution admission seeds compact references and scheduling rows in bounded
+pages. It verifies exact local chunk membership before one control transaction
+publishes routes and dispatch cursors and changes the run to `pending`. A
+coordinator resumes requested admission after interruption. `--prepare-only`
+holds a ready plan without requesting execution. Retry with the same `--run-id`
+and inputs, omitting that flag, to admit it.
 
-Creation also resolves every evaluator reference to an exact registry id,
-artifact hash, supported ABI, host adapter, and runtime version. This evaluator
-execution plan and the complete scoring-policy hash are copied into each run
-snapshot. Workers verify both hashes before executing any case.
+Every evaluator reference is frozen to an exact registry ID, artifact hash, ABI,
+host adapter, and runtime version. Workers verify the immutable configuration and
+assigned case membership before execution. See
+[Run Preparation](/docs/architecture/case-storage/run-preparation) for storage
+configuration, limits, ownership, cancellation, and recovery.
 
 ## Execution Flow
 
@@ -47,7 +46,7 @@ snapshot. Workers verify both hashes before executing any case.
 
 <Mermaid value={decisionFlowDiagram} />
 
-Creation also freezes per-shard chunk counts, case counts, and canonical membership hashes in the configuration. They bind planned work to settlement and let coordinators verify [exact settlement](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+Creation also freezes per-shard chunk counts, case counts, and canonical membership hashes in the immutable plan and compact local snapshot. They bind planned work to settlement and let coordinators verify [exact settlement](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
 ## Related
 

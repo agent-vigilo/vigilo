@@ -44,6 +44,7 @@ async fn progress_includes_later_receipts_behind_an_open_chunk(pool: PgPool) {
     let attempt = Uuid::now_v7();
     seed_execution(&pool, run, 4, last, execution, attempt, "failed").await;
     seed_aggregate(&pool, run, 4, execution, attempt, "failed").await;
+    freeze_plan(&pool, run, 4).await;
     let summary = refresh_run_shard_summary(&pool, run, 4)
         .await
         .unwrap()
@@ -80,7 +81,6 @@ async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool
     seed_aggregate(&pool, run, 4, good, good_attempt, "passed").await;
     seed_execution(&pool, run, 4, chunk, partial, partial_attempt, "running").await;
     seed_aggregate(&pool, run, 4, partial, partial_attempt, "passed").await;
-    seed_planned_case(&pool, run, 4, dataset, Uuid::now_v7(), 2).await;
     sqlx::query("UPDATE execution_aggregates SET aggregate_score = 0.8, dimension_scores = '{\"quality\":0.8}' WHERE run_id=$1")
         .bind(run).execute(&pool).await.unwrap();
     sqlx::query("UPDATE execution_attempts SET status='running', worker_id=$3, leased_until=now()+interval '1 hour' WHERE run_id=$1 AND id=$2")
@@ -97,6 +97,7 @@ async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool
         .execute(&pool)
         .await
         .unwrap();
+    freeze_plan(&pool, run, 4).await;
     let summary = refresh_run_shard_summary(&pool, run, 4)
         .await
         .unwrap()
@@ -413,17 +414,6 @@ async fn settled_missing_executions_keep_configured_scorecard_gates(pool: PgPool
     seed_control_run(&pool, run_id, dataset_id, dataset_version_id).await;
     seed_run_snapshot(&pool, run_id, shard, dataset_id, dataset_version_id, 2).await;
     seed_chunk(&pool, run_id, shard, dataset_version_id, "failed").await;
-    for ordinal in 0..2 {
-        seed_planned_case(
-            &pool,
-            run_id,
-            shard,
-            dataset_version_id,
-            Uuid::now_v7(),
-            ordinal,
-        )
-        .await;
-    }
     sqlx::query(
         "UPDATE run_snapshots SET config_snapshot = $3 WHERE run_id = $1 AND run_shard = $2",
     )
@@ -659,6 +649,7 @@ async fn terminal_failure_serializes_with_a_waiting_result_writer(pool: PgPool) 
         .unwrap()
         .unwrap_err();
     assert!(error.to_string().contains("settlement authority"));
+    freeze_plan(&pool, run, 4).await;
     let summary = refresh_run_shard_summary(&pool, run, 4)
         .await
         .unwrap()

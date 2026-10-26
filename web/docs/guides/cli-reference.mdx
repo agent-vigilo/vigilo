@@ -85,17 +85,15 @@ remain accepted as compatibility paths but are omitted from canonical help.
 exact abandoned-file cleanup. See [Dataset Ingestion](/docs/architecture/case-storage/ingestion)
 for input formats, storage configuration, batching, leases, and scheduler ownership.
 
-## Dataset-Reference Run Preparation
+## Run Storage
 
-`run create --dataset-upload-id <id> --storage-config storage.toml --prepare-only`
-prepares a verified immutable run plan from a finalized dataset. Supply the profile
-through `--profile` or `--profile-file`, and retain `--run-id <uuid>` for retries.
-The run remains `creating`; preparation creates no worker-visible work.
-See [Run Preparation](/docs/architecture/case-storage/run-preparation) for recovery,
-status fields, placement ownership and cancellation.
+`run create` accepts inline/file YAML/JSON datasets or `--dataset-upload-id <id>`
+for finalized uploads. Both paths publish immutable plans and admit compact
+execution metadata before returning `pending`. Supply `--storage-config
+storage.toml` or set `VIGILO_STORAGE_CONFIG`; coordinators and workers use the
+same environment setting to resolve stored references.
 
-## Related
-
-- [Getting started](./getting-started)
-- [Scale-out and shard migration](/docs/architecture/scaling/)
-- [Publishing evaluators](./publishing)
+`--prepare-only` holds a ready run in `creating`. Repeat the same inputs and
+`--run-id`, omitting that flag, to request execution. See
+[Run Preparation](/docs/architecture/case-storage/run-preparation) for formats,
+limits, recovery, progress, and cancellation.

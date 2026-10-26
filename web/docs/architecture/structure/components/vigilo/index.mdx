@@ -33,6 +33,7 @@ ownership. See [Dataset Ingestion](/docs/architecture/case-storage/ingestion).
 
 Dataset-reference run preparation traverses verified batches through the storage
 adapter, freezes chunk and gate membership, and seals compact control references.
-It remains non-dispatchable until execution admission. Its foreground caller
-owns retry scheduling and uses the run creation lease; see
+Execution admission verifies compact local metadata before activation. The
+foreground caller resumes preparation; coordinators recover requested admission
+under the run creation lease. See
 [Run Preparation](/docs/architecture/case-storage/run-preparation).

@@ -23,7 +23,7 @@ Instead of a one-off script that prints a score, Vigilo gives you a system for p
 - **Evaluators are versioned artifacts.** Publish reusable
   <GlossaryTerm term="evaluator">Wasm evaluators</GlossaryTerm> and refer to them
   by stable identifiers like `vigilo/sentiment-basic-en:0.1.0`.
-- **Runs are durable.** Profiles, datasets, chunks, attempts, evaluator results, summaries, and gate outcomes are stored in Postgres.
+- **Runs are durable.** Immutable datasets and run plans live in object storage; PostgreSQL stores coordination, execution state, results, and gates.
 - **Execution is distributed.** Coordinators create chunk-ready outbox event records that are published through RabbitMQ; workers claim the identified chunks, call the agent target, run evaluators, and persist normalized results.
 - **The CLI is automation-friendly.** Commands return structured output, support quiet mode, and expose watch/status/results/export flows for CI and agentic clients.
 
@@ -124,13 +124,20 @@ Set the local connection strings:
 ```bash
 export DATABASE_URL='postgresql://postgres:password@localhost:5432/agent_vigilo'
 export MESSAGING_URL='amqp://guest:guest@localhost:5672'
+export VIGILO_STORAGE_CONFIG="$PWD/infra/dev/storage.toml"
 ```
+
+Use the bundled development owner configuration and export `DEV_S3_ACCESS_KEY_ID`
+and `DEV_S3_SECRET_ACCESS_KEY` from the selected dev env file as described
+in [Case Storage](/docs/architecture/case-storage/ingestion/#storage-owner-configuration).
+Creation, coordinator, and worker processes use the same storage binding.
 
 On PowerShell:
 
 ```powershell
 $env:DATABASE_URL='postgresql://postgres:password@localhost:5432/agent_vigilo'
 $env:MESSAGING_URL='amqp://guest:guest@localhost:5672'
+$env:VIGILO_STORAGE_CONFIG="$PWD/infra/dev/storage.toml"
 ```
 
 For sharding tests, start the overlay instead:
@@ -148,6 +155,7 @@ Host-side tests use the published ports:
 export DATABASE_URL='postgresql://postgres:password@localhost:5432/agent_vigilo'
 export VIGILO_TEST_SHARD_001_DATABASE_URL='postgresql://postgres:password@localhost:5433/agent_vigilo'
 export MESSAGING_URL='amqp://guest:guest@localhost:5672'
+export VIGILO_STORAGE_CONFIG="$PWD/infra/dev/storage.toml"
 ```
 
 Inside Compose containers, services use Docker DNS names such as `postgres`,

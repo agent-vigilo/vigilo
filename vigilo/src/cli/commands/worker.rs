@@ -98,6 +98,7 @@ enum RetrySettlement {
 
 #[derive(Debug)]
 struct WorkerRunContext {
+    reader: Arc<crate::case_reader::RunReader>,
     profile: RunProfile,
     evaluator_catalog: execution_processing::RunEvaluatorCatalog,
 }
@@ -290,6 +291,7 @@ async fn run_chunk_heartbeat(
                             worker_id = %runtime.worker_id,
                             "worker lost chunk lease during heartbeat"
                         );
+                        cancel.cancel();
                         return;
                     }
                     Err(err) => {
@@ -437,6 +439,8 @@ impl EvaluatorLoaderService {
         run_id: Uuid,
         run_shard: i16,
         execution_db: &sqlx::PgPool,
+        database_alias: &str,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Arc<WorkerRunContext>> {
         let key = WorkerRunContextKey { run_id, run_shard };
         let cell = self
@@ -445,16 +449,32 @@ impl EvaluatorLoaderService {
             .await;
         let context = cell
             .get_or_try_init(|| async {
-                let Some(snapshot) =
-                    run_snapshots::select_worker_run_snapshot(execution_db, run_id, run_shard)
-                        .await?
-                else {
-                    anyhow::bail!(
-                        "run '{}' shard {} missing run profile snapshot",
+                let raw: serde_json::Value = self.context.dbr().await?.run_database_operation(database_alias,"worker_run_snapshot",async {
+                    Ok(sqlx::query_scalar("SELECT config_snapshot FROM run_snapshots WHERE run_id=$1 AND run_shard=$2")
+                        .bind(run_id).bind(run_shard).fetch_one(execution_db).await?)
+                }).await?;
+                let reference = serde_json::from_value(
+                    raw.get("run_plan")
+                        .ok_or_else(|| anyhow::anyhow!("run snapshot has no immutable plan"))?
+                        .clone(),
+                )?;
+                let limits = serde_json::from_value(raw["storage_limits"].clone())?;
+                let binding = raw["storage_binding_hash"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing storage binding"))?;
+                let store = self.context.storage(binding, &limits).await?;
+                let reader = Arc::new(
+                    crate::case_reader::RunReader::open(
+                        store,
+                        &reference,
+                        limits,
                         run_id,
-                        run_shard
-                    );
-                };
+                        cancel,
+                    )
+                    .await?,
+                );
+                let snapshot =
+                    run_snapshots::decode_worker_snapshot(reader.configuration.snapshot.clone())?;
                 let evaluator_catalog = execution_processing::build_pinned_evaluator_catalog(
                     snapshot.execution_plan.evaluators.clone(),
                 )?;
@@ -471,6 +491,7 @@ impl EvaluatorLoaderService {
                     );
                 }
                 Ok::<_, anyhow::Error>(Arc::new(WorkerRunContext {
+                    reader,
                     profile: snapshot.profile,
                     evaluator_catalog,
                 }))
@@ -1016,14 +1037,6 @@ async fn run_worker_message_admitted(
     // --- Load run context and extend lease ---
     // The opaque claim token remains the authority for later writes while the
     // heartbeat advances its expiration deadline.
-    let run_context = database_router
-        .run_database_operation(
-            &payload.database_alias,
-            "worker_run_context_load",
-            evaluator_loader.get_or_build_run_context(chunk.run_id, chunk.run_shard, db),
-        )
-        .await?;
-
     let Some(extended_chunk) = database_router
         .run_database_operation(
             &payload.database_alias,
@@ -1056,6 +1069,33 @@ async fn run_worker_message_admitted(
         chunk.clone(),
         runtime.clone(),
     );
+    let loaded = tokio::select! {
+        result=evaluator_loader.get_or_build_run_context(chunk.run_id,chunk.run_shard,db,&payload.database_alias,&heartbeat.cancel)=>result,
+        _=heartbeat.cancel.cancelled()=>Err(anyhow::anyhow!("chunk authority lost during context read")),
+    };
+    let run_context = match loaded {
+        Ok(context) => context,
+        Err(error) => {
+            let chunk = heartbeat.stop().await;
+            if is_retryable_worker_database_error(&error) {
+                return Err(error);
+            }
+            settle_retryable_chunk_failure(
+                ChunkSettlementContext::new(
+                    database_router,
+                    &payload.database_alias,
+                    db,
+                    mq,
+                    message,
+                    &chunk,
+                ),
+                &error.to_string(),
+                "run_context",
+            )
+            .await?;
+            return Ok(WorkerCycleOutcome::Processed);
+        }
+    };
     let attempt_lease = execution_processing::AttemptLeaseContext {
         worker_id: runtime.worker_id,
         worker_host: runtime.worker_host.clone(),
@@ -1112,31 +1152,37 @@ async fn run_worker_message_admitted(
     // --- Load chunk case batch ---
     // Loading failure is retryable as long as this worker still owns the chunk
     // lease.
-    let batch_result = database_router
-        .run_database_operation(
-            &payload.database_alias,
-            "worker_case_batch_load",
-            chunk_processing::load_chunk_case_batch(db, &chunk),
-        )
-        .await;
+    let batch_result = run_context.reader.prepare(&chunk, &heartbeat.cancel).await;
     match batch_result {
-        Ok(cases) => {
+        Ok(mut batches) => {
+            let mut case_ids =
+                Vec::with_capacity((chunk.ordinal_end - chunk.ordinal_start) as usize);
             let mut succeeded = 0usize;
             let mut failed = 0usize;
 
             // --- Process due case executions ---
             // The execution workflow skips cases that are terminal or waiting
             // for retry_after.
-            let processed = match execution_processing::process_case_batch_execution(
-                &context,
-                db,
-                &payload.database_alias,
-                &chunk,
-                &attempt_lease,
-                &run_context.profile,
-                &run_context.evaluator_catalog,
-                &cases,
-            )
+            let processed = match async {
+                let mut outcomes = Vec::new();
+                while let Some(cases) = batches.next(&heartbeat.cancel).await? {
+                    case_ids.extend(cases.iter().map(|case| case.case_id));
+                    outcomes.extend(
+                        execution_processing::process_case_batch_execution(
+                            &context,
+                            db,
+                            &payload.database_alias,
+                            &chunk,
+                            &attempt_lease,
+                            &run_context.profile,
+                            &run_context.evaluator_catalog,
+                            &cases,
+                        )
+                        .await?,
+                    );
+                }
+                Ok::<_, anyhow::Error>(outcomes)
+            }
             .await
             {
                 Ok(processed) => processed,
@@ -1253,7 +1299,7 @@ async fn run_worker_message_admitted(
                         db,
                         chunk.run_id,
                         chunk.run_shard,
-                        &cases,
+                        &case_ids,
                     ),
                 )
                 .await?;
@@ -1314,7 +1360,7 @@ async fn run_worker_message_admitted(
             info!(
                 run_id = %chunk.run_id,
                 chunk_id = %chunk.id,
-                case_count = cases.len(),
+                case_count = case_ids.len(),
                 cases_succeeded = succeeded,
                 cases_failed = failed,
                 "processed case batch from queue chunk"
@@ -1568,7 +1614,13 @@ mod tests {
 
         for _ in 0..2 {
             let error = loader
-                .get_or_build_run_context(run_id, 1, &unavailable)
+                .get_or_build_run_context(
+                    run_id,
+                    1,
+                    &unavailable,
+                    "primary",
+                    &tokio_util::sync::CancellationToken::new(),
+                )
                 .await
                 .unwrap_err();
 

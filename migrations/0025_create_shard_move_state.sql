@@ -43,7 +43,7 @@ CREATE INDEX idx_shard_move_operations_claim
 CREATE TABLE shard_move_table_progress (
     move_id UUID NOT NULL REFERENCES shard_move_operations(id) ON DELETE CASCADE,
     table_name TEXT NOT NULL CHECK (table_name IN (
-        'case_blobs', 'dataset_versions', 'runs', 'run_shard_cases',
+        'dataset_versions', 'runs',
         'run_chunks', 'run_snapshots', 'executions', 'execution_attempts',
         'execution_aggregates', 'evaluator_results', 'evaluator_diagnostics',
         'run_shard_summaries', 'run_chunk_settlements', 'run_chunk_settlement_consumptions'
@@ -70,7 +70,7 @@ CREATE TABLE shard_move_captures (
 CREATE TABLE shard_move_dirty_keys (
     move_id UUID NOT NULL REFERENCES shard_move_captures(move_id) ON DELETE CASCADE,
     table_name TEXT NOT NULL CHECK (table_name IN (
-        'run_shard_cases', 'run_chunks', 'run_snapshots', 'executions',
+        'run_chunks', 'run_snapshots', 'executions',
         'execution_attempts', 'execution_aggregates', 'evaluator_results',
         'evaluator_diagnostics', 'run_shard_summaries', 'run_chunk_settlements', 'run_chunk_settlement_consumptions'
     )),
@@ -123,11 +123,6 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER capture_run_shard_cases_changes
-AFTER INSERT OR UPDATE OR DELETE ON run_shard_cases
-FOR EACH ROW EXECUTE FUNCTION record_shard_move_dirty_key(
-    'run_shard_cases', 'run_id', 'run_shard', 'case_id'
-);
 
 CREATE TRIGGER capture_run_chunks_changes
 AFTER INSERT OR UPDATE OR DELETE ON run_chunks

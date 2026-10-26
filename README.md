@@ -66,7 +66,7 @@ git config core.hooksPath scripts/hooks
 | Unit and contract | Service-free Rust behavior across the workspace | None | `Unit and Contract Tests` |
 | Database integration | SQL, migrations, transactions, advisory locks, leases, and concurrency | One PostgreSQL server; `DATABASE_URL` must use a role that can create test databases | `Database Integration Tests` |
 | Migration | Greenfield schema application through the CLI setup path | One fresh PostgreSQL database | `Migration Tests` |
-| End-to-end | Routing and the real distributed runtime across process and protocol boundaries | Two PostgreSQL servers, RabbitMQ, evaluator Wasm, and the test HTTP agent | `End-to-End Tests` |
+| End-to-end | Routing and the real distributed runtime across process and protocol boundaries | Two PostgreSQL servers, RabbitMQ, S3-compatible object storage, evaluator Wasm, and the test HTTP agent | `End-to-End Tests` |
 | Performance services | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | Opt-in local tier |
 
 Run the service-free tier with:
@@ -124,7 +124,7 @@ integration tier so the command remains complete.
 The end-to-end tier runs `multi_database_routing` and `multi_database_e2e`
 separately because they require the complete distributed dependency set. The
 workflow builds the evaluator Wasm and supplies the required database,
-messaging, and opt-in environment variables.
+messaging, storage-owner configuration (`VIGILO_STORAGE_CONFIG`), and opt-in environment variables.
 
 The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, object storage, migration, end-to-end, evaluator Wasm, and web production build checks run as separate required CI jobs.
 

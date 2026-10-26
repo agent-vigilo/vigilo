@@ -7,7 +7,7 @@ CREATE TABLE dataset_versions (
 );
 
 COMMENT ON TABLE dataset_versions IS
-    'Canonical catalog of resolved dataset versions used by runs and membership rows.';
+    'Immutable logical dataset-version identities referenced by runs and scheduling metadata.';
 
 COMMENT ON COLUMN dataset_versions.dataset_version_id IS
     'Deterministic identifier for a dataset membership/version snapshot.';
@@ -22,4 +22,4 @@ COMMENT ON COLUMN dataset_versions.created_at IS
     'Timestamp when this dataset version row was first inserted.';
 
 COMMENT ON COLUMN dataset_versions.updated_at IS
-    'Timestamp of the last dataset version identity update.';
+    'Timestamp assigned when the immutable dataset identity is recorded.';

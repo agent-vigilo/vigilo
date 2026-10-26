@@ -84,13 +84,7 @@ enum Operation {
     },
 }
 pub(super) fn owner(path: &std::path::Path) -> Result<OwnerConfig> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(64 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= 64 * 1024, "storage config exceeds 64 KiB");
-    Ok(toml::from_str(std::str::from_utf8(&bytes)?)?)
+    OwnerConfig::load(path)
 }
 #[async_trait]
 impl Executable for Command {

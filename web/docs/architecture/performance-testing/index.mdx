@@ -199,7 +199,7 @@ Run `cargo perf check`, create one
 <GlossaryTerm term="performance-test-subject">immutable release snapshot</GlossaryTerm>,
 and begin with the service-free `developer-v1` startup workload. When that
 passes, run `pr-v1` against the same snapshot with Docker available. This
-exercises the small real PostgreSQL, RabbitMQ, HTTP-agent, Wasm, and lifecycle
+exercises the small real PostgreSQL, RabbitMQ, Ceph object-storage, HTTP-agent, Wasm, and lifecycle
 paths before committing to a reference, capacity, recovery, or soak campaign.
 Exact-oracle failures take priority over timing; `pr-v1` produces
 <GlossaryTerm term="informative-timing">informative timing</GlossaryTerm> rather

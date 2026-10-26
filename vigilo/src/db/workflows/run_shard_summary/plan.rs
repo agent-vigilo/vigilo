@@ -4,6 +4,7 @@
 //! chunk plan. Coordinators fold the same ordered identities with their receipts;
 //! equality proves membership, rather than merely comparing execution counts.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 use serde::{
@@ -12,6 +13,7 @@ use serde::{
 };
 use uuid::Uuid;
 
+#[cfg(test)]
 use crate::models::run_chunk::RunChunkDraft;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
@@ -63,6 +65,7 @@ impl Manifest {
 }
 
 /// Freezes each shard's exact ordered chunk membership into the run snapshot.
+#[cfg(test)]
 pub(crate) fn manifests(chunks: &[RunChunkDraft]) -> anyhow::Result<serde_json::Value> {
     let mut ordered = chunks.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|chunk| (chunk.run_shard, chunk.ordinal_start, chunk.chunk_id));

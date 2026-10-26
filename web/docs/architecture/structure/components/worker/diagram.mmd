@@ -26,7 +26,7 @@ flowchart TD
     ChunkWorkflow["fa:fa-handshake <br/> <b>Chunk Lease Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Uses message route hints, validates local write epochs, and claims or settles owned leases.</small>"]:::component
     RunContextCache["fa:fa-boxes-stacked <br/> <b>Run Context Cache</b> <br/> <small>[Component: Rust / Moka]</small> <br/> <small>Caches verified run snapshots and pinned evaluator execution plans.</small>"]:::component
     EvaluatorLoader["fa:fa-cubes <br/> <b>Evaluator Loader Service</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Loads exact pinned artifacts, resolves ABI adapters, and warms prepared evaluators.</small>"]:::component
-    CaseBatchLoader["fa:fa-table-list <br/> <b>Case Batch Loader</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Loads dataset cases covered by the claimed chunk ordinal range.</small>"]:::component
+    CaseBatchLoader["fa:fa-table-list <br/> <b>Case Batch Loader</b> <br/> <small>[Component: Rust / Storage Adapter]</small> <br/> <small>Verifies immutable configuration and assigned case files within byte budgets.</small>"]:::component
 
     ExecutionProcessor["fa:fa-list-check <br/> <b>Execution Processing Workflow</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Allocates due attempts under a shared run-state guard, skips retry waits, and runs chunk cases with bounded parallelism.</small>"]:::component
     AgentClient["fa:fa-brain <br/> <b>Agent Invocation Client</b> <br/> <small>[Component: Rust / HTTP]</small> <br/> <small>Sends evaluator-safe case input to the configured target and normalizes agent output.</small>"]:::component
@@ -87,12 +87,14 @@ flowchart TD
     ChunkWorkflow -->|"Reads and updates chunk leases in <br> <small>[SQL/TCP]</small>"| Database
 
     MessageHandler -->|"Loads verified profile and execution plan through"| RunContextCache
-    RunContextCache -->|"Reads the immutable run snapshot from <br> <small>[SQL/TCP]</small>"| Database
+    RunContextCache -->|"Reads compact immutable references from <br> <small>[SQL/TCP]</small>"| Database
     RunContextCache -->|"Warms pinned evaluator artifacts with"| EvaluatorLoader
     EvaluatorLoader -->|"Reads exact evaluator Wasm by pinned id and hash from <br> <small>[SQL/TCP]</small>"| Database
 
     MessageHandler -->|"Loads cases with"| CaseBatchLoader
-    CaseBatchLoader -->|"Reads dataset case rows from <br> <small>[SQL/TCP]</small>"| Database
+    Objects[("Object storage<br/>Immutable plans and dataset files")]:::component
+    CaseBatchLoader -->|"Verified bounded reads"| Objects
+    RunContextCache -->|"Read and verify frozen configuration"| Objects
     MessageHandler -->|"Processes claimed case batch with"| ExecutionProcessor
 
     ExecutionProcessor -->|"Invokes agent for chunk cases with bounded concurrency through"| AgentClient

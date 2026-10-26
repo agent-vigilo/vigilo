@@ -205,54 +205,6 @@ pub(crate) async fn extend_chunk_lease(
     Ok(updated)
 }
 
-/// Loads the shard-local cases covered by a claimed chunk's ordinal range.
-///
-/// Query behavior: reads only the run-and-shard projection routed to this
-/// execution database, joined to immutable case blobs and ordered by ordinal.
-/// This function does not claim work; callers must already own the chunk lease.
-pub(crate) async fn load_chunk_case_batch(
-    db: &PgPool,
-    chunk: &RunChunk,
-) -> anyhow::Result<Vec<WorkerCaseBatchItem>> {
-    let rows = sqlx::query_as::<_, WorkerCaseBatchItem>(
-        r#"
-		SELECT
-			projected.case_id,
-			projected.case_hash,
-			projected.case_ordinal,
-			cb.task_type,
-			cb.case_group,
-			cb.input_payload,
-			cb.expected_output,
-			cb.context_payload,
-			cb.tags,
-			cb.metadata
-		FROM run_shard_cases projected
-		JOIN case_blobs cb ON projected.case_hash = cb.case_hash
-		WHERE projected.run_id = $1::uuid
-		  AND projected.run_shard = $2
-		  AND projected.dataset_version_id = $3::uuid
-		  AND projected.case_ordinal >= $4
-		  AND projected.case_ordinal < $5
-		ORDER BY projected.case_ordinal
-		"#,
-    )
-    .bind(chunk.run_id)
-    .bind(chunk.run_shard)
-    .bind(chunk.dataset_version_id)
-    .bind(chunk.ordinal_start)
-    .bind(chunk.ordinal_end)
-    .fetch_all(db)
-    .await?;
-
-    validate_chunk_case_ordinals(
-        chunk.ordinal_start,
-        chunk.ordinal_end,
-        rows.iter().map(|row| row.case_ordinal),
-    )?;
-    Ok(rows)
-}
-
 /// Releases a leased chunk back to pending if the caller still owns the lease.
 ///
 /// Query behavior: clears the lease and returns the chunk to `pending` only for

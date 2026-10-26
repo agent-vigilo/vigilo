@@ -66,6 +66,7 @@ pub(crate) use aggregation::{
     AggregationConfig,
     advance_pending_summaries,
 };
+#[cfg(test)]
 pub(crate) use plan::manifests as chunk_plan_manifests;
 pub(crate) use queries::{
     initialize_run_shard_summary_with,

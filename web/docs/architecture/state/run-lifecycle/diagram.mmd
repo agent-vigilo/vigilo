@@ -9,9 +9,9 @@ config:
 flowchart TD
     Create([run create])
     Creating[Run creating]
-    Seed[Seed pending database placements]
+    Seed[Seed compact execution metadata]
     SeedGuard{Every placement seeded?}
-    Activate[Create cursors; retain frozen membership hash; delete temporary plan]
+    Activate[Publish routes and cursors after exact coverage verification]
     Pending[Run pending]
     DispatchGuard{Pending or running with open shard cursor?}
     DispatchLock[Claim one run-shard dispatch cursor]
@@ -38,14 +38,16 @@ flowchart TD
     Reject([Cancellation error])
 
     Create --> Creating
-    Creating -->|Inline or file dataset| Seed --> SeedGuard
-    Creating -->|Finalized dataset and prepare-only| Prepare[Verify and publish immutable run plan]
-    Prepare --> Prepared[Plan ready; run creating; no dispatch]
+    Creating --> Prepare[Verify cases and publish immutable run plan]
+    Prepare --> Prepared[Plan ready, run creating]
+    Prepared -->|Execution requested| Seed --> SeedGuard
+    Prepared -->|Prepare only| Prepared
     Prepare --> CancelGuard
     Prepared --> CancelGuard
-    SeedGuard -- Yes --> Activate --> Pending
-    SeedGuard -- Retryable failure --> Creating
-    SeedGuard -- Persisted-data conflict --> Failed
+    Seed --> CancelGuard
+    SeedGuard -- Exact local coverage --> Activate --> Pending
+    SeedGuard -- Deferred --> Creating
+    SeedGuard -- Immutable conflict --> Failed
 
     Pending --> DispatchGuard
     DispatchGuard -- Yes --> DispatchLock --> Running --> DispatchEvents --> DispatchCursor
@@ -65,7 +67,7 @@ flowchart TD
     Pending --> CancelGuard
     Running --> CancelGuard
     Finalizing --> CancelGuard
-    CancelGuard -- Open execution or blob preparation --> CancelCascade --> Cancelled --> CancelEvent
+    CancelGuard -- Open run, including creation --> CancelCascade --> Cancelled --> CancelEvent
     CancelGuard -- Completed or failed --> Reject
     Cancelled -->|Repeated cancel| Noop
 

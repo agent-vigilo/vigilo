@@ -38,8 +38,6 @@ pub(crate) struct ProfileExecutabilitySummary {
     pub(crate) expected_evaluator_execution_count: usize,
     pub(crate) unique_evaluator_ref_count: usize,
     pub(crate) runnable_evaluator_ref_count: usize,
-    #[serde(skip_serializing)]
-    pub(crate) resolved_evaluators: Vec<ResolvedEvaluator>,
 }
 
 /// Validates that a profile can execute every dataset case with runnable evaluators.
@@ -61,7 +59,7 @@ pub(crate) async fn validate_profile_executability(
     profile: &RunProfile,
     dataset: &RunDataset,
 ) -> anyhow::Result<ProfileExecutabilitySummary> {
-    let (runnable_by_ref, resolved_evaluators, mut issues) = resolve_profile(db, profile).await?;
+    let (runnable_by_ref, _, mut issues) = resolve_profile(db, profile).await?;
 
     let mut expected_evaluator_execution_count = 0usize;
 
@@ -131,7 +129,6 @@ pub(crate) async fn validate_profile_executability(
         expected_evaluator_execution_count,
         unique_evaluator_ref_count: runnable_by_ref.len(),
         runnable_evaluator_ref_count,
-        resolved_evaluators,
     })
 }
 

@@ -28,13 +28,15 @@ The profile is YAML or JSON, supplied through `--profile` or `--profile-file`,
 with an 8 MiB input and encoded limit. Storage configuration resolves the same
 recorded physical owner as the dataset; credentials remain outside SQL and files.
 
-`--prepare-only` is required with a dataset reference. Success returns
-`status: creating`, `plan_status: ready`, the verified `run_plan` reference, and
-`dispatchable: false`. A ready plan does not seed execution databases, create
-shard routes or dispatch cursors, or publish queue messages. Execution admission
-is a separate condition for a run to become `pending`; plan publication alone
-cannot satisfy it. Runs created from inline or file dataset inputs follow the
-[run creation flow](/docs/architecture/flows/run/create/).
+Creation admits the published plan to execution storage and returns `pending`
+after exact placement verification. `--prepare-only` holds a run in `creating`
+with `plan_status: ready` and `dispatchable: false`. Repeat the same command
+without that flag to request execution. Coordinators resume requested admission
+after the foreground process stops; they leave preparation-only runs held.
+Inline and file YAML/JSON inputs use the same ingestion and preparation path.
+Set `VIGILO_STORAGE_CONFIG` for creators, coordinators, and workers, or supply
+`--storage-config` to creation. Runtime credentials need read access to the
+recorded owner; workers do not write capability probes.
 
 ## Preparation Flow
 
@@ -66,8 +68,9 @@ Chunk files, indexes, gate files, and the configuration use the
 profile, agent settings, evaluator execution plan, logical dataset identity, and
 executability counts. The run-plan manifest links those objects to the finalized
 dataset and records per-shard totals and settlement hashes. The control run
-snapshot retains compact identities and references rather than full policy or
-case payloads.
+snapshot retains compact identities, references and expected shard settlement
+hashes rather than full policy or case payloads. Publication derives that bounded
+finalization projection from the same shard metadata in its atomic commit.
 
 ## Authority, Recovery, and Status
 
@@ -104,18 +107,48 @@ physical storage binding is rejected.
 `creation_progress.plan_chunk_cursor`. The cursor counts contiguous acknowledged
 chunks. It can reach the expected chunk count before indexes, gate files,
 configuration and the manifest finish; `plan_status: ready` indicates complete
-verified publication. These fields are null for runs without a blob plan.
+verified publication. Preparation-only runs expose these fields while held.
 
 Publication atomically records the verified root reference and compact shard
 metadata. Missing/corrupt objects, changed identity, incomplete coverage, stale
-leases, or cancelled runs cannot publish. The run's `creation_kind` identifies its recovery owner. The partial recovery
-index selects only `case-projection` runs; `blob-plan` preparations do not expand
-coordinator seed-recovery scans. Coordinators cannot claim or activate this
-preparation workflow through the SQL placement-seeding path.
+leases, or cancelled runs cannot publish.
 
-`run cancel` cancels a preparing or ready plan's run and revokes publication
-authority. It creates no execution results. Recorded plan file ownership is
-retained; cancellation does not delete the shared finalized dataset.
+## Execution Admission and Worker Reads
+
+Admission reads bounded chunk pages and the linked gate counts. It stores only
+execution-local chunk scheduling rows, immutable plan references, frozen gate
+policy/counts, and the exact settlement manifest. The control database
+acknowledges a contiguous chunk cursor and at most 128 shard folds after local
+commits. Lost acknowledgements replay identical metadata. Deterministic immutable
+seed conflicts fail the run without publishing dispatch cursors; availability
+failures remain resumable. Before activation,
+admission independently folds the local chunk identities and compares every
+shard with the published plan. One fenced control transaction publishes routes
+and dispatch cursors and changes the run to `pending`. No case payload or
+per-case membership table is required in either database.
+
+Workers hold a chunk lease and heartbeat while reading configuration and cases.
+They verify the claimed chunk against its immutable chunk file, traverse only
+the required dataset ranges, and check complete case files, including records
+outside the selected slice. Ordered case IDs, ordinals and hashes must reproduce
+the chunk's membership digest before execution starts. Small assignments retain
+a bounded vector. Larger assignments verify first and then reread immutable
+files one at a time, preserving the encoded resident-byte budget. Storage
+failure follows the bounded chunk retry path, with the same lease fencing as
+agent and evaluator failure.
+
+Chunk receipts retain actual execution evidence. Shard summaries apply the
+frozen per-gate planned counts, so cases that never execute still reduce gate
+coverage. Settlement and cancellation require no object-storage reads inside
+SQL transactions. Exports retain the same execution/result records. Shard
+movement copies the compact references and runtime records; dataset files stay
+at their immutable storage locations.
+
+`run cancel` revokes creation authority and closes admission on partially seeded
+placements, including tombstones for shards not yet seeded. A delayed creator
+cannot reopen cancelled work. Cancellation keeps committed results and shared
+immutable dataset objects; it does not fabricate evaluator errors or delete
+the dataset.
 
 ## Control Records
 
@@ -123,7 +156,7 @@ retained; cancellation does not delete the shared finalized dataset.
 
 `run_plans` freezes the dataset catalog ID, storage binding, limits, evaluator
 artifacts and initial placements, then records generation, acknowledged chunk
-progress and the published root. `run_plan_objects` holds one compact reference
+progress, execution intent, admission cursor/folds and the published root. `run_plan_objects` holds one compact reference
 per owned file. `run_plan_shards` holds at most 128 rows of verified totals,
 placement aliases and membership hashes. There are no per-case plan rows, case
 payloads, or temporary per-chunk SQL plans in this preparation path.

@@ -10,7 +10,7 @@ async fn cli_plan_recovers_process_death_freezes_inputs_and_never_dispatches() -
     let profile_file = root.path().join("profile.json");
     let prefix = format!("plan-acceptance/{}", Uuid::now_v7());
     let owner = format!(
-        "provider='s3'\nalias='cases'\nbucket='{}'\nprefix='{prefix}'\nregion='us-east-1'\nendpoint='{}'\nallow_http=true\npath_style=true\n[credential_variables]\naccess_key='VIGILO_BLOB_TEST_ACCESS_KEY_ID'\nsecret_key='VIGILO_BLOB_TEST_SECRET_ACCESS_KEY'\n",
+        "provider='s3'\nalias='cases'\nbucket='{}'\nprefix='{prefix}'\nregion='us-east-1'\nendpoint='{}'\nread_endpoint_variable='VIGILO_PLAN_READ_ENDPOINT'\nallow_http=true\npath_style=true\n[credential_variables]\naccess_key='VIGILO_BLOB_TEST_ACCESS_KEY_ID'\nsecret_key='VIGILO_BLOB_TEST_SECRET_ACCESS_KEY'\n",
         env("VIGILO_BLOB_TEST_BUCKET")?,
         env("VIGILO_BLOB_TEST_ENDPOINT")?
     );
@@ -96,9 +96,11 @@ async fn cli_plan_recovers_process_death_freezes_inputs_and_never_dispatches() -
         sqlx::query("UPDATE runs SET coordinator_leased_until=clock_timestamp()-interval '1 second' WHERE id=$1").bind(run).execute(&db).await?;
         sqlx::query("UPDATE evaluators SET state='disabled' WHERE id=$1").bind(evaluator).execute(&db).await?;
         let ready=success(&plan_args(run)).await?;ensure!(ready["data"]["plan_status"]=="ready"&&ready["data"]["status"]=="creating"&&ready["meta"]["dispatchable"]==false,"plan crossed dispatch boundary");
+        let wrong_read=command().args(plan_args(run)).env("VIGILO_PLAN_READ_ENDPOINT","http://127.0.0.1:1").output().await?;
+        ensure!(!wrong_read.status.success(),"an unavailable read route was accepted");
         let same=success(&plan_args(run)).await?;ensure!(same["data"]["run_plan"]==ready["data"]["run_plan"],"replay replaced immutable plan");
         let status=success(&["run".into(),"status".into(),run.to_string()]).await?;ensure!(status["data"]["creation_progress"]["plan_status"]=="ready"&&status["data"]["creation_progress"]["plan_chunk_cursor"]==12,"status lost planning progress");
-        let no_work:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM run_shard_dispatch_cursors WHERE run_id=$1) AND NOT EXISTS(SELECT 1 FROM shard_placements WHERE run_id=$1) AND NOT EXISTS(SELECT 1 FROM dataset_version_cases WHERE dataset_version_id=(SELECT dataset_version_id FROM runs WHERE id=$1))").bind(run).fetch_one(&db).await?;ensure!(no_work,"preparation copied case rows or enabled dispatch");
+        let no_work:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM run_shard_dispatch_cursors WHERE run_id=$1) AND NOT EXISTS(SELECT 1 FROM shard_placements WHERE run_id=$1)").bind(run).fetch_one(&db).await?;ensure!(no_work,"preparation copied case rows or enabled dispatch");
         profile["description"]=json!("changed");tokio::fs::write(&profile_file,serde_json::to_vec(&profile)?).await?;ensure!(!output(&plan_args(run)).await?.status.success(),"changed profile resumed");
         let cancelled=success(&["run".into(),"cancel".into(),run.to_string()]).await?;ensure!(cancelled["data"]["status"]=="cancelled","prepared run cancellation failed");
         Ok(())
