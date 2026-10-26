@@ -42,7 +42,7 @@ flowchart TD
 
     Status -- Completed or failed --> TerminalFail
     Status -- Already cancelled --> Drain
-    Status -- Pending, running, or finalizing --> Drain
+    Status -- Pending, running, finalizing or blob preparation --> Drain
     Status -- Other --> UnsupportedFail
 
     Drain --> Routes

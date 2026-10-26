@@ -38,7 +38,11 @@ flowchart TD
     Reject([Cancellation error])
 
     Create --> Creating
-    Creating --> Seed --> SeedGuard
+    Creating -->|Inline or file dataset| Seed --> SeedGuard
+    Creating -->|Finalized dataset and prepare-only| Prepare[Verify and publish immutable run plan]
+    Prepare --> Prepared[Plan ready; run creating; no dispatch]
+    Prepare --> CancelGuard
+    Prepared --> CancelGuard
     SeedGuard -- Yes --> Activate --> Pending
     SeedGuard -- Retryable failure --> Creating
     SeedGuard -- Persisted-data conflict --> Failed
@@ -61,7 +65,7 @@ flowchart TD
     Pending --> CancelGuard
     Running --> CancelGuard
     Finalizing --> CancelGuard
-    CancelGuard -- Pending running or finalizing --> CancelCascade --> Cancelled --> CancelEvent
+    CancelGuard -- Open execution or blob preparation --> CancelCascade --> Cancelled --> CancelEvent
     CancelGuard -- Completed or failed --> Reject
     Cancelled -->|Repeated cancel| Noop
 

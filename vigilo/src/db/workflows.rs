@@ -7,6 +7,8 @@
 //! outbox writes.
 //!
 //! Reading guide:
+//! - `run_plan` journals immutable dataset-reference plan preparation without
+//!   granting execution admission.
 //! - `run_create` plans shard assignments and provides idempotent seed writes.
 //! - `run_creation` persists and recovers the cross-database creation state
 //!   machine before dispatch cursors make a run visible.
@@ -39,6 +41,7 @@ pub(crate) mod run_creation;
 pub(crate) mod run_dispatch;
 pub(crate) mod run_export;
 pub(crate) mod run_finalize;
+pub(crate) mod run_plan;
 pub(crate) mod run_profile_validation;
 pub(crate) mod run_results;
 pub(crate) mod run_shard_summary;

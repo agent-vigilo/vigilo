@@ -15,23 +15,23 @@ use uuid::Uuid;
 use crate::models::run_chunk::RunChunkDraft;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub(super) struct ChunkIdentity {
-    pub(super) chunk_id: Uuid,
-    pub(super) run_shard: i16,
-    pub(super) ordinal_start: i32,
-    pub(super) ordinal_end: i32,
+pub(crate) struct ChunkIdentity {
+    pub(crate) chunk_id: Uuid,
+    pub(crate) run_shard: i16,
+    pub(crate) ordinal_start: i32,
+    pub(crate) ordinal_end: i32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(super) struct Manifest {
-    pub(super) chunk_count: i32,
-    pub(super) case_count: i32,
-    pub(super) hash: String,
-    pub(super) last: Option<ChunkIdentity>,
+pub(crate) struct Manifest {
+    pub(crate) chunk_count: i32,
+    pub(crate) case_count: i32,
+    pub(crate) hash: String,
+    pub(crate) last: Option<ChunkIdentity>,
 }
 
 impl Manifest {
-    pub(super) fn push(&mut self, chunk: &ChunkIdentity) -> anyhow::Result<()> {
+    pub(crate) fn push(&mut self, chunk: &ChunkIdentity) -> anyhow::Result<()> {
         anyhow::ensure!(
             chunk.ordinal_start >= 0 && chunk.ordinal_end > chunk.ordinal_start,
             "invalid planned chunk range"
@@ -81,7 +81,7 @@ pub(crate) fn manifests(chunks: &[RunChunkDraft]) -> anyhow::Result<serde_json::
     Ok(serde_json::json!({"version": 1, "shards": plans}))
 }
 
-pub(super) fn snapshot_manifest(
+pub(crate) fn snapshot_manifest(
     snapshot: &serde_json::Value,
     shard: i16,
 ) -> anyhow::Result<Manifest> {

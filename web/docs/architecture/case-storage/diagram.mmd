@@ -3,12 +3,11 @@ flowchart LR
     app["Application ingestion and run planning<br/>validation, identity, publication"]
     control[("Control PostgreSQL<br/>references, leases, progress, settlement")]
     adapter["Provider-neutral storage boundary<br/>bounded and verified I/O"]
-    blobs[("Object storage<br/>case batches, indexes, manifests")]
-    workers["Workers<br/>verified assigned cases"]
+    blobs[("Object storage<br/>case batches, run plans, indexes, manifests")]
+    inspection["Run inspection<br/>identity and preparation progress"]
 
     input --> app
     app -->|"Publish compact references"| control
     app -->|"Write immutable objects"| adapter
     adapter --> blobs
-    control -->|"Resolve recorded references"| workers
-    workers -->|"Read assigned batches"| adapter
+    control -->|"Read compact progress and references"| inspection

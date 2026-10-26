@@ -28,7 +28,12 @@ How `runs.status` and `runs.gate_status` move through creation, dispatch, finali
   in the frozen configuration after the temporary plan is deleted. Once every
   placement is seeded, one control
   transaction creates dispatch cursors and changes the run to `pending`.
-- Coordinators claim expired creation leases before dispatch work and resume
+- Dataset-reference preparation keeps the run `creating` while immutable plan
+  files are verified and published. `plan_status: ready` is separate from execution
+  admission and creates no dispatch cursors. Explicit retries recover this path;
+  `run cancel` revokes its publication authority. See
+  [Run Preparation](/docs/architecture/case-storage/run-preparation).
+- Coordinators claim expired SQL-seeding creation leases before dispatch work and resume
   pending placement seeds with the original `run_id`. Persisted-data conflicts
   fail creation without opening dispatch cursors.
 - Coordinator dispatch claims an open `run_id + run_shard` cursor, marks a new `pending` run as `running`, selects a bounded shard-local chunk window, and inserts one `run.chunk.ready` outbox event record per selected chunk.
@@ -36,7 +41,7 @@ How `runs.status` and `runs.gate_status` move through creation, dispatch, finali
 - Finalization requires drained dispatch cursors and the exact routed set of sealed shard summaries. Evaluation failure leaves a shard `running` while any planned chunk remains unsettled, including retry waits.
 - Finalization verifies run, shard, policy, and planned membership identities; merges the sealed scorecards; and commits the report, gate, and completion event under the current coordinator lease. Missing or invalid candidates are deferred while other candidates continue.
 - Cancellation applies to `pending`, `running`, and `finalizing` runs. A
-  `creating` run is owned by the creation recovery workflow until it becomes
+  SQL-seeding `creating` run is owned by the creation recovery workflow until it becomes
   `pending` or `failed`.
 
 ## Settlement and partial results

@@ -33,6 +33,8 @@ CREATE TABLE runs (
 
     -- orchestration state
     status run_status NOT NULL DEFAULT 'pending',
+    creation_kind TEXT NOT NULL DEFAULT 'case-projection'
+        CHECK (creation_kind IN ('case-projection', 'blob-plan')),
     gate_status gate_status NOT NULL DEFAULT 'unknown',
 
     -- optional run-scoped coordinator ownership
@@ -78,7 +80,7 @@ CREATE INDEX idx_runs_coordinator_lease ON runs(coordinator_leased_until)
     WHERE status IN ('creating', 'pending', 'running', 'finalizing');
 
 CREATE INDEX idx_runs_creating_recovery ON runs(created_at, id)
-    WHERE status = 'creating';
+    WHERE status = 'creating' AND creation_kind = 'case-projection';
 
 COMMENT ON TABLE runs IS
     'Represents a single evaluation run against a versioned agent target. A run defines the dataset, evaluation profile, and aggregation policy, and tracks lifecycle state from creation through finalization and gate decision.';
@@ -193,3 +195,6 @@ COMMENT ON COLUMN runs.completed_at IS
 
 COMMENT ON COLUMN runs.updated_at IS
     'Timestamp of the last update to the run record.';
+
+COMMENT ON COLUMN runs.creation_kind IS
+    'Creation ownership boundary: case-projection uses coordinator SQL-seed recovery; blob-plan uses explicit lease-fenced immutable plan preparation. Plan readiness does not grant dispatch authority.';

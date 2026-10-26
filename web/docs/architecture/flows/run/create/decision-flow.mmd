@@ -9,14 +9,17 @@ config:
 flowchart TD
     Start([vigilo run create])
 
+    Mode{Finalized reference with prepare-only?}
+    Prepare[Verify dataset, freeze identity, publish bounded immutable plan]
+    Prepared([Creating run; plan ready; no dispatch])
     Sources{Profile and dataset sources valid?}
     Parse{Profile and dataset schemas valid?}
     Cases{Dataset has cases?}
     Executable{Profile executable for dataset?}
-    Dataset[Upload and verify batches, indexes, and finalized dataset manifest]
-    DatasetReady{Dataset finalized?}
-    Plan[Build and verify immutable run plan and shard assignments]
-    Persist[Commit creating run, frozen membership hashes, ledger, and verified plan reference]
+    Dataset[Build canonical cases and ordered membership]
+    DatasetReady{Membership valid?}
+    Plan[Build chunks and shard assignments]
+    Persist[Commit creating run, cases, frozen membership hashes and seed ledger]
     Placement{Pending placement remains?}
     Seed[Idempotently seed the placement]
     SeedResult{Seed result?}
@@ -35,7 +38,10 @@ flowchart TD
     PlanningFail([Run planning error])
     PersistenceFail([Persistence error])
 
-    Start --> Sources
+    Start --> Mode
+    Mode -- Yes --> Prepare --> Prepared
+    Prepare -. Failure .-> PlanningFail
+    Mode -- No --> Sources
 
     Sources -- No --> SourceFail
     Sources -- Yes --> Parse

@@ -42,6 +42,7 @@ mod manifest;
 mod models;
 mod mq;
 mod outbox;
+mod run_planning;
 mod runtime;
 
 fn init_logger(quiet: bool, verbose: u8) {

@@ -68,7 +68,7 @@ fn jsonb_text(value: &serde_json::Value) -> String {
     serde_json::to_string(value).expect("serializing serde_json::Value should not fail")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RunShardPlacementAssignment {
     pub(crate) run_shard: i16,
     pub(crate) database_alias: String,

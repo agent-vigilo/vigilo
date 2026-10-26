@@ -95,6 +95,7 @@ mod identity_tests;
 
 mod cancel;
 mod create;
+mod create_blob;
 mod export;
 mod results;
 mod status;
@@ -304,6 +305,8 @@ struct RunWatchSnapshotKey {
     creation_placements_failed: i64,
     creation_seed_attempt_count: i64,
     creation_last_error: Option<String>,
+    plan_status: Option<String>,
+    plan_chunk_cursor: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -359,6 +362,14 @@ impl From<&run_status_workflow::RunStatusProjection> for RunWatchSnapshotKey {
                 .creation_progress
                 .as_ref()
                 .map_or(0, |progress| progress.attempt_count),
+            plan_status: status
+                .creation_progress
+                .as_ref()
+                .and_then(|p| p.plan_status.clone()),
+            plan_chunk_cursor: status
+                .creation_progress
+                .as_ref()
+                .and_then(|p| p.plan_chunk_cursor),
             creation_last_error: status
                 .creation_progress
                 .as_ref()
@@ -455,6 +466,8 @@ fn run_watch_payload_from_status(
                 "failed_placement_count": progress.failed_placement_count,
                 "attempt_count": progress.attempt_count,
                 "last_error": progress.last_error,
+                "plan_status": progress.plan_status,
+                "plan_chunk_cursor": progress.plan_chunk_cursor,
             })),
         },
         "meta": {
@@ -517,8 +530,8 @@ pub(crate) enum SubCommand {
         #[arg(
             long,
             value_name = "YAML_OR_JSON",
-            conflicts_with = "dataset_file",
-            required_unless_present = "dataset_file"
+            conflicts_with_all = ["dataset_file", "dataset_upload_id"],
+            required_unless_present_any = ["dataset_file", "dataset_upload_id"]
         )]
         dataset: Option<String>,
 
@@ -527,10 +540,25 @@ pub(crate) enum SubCommand {
             long,
             value_name = "FILE",
             value_parser = parse_filepath,
-            conflicts_with = "dataset",
-            required_unless_present = "dataset"
+            conflicts_with_all = ["dataset", "dataset_upload_id"],
+            required_unless_present_any = ["dataset", "dataset_upload_id"]
         )]
         dataset_file: Option<PathBuf>,
+        /// Finalized dataset catalog/upload ID; stores a non-dispatchable run plan
+        #[arg(long, conflicts_with_all=["dataset","dataset_file"], requires_all=["storage_config","prepare_only"])]
+        dataset_upload_id: Option<Uuid>,
+
+        /// Storage owner TOML used to resolve the finalized dataset and plan files
+        #[arg(long, requires = "dataset_upload_id")]
+        storage_config: Option<PathBuf>,
+
+        /// Retain this ID when retrying interrupted plan preparation
+        #[arg(long, requires = "dataset_upload_id")]
+        run_id: Option<Uuid>,
+
+        /// Prepare and verify the immutable plan without admitting execution work
+        #[arg(long, requires = "dataset_upload_id")]
+        prepare_only: bool,
     },
 
     /// Parse and validate run profile and dataset inputs
@@ -651,7 +679,22 @@ impl Executable for Command {
                 profile_file,
                 dataset,
                 dataset_file,
+                dataset_upload_id,
+                storage_config,
+                run_id,
+                prepare_only: _,
             }) => {
+                if let Some(upload_id) = dataset_upload_id {
+                    return create_blob::exec(
+                        context,
+                        profile,
+                        profile_file,
+                        upload_id,
+                        storage_config.expect("clap requires storage configuration"),
+                        run_id,
+                    )
+                    .await;
+                }
                 info!("creating run from profile and dataset inputs");
                 create::exec(
                     context,

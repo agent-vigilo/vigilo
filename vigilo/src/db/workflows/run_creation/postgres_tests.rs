@@ -339,3 +339,57 @@ async fn expired_creation_lease_can_be_reclaimed(pool: PgPool) {
     );
     assert_ne!(first_owner, second_owner);
 }
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn blob_preparation_is_not_claimed_or_activated_by_sql_seed_recovery(pool: PgPool) {
+    use sqlx::types::Json;
+
+    use crate::{
+        contracts::{
+            case_storage::{
+                FormatLimits,
+                identity::DatasetIdentity,
+            },
+            evaluator_abi::EvaluatorExecutionPlan,
+        },
+        db::workflows::dataset_upload,
+    };
+    let (run_id, owner) = insert_creation_fixture(&pool, "seeded").await;
+    let (dataset_id, version): (Uuid, Uuid) =
+        sqlx::query_as("SELECT dataset_id,dataset_version_id FROM runs WHERE id=$1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let limits = FormatLimits::default();
+    let upload = dataset_upload::begin(
+        &pool,
+        Uuid::now_v7(),
+        "cases",
+        &"2".repeat(64),
+        &DatasetIdentity {
+            dataset_id,
+            dataset_version: Some("test".into()),
+            dataset_version_id: version,
+            dataset_hash: "1".repeat(64),
+            case_count: 1,
+        },
+        &limits,
+    )
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO dataset_catalog(id,storage_alias,binding_hash,dataset_hash,dataset_version_id,limits,manifest) VALUES($1,'cases',$2,$3,$4,$5,'{}')").bind(upload.id).bind(&upload.binding_hash).bind(&upload.identity.dataset_hash).bind(version).bind(Json(&limits)).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO run_plans(run_id,dataset_upload_id,storage_binding_hash,limits,execution_plan,assignments) VALUES($1,$2,$3,$4,$5,$6)").bind(run_id).bind(upload.id).bind(&upload.binding_hash).bind(Json(&limits)).bind(Json(EvaluatorExecutionPlan::new("3".repeat(64),Vec::new()))).bind(serde_json::json!([{"run_shard":0,"database_alias":"primary"}])).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE runs SET creation_kind='blob-plan',coordinator_leased_until=clock_timestamp()-interval '1 second' WHERE id=$1").bind(run_id).execute(&pool).await.unwrap();
+    assert_eq!(
+        claim_next_creating_run(&pool, Uuid::now_v7(), 300)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(activate_claimed_run(&pool, run_id, owner).await.is_err());
+    let (status,cursors):(String,i64)=sqlx::query_as("SELECT status::text,(SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1) FROM runs WHERE id=$1").bind(run_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "creating");
+    assert_eq!(cursors, 0);
+}

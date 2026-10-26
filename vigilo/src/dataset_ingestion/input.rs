@@ -460,7 +460,9 @@ impl<'de> Visitor<'de> for Limited<'_> {
         Ok(Value::Object(values))
     }
 }
-fn yaml(bytes: &[u8]) -> Result<Value> {
+/// Parse JSON-compatible YAML with duplicate-key, expanded-value and depth bounds.
+/// Callers must bound source bytes before parsing; this also admits JSON profiles.
+pub(crate) fn yaml(bytes: &[u8]) -> Result<Value> {
     let mut remaining = 32 * 1024 * 1024;
     Ok(Limited {
         remaining: &mut remaining,

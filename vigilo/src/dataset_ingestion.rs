@@ -132,7 +132,7 @@ pub(crate) async fn connect(
     }
     Ok(store)
 }
-async fn read_bytes(
+pub(crate) async fn read_bytes(
     store: &dyn BlobStorage,
     reference: &ObjectRef,
     budget: Budget,

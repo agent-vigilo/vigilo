@@ -107,8 +107,9 @@ uses a disposable PostgreSQL database initialized through `setup`:
 cargo test -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
 ```
 
-The ingestion tier kills and resumes real CLI processes, checks finalized reuse,
-and verifies exact cleanup. Both storage tiers contribute to the same aggregate
+The ingestion tier kills and resumes real upload and run-plan CLI processes,
+checks frozen inputs and finalized reuse, verifies the dispatch boundary, and
+checks exact cleanup. Both storage tiers contribute to the same aggregate
 coverage report and 80% gate.
 
 After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:

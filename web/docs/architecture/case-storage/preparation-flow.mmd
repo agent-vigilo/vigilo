@@ -1,0 +1,23 @@
+sequenceDiagram
+    actor Caller
+    participant CLI as Run preparation
+    participant Control as Control PostgreSQL
+    participant Objects as Storage adapter
+    Caller->>CLI: run create with finalized dataset and prepare-only
+    CLI->>Control: Verify catalog, freeze evaluator artifacts and placements
+    CLI->>Control: Persist creating run, claim creation lease and generation
+    loop Verified dataset batches, bounded index traversal
+        CLI->>Objects: Read and verify index or batch
+        CLI->>CLI: Validate routing, fold identities, chunks and gate counts
+        opt Complete bounded chunk page
+            CLI->>Control: Record exact file ownership under live lease
+            CLI->>Objects: Create or reconcile immutable file
+            CLI->>Control: Acknowledge contiguous chunk progress
+        end
+    end
+    CLI->>CLI: Verify complete dataset identity and coverage
+    CLI->>Objects: Publish verified indexes, gates, configuration and manifest
+    Note over CLI,Control: Every file is owned before PUT and acknowledged afterward
+    CLI->>Control: Atomically seal ready plan and compact shard metadata
+    Control-->>CLI: Root reference, run remains creating
+    CLI-->>Caller: Plan ready, dispatchable false

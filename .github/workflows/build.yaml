@@ -324,7 +324,7 @@ jobs:
           cargo llvm-cov --no-report -p vigilo --locked
           --features blob-storage-services --test blob_storage_services
           ceph_fault_contract -- --exact --nocapture
-      - name: Verify upload process-death recovery and exact cleanup with coverage
+      - name: Verify upload and run-plan process recovery with exact cleanup and coverage
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
           --features blob-storage-services --test dataset_ingestion_services -- --nocapture

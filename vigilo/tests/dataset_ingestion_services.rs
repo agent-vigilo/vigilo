@@ -1,6 +1,8 @@
 //! Named PostgreSQL + Ceph CLI acceptance. Real child-process termination tests
 //! durable recovery; every storage deletion is restricted to recorded exact keys.
 //! Tests require explicit disposable service configuration and never silently skip.
+mod run_plans;
+
 use std::{
     path::Path,
     process::Stdio,

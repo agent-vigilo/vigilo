@@ -25,9 +25,9 @@ flowchart TD
 
     DatasetIngestion["<b>Dataset Ingestion</b><br/>Bounded preparation, upload progress,<br/>explicit recovery and catalog publication"]:::component
     BlobAdapter["<b>Storage Adapter</b><br/>Verified immutable file I/O<br/>and exact owned cleanup"]:::component
-    ObjectStorage[("<b>Object Storage</b><br/>Case batches, indexes and manifests")]:::component
+    ObjectStorage[("<b>Object Storage</b><br/>Case batches, run plans, indexes and manifests")]:::component
 
-    RunPlanner["fa:fa-list-check <br/> <b>Run Input Planner</b> <br/> <small>[Component: Rust]</small> <br/> <small>Reads profile and dataset payloads, canonicalizes case data, and plans run chunks.</small>"]:::component
+    RunPlanner["fa:fa-list-check <br/> <b>Run Input Planner</b> <br/> <small>[Component: Rust]</small> <br/> <small>Validates profile and dataset inputs; streams finalized datasets into immutable run plans.</small>"]:::component
     RunValidator["fa:fa-shield-halved <br/> <b>Run Validation Service</b> <br/> <small>[Component: Rust]</small> <br/> <small>Checks policy, resolves exact evaluator artifacts and ABIs, and builds the immutable execution plan.</small>"]:::component
     RunPersistence["fa:fa-database <br/> <b>Run Persistence Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Persists recoverable control plans, shard assignments, and idempotent execution seed data.</small>"]:::component
     RunQueries["fa:fa-magnifying-glass <br/> <b>Run Query, Export, and Shard Admin Component</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Serves routed run reads and manages shard route inspection, move, and rebalance operations.</small>"]:::component
@@ -66,6 +66,7 @@ flowchart TD
     CliRouter -->|"Uploads, resumes and cleans datasets"| DatasetIngestion
     DatasetIngestion -->|"Persists compact ownership and progress"| Database
     DatasetIngestion --> BlobAdapter
+    RunPlanner -->|"Verifies datasets and publishes bounded plan files"| BlobAdapter
     BlobAdapter --> ObjectStorage
 
     %% edges

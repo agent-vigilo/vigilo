@@ -22,17 +22,21 @@ sequenceDiagram
     ControlDB-->>Vigilo: Verified evaluator artifacts and ABI identities
     Vigilo->>Vigilo: Hash scoring policy, evaluator execution plan, and per-shard chunk membership
 
-    Vigilo->>ControlDB: Claim durable dataset upload identity
-    loop Bounded case batches
-        Vigilo->>Objects: Conditionally create and verify immutable batch
-        Vigilo->>ControlDB: Acknowledge verified upload progress
-    end
-    Vigilo->>Objects: Create and verify dataset indexes and manifest
-    Vigilo->>ControlDB: Finalize dataset reference under upload lease
-    Vigilo->>Vigilo: Plan run, chunks, and shard assignments from finalized dataset
-    Vigilo->>Objects: Create and verify immutable run-plan objects
-    Vigilo->>ControlDB: Commit creating run, routes, placement ledger, and verified plan reference
-    ControlDB-->>Vigilo: Durable run id and creation lease
+    alt Finalized dataset reference with prepare-only
+        Vigilo->>ControlDB: Freeze creating run, evaluator artifacts and initial placements
+        loop Bounded verified dataset traversal
+            Vigilo->>Objects: Read batch through verified index
+            Vigilo->>Vigilo: Fold chunk membership and expected gate counts
+            Vigilo->>ControlDB: Record file ownership under live creation lease
+            Vigilo->>Objects: Create or reconcile immutable plan file
+            Vigilo->>ControlDB: Acknowledge contiguous chunk progress
+        end
+        Vigilo->>Objects: Publish verified configuration, indexes, gates and manifest
+        Vigilo->>ControlDB: Atomically seal ready plan and compact shard metadata
+        Vigilo-->>User: Creating run, plan ready, dispatchable false
+    else Inline or file dataset input
+        Vigilo->>ControlDB: Store canonical cases and membership, commit creating run, routes and seed ledger
+        ControlDB-->>Vigilo: Durable run ID and creation lease
 
     loop Each pending execution placement
         Vigilo->>ExecutionDB: Idempotently store prerequisites, hashed run snapshot, and owned chunks with blob references
@@ -58,6 +62,8 @@ sequenceDiagram
     else Input validation or initial control commit fails
         ControlDB-->>Vigilo: Error
         Vigilo-->>User: Creation error without a durable run
+    end
+
     end
 
     deactivate Vigilo

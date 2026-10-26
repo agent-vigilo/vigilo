@@ -85,6 +85,15 @@ remain accepted as compatibility paths but are omitted from canonical help.
 exact abandoned-file cleanup. See [Dataset Ingestion](/docs/architecture/case-storage/ingestion)
 for input formats, storage configuration, batching, leases, and scheduler ownership.
 
+## Dataset-Reference Run Preparation
+
+`run create --dataset-upload-id <id> --storage-config storage.toml --prepare-only`
+prepares a verified immutable run plan from a finalized dataset. Supply the profile
+through `--profile` or `--profile-file`, and retain `--run-id <uuid>` for retries.
+The run remains `creating`; preparation creates no worker-visible work.
+See [Run Preparation](/docs/architecture/case-storage/run-preparation) for recovery,
+status fields, placement ownership and cancellation.
+
 ## Related
 
 - [Getting started](./getting-started)

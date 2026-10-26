@@ -83,7 +83,7 @@ enum Operation {
         limit: u32,
     },
 }
-fn owner(path: &std::path::Path) -> Result<OwnerConfig> {
+pub(super) fn owner(path: &std::path::Path) -> Result<OwnerConfig> {
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(path)?

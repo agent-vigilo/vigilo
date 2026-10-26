@@ -63,10 +63,23 @@ pub(crate) async fn select_creation_progress(
     db: &PgPool,
     run_id: Uuid,
 ) -> anyhow::Result<RunCreationProgress> {
-    let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64, Option<String>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+        ),
+    >(
         r#"
+        WITH placement_progress AS (
         SELECT
-            COUNT(*)::bigint,
+            COUNT(*)::bigint AS placement_count,
             COUNT(*) FILTER (WHERE status = 'pending')::bigint,
             COUNT(*) FILTER (WHERE status = 'seeded')::bigint,
             COUNT(*) FILTER (WHERE status = 'failed')::bigint,
@@ -81,6 +94,10 @@ pub(crate) async fn select_creation_progress(
             )
         FROM run_creation_placements
         WHERE run_id = $1::uuid
+        )
+        SELECT placement_progress.*, plan.status, plan.chunk_cursor
+        FROM placement_progress
+        LEFT JOIN run_plans plan ON plan.run_id=$1
         "#,
     )
     .bind(run_id)
@@ -94,6 +111,8 @@ pub(crate) async fn select_creation_progress(
         failed_placement_count: row.3,
         attempt_count: row.4,
         last_error: row.5,
+        plan_status: row.6,
+        plan_chunk_cursor: row.7,
     })
 }
 
@@ -665,6 +684,13 @@ pub(super) async fn activate_claimed_run(
     run_id: Uuid,
     owner_id: Uuid,
 ) -> anyhow::Result<()> {
+    let sql_seed:bool=sqlx::query_scalar(
+        "SELECT creation_kind='case-projection' AND NOT EXISTS(SELECT 1 FROM run_plans WHERE run_id=$1) FROM runs WHERE id=$1"
+    ).bind(run_id).fetch_optional(db).await?.unwrap_or(false);
+    anyhow::ensure!(
+        sql_seed,
+        "immutable run plans require execution admission before activation"
+    );
     let mut tx = db.begin().await?;
     let (total, pending, failed) = sqlx::query_as::<_, (i64, i64, i64)>(
         r#"
@@ -761,6 +787,8 @@ pub(super) async fn claim_next_creating_run(
             SELECT id
             FROM runs
             WHERE status = 'creating'::run_status
+              AND creation_kind = 'case-projection'
+              AND NOT EXISTS (SELECT 1 FROM run_plans WHERE run_id = runs.id)
               AND (
                   coordinator_leased_until IS NULL
                   OR coordinator_leased_until < now()

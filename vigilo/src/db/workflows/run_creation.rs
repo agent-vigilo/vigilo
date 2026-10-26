@@ -105,6 +105,8 @@ pub(crate) struct RunCreationProgress {
     pub(crate) failed_placement_count: i64,
     pub(crate) attempt_count: i64,
     pub(crate) last_error: Option<String>,
+    pub(crate) plan_status: Option<String>,
+    pub(crate) plan_chunk_cursor: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

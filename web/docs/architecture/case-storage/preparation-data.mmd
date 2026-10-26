@@ -1,0 +1,36 @@
+erDiagram
+    runs ||--o| run_plans : owns
+    dataset_catalog ||--o{ run_plans : supplies
+    run_plans ||--o{ run_plan_objects : records
+    run_plans ||--o{ run_plan_shards : seals
+    database_placements ||--o{ run_plan_shards : selects
+    run_plans {
+        uuid run_id PK
+        uuid dataset_upload_id FK
+        text status
+        json limits
+        json execution_plan
+        json assignments
+        bigint generation
+        int chunk_cursor
+        json manifest
+    }
+    run_plan_objects {
+        uuid run_id PK
+        text object_key PK
+        text kind
+        int level
+        int range_start
+        int range_end
+        json reference
+        boolean acknowledged
+    }
+    run_plan_shards {
+        uuid run_id PK
+        int run_shard PK
+        text database_alias FK
+        int case_count
+        int chunk_count
+        text planned_chunk_hash
+        text case_projection_hash
+    }

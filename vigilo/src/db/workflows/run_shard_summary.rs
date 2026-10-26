@@ -56,7 +56,7 @@ fn is_terminal_summary_status(status: &str) -> bool {
 
 mod aggregation;
 mod aggregation_scheduling;
-mod plan;
+pub(crate) mod plan;
 mod queries;
 mod settlement;
 

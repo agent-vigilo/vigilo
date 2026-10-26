@@ -210,9 +210,11 @@ cargo test -p vigilo --locked --features blob-storage-services \
   --test dataset_ingestion_services -- --nocapture
 ```
 
-This tier terminates its own CLI processes, resumes their recorded uploads, and
-checks cleanup through real PostgreSQL and Ceph. It removes only its two upload
-IDs and their recorded object keys, including its deliberately finalized fixture.
+This tier terminates its own upload and run-plan CLI processes, resumes recorded
+work, checks frozen inputs and dispatch isolation, and verifies cleanup through
+real PostgreSQL and Ceph. Cleanup targets only each invocation's exact run/upload
+IDs and recorded object keys, including deliberately finalized fixtures. The plan
+test seeds evaluator registry metadata for resolution; it does not execute Wasm.
 See [Dataset Ingestion](https://agentvigilo.com/docs/architecture/case-storage/ingestion)
 for the owner configuration and production command contract.
 

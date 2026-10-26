@@ -1,0 +1,129 @@
+---
+title: Run Preparation
+sidebar_label: Run Preparation
+sidebar_position: 4
+description: Bounded, resumable preparation of immutable run plans from finalized datasets.
+---
+
+import Mermaid from '@theme/Mermaid';
+import preparationFlow from './preparation-flow.mmd';
+import preparationState from './preparation-state.mmd';
+import preparationData from './preparation-data.mmd';
+
+# Run Preparation
+
+Run preparation reads a finalized dataset and publishes an immutable execution
+plan. It validates every case against the profile, freezes evaluator artifacts
+and initial shard placements, and records exact chunk membership and expected gate
+counts. Case payloads remain in blob storage.
+
+```bash
+vigilo run create --profile-file profile.yaml --dataset-upload-id <upload-id> \
+  --storage-config storage.toml --run-id <uuid> --prepare-only
+vigilo run status <uuid>
+```
+
+The upload ID identifies a finalized [dataset catalog entry](./ingestion).
+The profile is YAML or JSON, supplied through `--profile` or `--profile-file`,
+with an 8 MiB input and encoded limit. Storage configuration resolves the same
+recorded physical owner as the dataset; credentials remain outside SQL and files.
+
+`--prepare-only` is required with a dataset reference. Success returns
+`status: creating`, `plan_status: ready`, the verified `run_plan` reference, and
+`dispatchable: false`. A ready plan does not seed execution databases, create
+shard routes or dispatch cursors, or publish queue messages. Execution admission
+is a separate condition for a run to become `pending`; plan publication alone
+cannot satisfy it. Runs created from inline or file dataset inputs follow the
+[run creation flow](/docs/architecture/flows/run/create/).
+
+## Preparation Flow
+
+<Mermaid value={preparationFlow} />
+
+Preparation traverses the verified dataset index in submitted case order. The
+stack is bounded by eight index levels and a 4 MiB encoded index working set.
+One batch is consumed at a time; no dataset-wide case list or payload copy is
+written to PostgreSQL. A running identity check binds the complete pass to the
+catalog's original source hash, membership UUID, and case count.
+
+Execution chunks contain at most 100 consecutive cases, independently of storage
+batch boundaries. Chunk indexes select logical shards round-robin over 128
+shards. Chunk IDs are deterministic for the run ID and chunk index, so resuming
+preparation reproduces the same scheduling identities. The ordered case ID/hash
+fold matches the execution projection contract; the per-shard chunk fold matches
+the settlement contract.
+
+The planner retains one bounded chunk page and at most 128 shard accumulators.
+Each shard tracks its case/chunk totals, projection and settlement hashes, and
+counts for the profile's at most 64 gates. A gate count is the number of cases on
+that shard selected by that gate's required-evaluator, group, and tag rules.
+A case counts once per matching gate. A gate matching no cases anywhere rejects
+preparation. Gate count files contain sorted entries, including zero counts for
+used shards where a gate selects no cases.
+
+Chunk files, indexes, gate files, and the configuration use the
+[storage formats and budgets](./formats). The configuration freezes the full
+profile, agent settings, evaluator execution plan, logical dataset identity, and
+executability counts. The run-plan manifest links those objects to the finalized
+dataset and records per-shard totals and settlement hashes. The control run
+snapshot retains compact identities and references rather than full policy or
+case payloads.
+
+## Authority, Recovery, and Status
+
+<Mermaid value={preparationState} />
+
+The existing run creation lease lasts five minutes. Each claim also increments a
+plan generation. Mutations lock the run, then recheck the current owner,
+generation, status, and wall-clock expiry. No SQL transaction spans storage I/O.
+Read-only traversal renews the lease periodically, without a SQL mutation for
+every dataset file. Every remote write gets a finite operation deadline before
+its own authority check.
+
+File ownership is recorded before PUT. Acknowledgement follows successful
+creation and byte verification; chunk progress advances only across consecutive
+chunk ranges. Failed or uncertain writes retain their exact keys. Replaying a
+range with different bytes fails; acknowledged files are verified again without
+being uploaded again. Abandoned connection probes are reconciled by exact key.
+
+Choose `--run-id` before starting, or retain the ID included in command errors.
+After an interruption, repeat the command with the same run ID, profile, dataset
+ID, and storage configuration. A live lease rejects competing callers; after a
+crash the lease becomes reclaimable after five minutes. Ctrl-C cancels work and
+yields ownership when PostgreSQL is reachable. The planner replays the bounded
+case pass and reconciles existing files rather than retaining a local input path.
+Reusing a dataset verifies its immutable version identity without updating that
+shared row. Independent runs therefore do not serialize on a metadata update;
+normal foreign-key integrity checks still apply.
+
+Frozen evaluator artifacts and placements are reused even when registry state or
+default placement policy changes. Changed source identity, profile, limits, or
+physical storage binding is rejected.
+
+`run status` and `run watch` expose `creation_progress.plan_status` and
+`creation_progress.plan_chunk_cursor`. The cursor counts contiguous acknowledged
+chunks. It can reach the expected chunk count before indexes, gate files,
+configuration and the manifest finish; `plan_status: ready` indicates complete
+verified publication. These fields are null for runs without a blob plan.
+
+Publication atomically records the verified root reference and compact shard
+metadata. Missing/corrupt objects, changed identity, incomplete coverage, stale
+leases, or cancelled runs cannot publish. The run's `creation_kind` identifies its recovery owner. The partial recovery
+index selects only `case-projection` runs; `blob-plan` preparations do not expand
+coordinator seed-recovery scans. Coordinators cannot claim or activate this
+preparation workflow through the SQL placement-seeding path.
+
+`run cancel` cancels a preparing or ready plan's run and revokes publication
+authority. It creates no execution results. Recorded plan file ownership is
+retained; cancellation does not delete the shared finalized dataset.
+
+## Control Records
+
+<Mermaid value={preparationData} />
+
+`run_plans` freezes the dataset catalog ID, storage binding, limits, evaluator
+artifacts and initial placements, then records generation, acknowledged chunk
+progress and the published root. `run_plan_objects` holds one compact reference
+per owned file. `run_plan_shards` holds at most 128 rows of verified totals,
+placement aliases and membership hashes. There are no per-case plan rows, case
+payloads, or temporary per-chunk SQL plans in this preparation path.

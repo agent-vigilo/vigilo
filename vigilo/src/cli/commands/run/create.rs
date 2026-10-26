@@ -1,4 +1,4 @@
-//! Run creation command implementation.
+//! Inline/file dataset run creation command implementation.
 //!
 //! Validates profile/dataset inputs, derives stable hashes and dataset version
 //! identity, and writes pending run work in one transaction. This module must

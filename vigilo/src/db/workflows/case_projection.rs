@@ -79,7 +79,7 @@ pub(crate) fn projection_hash(rows: &[RunShardCaseDraft]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-pub(super) fn update_projection_hash(hasher: &mut blake3::Hasher, row: &RunShardCaseDraft) {
+pub(crate) fn update_projection_hash(hasher: &mut blake3::Hasher, row: &RunShardCaseDraft) {
     hasher.update(&row.run_shard.to_be_bytes());
     hasher.update(&row.case_ordinal.to_be_bytes());
     hasher.update(row.case_id.as_bytes());
