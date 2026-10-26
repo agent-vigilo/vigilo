@@ -265,7 +265,7 @@ impl Transport for S3Transport {
             reader: Box::new(result.body.into_async_read()),
         })
     }
-    async fn delete_probe(&self, key: &str) -> Result<()> {
+    async fn delete_object(&self, key: &str) -> Result<()> {
         self.client
             .delete_object()
             .bucket(&self.bucket)

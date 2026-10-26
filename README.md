@@ -100,8 +100,16 @@ bucket, and credentials using the [development storage instructions](infra/dev/R
 cargo test -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
 ```
 
-This tier checks Ceph persistence and transport faults; its CI coverage joins the
-same aggregate report and 80% gate.
+This tier checks Ceph persistence and transport faults. Dataset ingestion also
+uses a disposable PostgreSQL database initialized through `setup`:
+
+```bash
+cargo test -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
+```
+
+The ingestion tier kills and resumes real CLI processes, checks finalized reuse,
+and verifies exact cleanup. Both storage tiers contribute to the same aggregate
+coverage report and 80% gate.
 
 After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:
 
@@ -144,6 +152,7 @@ cargo llvm-cov --no-report --workspace --locked --lib --bins
 cargo llvm-cov run --no-report -p xtask --locked -- perf check
 cargo llvm-cov --no-report -p xtask --locked --features performance-services --test performance_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
+cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_routing -- --nocapture
 VIGILO_E2E_MULTI_DATABASE=1 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e -- --nocapture

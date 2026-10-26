@@ -145,7 +145,10 @@ impl<'de> Deserialize<'de> for StrictValue {
     }
 }
 
-fn strict_json(bytes: &[u8]) -> Result<Value> {
+/// Parse admitted JSON bytes without silently discarding duplicate object keys.
+/// Callers bound input size before parsing; storage decoding additionally requires
+/// byte verification and canonical stored encodings through the typed decoders.
+pub(crate) fn strict_json(bytes: &[u8]) -> Result<Value> {
     let StrictValue(value) = serde_json::from_slice(bytes).context("invalid object JSON")?;
     Ok(value)
 }

@@ -1,5 +1,5 @@
 flowchart TD
-    request["Caller-owned reference and finite budget"] --> admission["Validate owner, limits, and reference<br/>reserve shared stream and disk capacity"]
+    request["Caller-owned reference and finite budget"] --> admission["Validate owner, limits, and reference<br/>reserve the operation’s shared resources"]
     admission --> operation{"Operation"}
     operation -->|"Create"| stage["Spool input through fixed buffer<br/>verify exact length and BLAKE3"]
     stage --> put["Conditional single PUT<br/>SDK retries disabled"]
@@ -7,6 +7,8 @@ flowchart TD
     outcome -->|"Created, conflict, or transient response loss"| get["GET exact key/revision<br/>within remaining request allowance"]
     outcome -->|"Cancelled or deadline"| uncertain["Release local resources<br/>retain exact-key reconciliation ownership"]
     operation -->|"Read"| get
+    operation -->|"Remove owned unpublished file"| ownership["Require caller cleanup authority<br/>delete one recorded key idempotently"]
+    ownership --> removed["Release request capacity<br/>retain uncertain deletion for retry"]
     get --> verify["Stream and verify complete object<br/>length, digest, recorded revision"]
     verify -->|"Valid"| ready["Return reference or verified file<br/>application decodes and validates"]
     verify -->|"Invalid"| reject["Fail closed<br/>release spool and reservations"]

@@ -1,0 +1,19 @@
+flowchart TD
+    input["Original JSON, YAML, or versioned JSONL file"] --> prepare["Bound input and spool canonical records<br/>verify identities and duplicate UUIDs"]
+    prepare --> reuse{"Matching finalized catalog?"}
+    reuse -->|"Yes"| ready["Return compact dataset reference"]
+    reuse -->|"No"| claim["Register upload and claim live generation"]
+    claim --> plan["Record exact file ownership before storage I/O"]
+    plan --> acknowledged{"File acknowledged?"}
+    acknowledged -->|"No"| put["Conditional upload or verify exact replay"]
+    put --> ack["Acknowledge completed file<br/>advance contiguous case progress"]
+    acknowledged -->|"Yes"| next{"More bounded batches?"}
+    ack --> next
+    next -->|"Yes"| plan
+    next -->|"No"| verify["Re-read and validate stored membership<br/>build bounded indexes and manifest"]
+    verify --> fence{"Generation still authoritative?"}
+    fence -->|"Yes"| publish["Atomically publish catalog and finalized state"]
+    publish --> ready
+    fence -->|"No"| stop["Stop publication<br/>retain owned files for recovery or cleanup"]
+    put -->|"Crash or failure"| resume["Operator or scheduler resumes<br/>same input and upload identity"]
+    resume --> prepare

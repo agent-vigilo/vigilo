@@ -38,6 +38,11 @@ dataset_version: 1.0.0
 cases: []
 ```
 
+Dataset uploads accept this document through `vigilo dataset upload` with an
+explicit size cap, or use the versioned JSONL representation for large inputs.
+See [Dataset Ingestion](/docs/architecture/case-storage/ingestion#input-formats)
+for framing, limits, identity preservation, and resume behavior.
+
 ## Top-Level Fields
 
 - `dataset_id` (UUID, required)

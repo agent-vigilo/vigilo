@@ -30,6 +30,7 @@
 
 pub(crate) mod case_projection;
 pub(crate) mod chunk_processing;
+pub(crate) mod dataset_upload;
 pub(crate) mod execution_processing;
 pub(crate) mod local_shard_admission;
 pub(crate) mod run_cancel;

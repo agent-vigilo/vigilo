@@ -60,3 +60,8 @@ blob-storage-services = []
 name = "blob_storage_services"
 path = "tests/blob_storage_services.rs"
 required-features = ["blob-storage-services"]
+
+[[test]]
+name = "dataset_ingestion_services"
+path = "tests/dataset_ingestion_services.rs"
+required-features = ["blob-storage-services"]

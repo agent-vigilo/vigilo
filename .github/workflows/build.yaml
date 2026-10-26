@@ -54,7 +54,7 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo clippy -p vigilo --locked --features blob-storage-services --test blob_storage_services -- -D warnings
+      - run: cargo clippy -p vigilo --locked --features blob-storage-services --test blob_storage_services --test dataset_ingestion_services -- -D warnings
 
   unit-tests:
     name: Unit and Contract Tests (${{ matrix.os }})
@@ -276,7 +276,20 @@ jobs:
     name: Blob Storage Acceptance
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: postgres
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     env:
+      DATABASE_URL: postgresql://postgres:password@localhost:15432/postgres
       DEV_S3_ACCESS_KEY_ID: vigilo-ci-storage
       DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-storage-secret
       DEV_S3_BUCKET: vigilo-ci-storage
@@ -298,6 +311,8 @@ jobs:
           docker compose -p "$COMPOSE_PROJECT_NAME"
           -f infra/dev/docker-compose.single.yml
           up -d --build --wait --wait-timeout 240 ceph
+      - name: Apply schema through setup to a fresh control database
+        run: cargo llvm-cov run --no-report -p vigilo --locked -- setup --skip-evaluators
       - name: Verify signed storage and restart persistence with coverage
         run: >-
           VIGILO_BLOB_TEST_RESTART_CONTAINER="${COMPOSE_PROJECT_NAME}-ceph-1"
@@ -309,6 +324,10 @@ jobs:
           cargo llvm-cov --no-report -p vigilo --locked
           --features blob-storage-services --test blob_storage_services
           ceph_fault_contract -- --exact --nocapture
+      - name: Verify upload process-death recovery and exact cleanup with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features blob-storage-services --test dataset_ingestion_services -- --nocapture
       - name: Generate storage coverage report
         run: >-
           cargo llvm-cov report

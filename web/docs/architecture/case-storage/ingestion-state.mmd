@@ -1,0 +1,16 @@
+stateDiagram-v2
+    [*] --> staging: validated input and admitted upload
+    staging --> staging: verified file acknowledgement / resumable failure
+    staging --> finalizing: every case range acknowledged
+    finalizing --> finalizing: verify membership and publish bounded metadata
+    finalizing --> finalized: live generation / atomic catalog commit
+    staging --> aborted: explicit abort revokes generation
+    finalizing --> aborted: explicit abort revokes generation
+    staging --> expired: inactivity expiry revokes generation
+    finalizing --> expired: inactivity expiry revokes generation
+    aborted --> cleanup: former lease plus request quarantine elapsed
+    expired --> cleanup: former lease plus request quarantine elapsed
+    cleanup --> cleanup: bounded exact-key page / retry uncertain deletion
+    cleanup --> cleaned: all owned keys reconciled
+    finalized --> [*]: shared immutable reference
+    cleaned --> [*]: retained SQL tombstone

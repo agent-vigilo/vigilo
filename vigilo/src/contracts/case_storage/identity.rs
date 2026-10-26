@@ -25,6 +25,17 @@ use super::{
 };
 use crate::contracts::run::DatasetCase;
 
+/// Logical identity binding a resumable upload to its complete ordered source.
+/// Physical batching, storage locations and lease generations do not enter it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DatasetIdentity {
+    pub dataset_id: Uuid,
+    pub dataset_version: Option<String>,
+    pub dataset_version_id: Uuid,
+    pub dataset_hash: String,
+    pub case_count: i32,
+}
 /// Sorts object keys recursively while preserving array order and field presence.
 pub(crate) fn canonical_json(value: &Value) -> Value {
     match value {

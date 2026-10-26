@@ -18,6 +18,12 @@ Describes the major internal responsibilities of the Vigilo command runtime.
 
 <Mermaid value={vigiloDiagram} />
 
+Dataset ingestion owns bounded preparation, immutable upload and generation-fenced
+catalog publication. Operators or schedulers invoke resume and cleanup commands;
+no coordinator claims a local input file. The storage adapter owns provider I/O
+and exact key deletion, while PostgreSQL stores compact upload progress and
+ownership. See [Dataset Ingestion](/docs/architecture/case-storage/ingestion).
+
 ## Related
 
 - [Structure overview](../..)

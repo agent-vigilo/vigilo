@@ -29,6 +29,7 @@ pub(crate) use codec::{
     decode_case_batch,
     encode,
     encode_batch,
+    strict_json,
 };
 pub(crate) use formats::*;
 pub(crate) use limits::{

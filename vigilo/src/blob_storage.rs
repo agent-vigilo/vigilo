@@ -37,11 +37,15 @@ use crate::contracts::case_storage::{
     StorageFormat,
 };
 
+#[path = "blob_storage/config.rs"]
+pub(crate) mod config;
 #[path = "blob_storage/s3.rs"]
 pub(crate) mod s3;
 #[cfg(test)]
 #[path = "blob_storage/tests.rs"]
 mod tests;
+
+pub(crate) const DEFAULT_OPERATION_SECONDS: u64 = 120;
 
 type Result<T> = std::result::Result<T, StorageError>;
 pub(crate) type Reader = Box<dyn AsyncRead + Unpin + Send>;
@@ -105,7 +109,7 @@ pub(crate) struct Budget {
 impl Budget {
     pub fn standard() -> Self {
         Self {
-            deadline: Instant::now() + Duration::from_secs(120),
+            deadline: Instant::now() + Duration::from_secs(DEFAULT_OPERATION_SECONDS),
             requests: 3,
             no_progress: Duration::from_secs(15),
         }
@@ -195,6 +199,15 @@ pub(crate) trait BlobStorage: Send + Sync {
         budget: Budget,
         cancel: &CancellationToken,
     ) -> Result<VerifiedFile>;
+    /// Delete only an exact, durably owned unpublished object. The caller holds
+    /// cleanup authority and proves that no admitted writer remains in flight.
+    /// Repeated deletion is safe; this API never lists a bucket or prefix.
+    async fn remove_owned(
+        &self,
+        reference: &ObjectRef,
+        budget: Budget,
+        cancel: &CancellationToken,
+    ) -> Result<()>;
 }
 
 /// A narrow provider transport. Only this layer sees SDK types. Every method
@@ -213,7 +226,7 @@ pub(crate) trait Transport: Send + Sync {
         no_progress: Duration,
     ) -> Result<()>;
     async fn get(&self, reference: &ObjectRef, no_progress: Duration) -> Result<Download>;
-    async fn delete_probe(&self, key: &str) -> Result<()>;
+    async fn delete_object(&self, key: &str) -> Result<()>;
 }
 pub(crate) struct Download {
     pub reader: Reader,
@@ -383,7 +396,7 @@ impl<T: Transport> Store<T> {
             // Even cancellation cannot skip exact probe cleanup. A failure names
             // the one key the operator must reconcile; no live data is deleted.
             let cleanup =
-                tokio::time::timeout(Duration::from_secs(30), store.transport.delete_probe(&key))
+                tokio::time::timeout(Duration::from_secs(30), store.transport.delete_object(&key))
                     .await;
             match cleanup {
                 Ok(Ok(())) => {}
@@ -582,6 +595,39 @@ impl<T: Transport> BlobStorage for Store<T> {
         }
         .await;
         result.map_err(|e| self.context(e, "create", reference, uncertain))
+    }
+    async fn remove_owned(
+        &self,
+        reference: &ObjectRef,
+        budget: Budget,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let result = async {
+            self.validate(reference)?;
+            let mut op = Operation::new(budget, cancel)?;
+            let _slot = op
+                .wait(async {
+                    self.resources
+                        .streams
+                        .clone()
+                        .acquire_owned()
+                        .await
+                        .map_err(|_| StorageError::new(ErrorKind::Local))
+                })
+                .await?;
+            loop {
+                match op
+                    .request(self.transport.delete_object(&reference.key))
+                    .await
+                {
+                    Err(e) if e.kind == ErrorKind::Transient => op.backoff().await?,
+                    Err(e) if e.kind == ErrorKind::Missing => return Ok(()),
+                    result => return result,
+                }
+            }
+        }
+        .await;
+        result.map_err(|e| self.context(e, "remove owned object", reference, false))
     }
     async fn read(
         &self,

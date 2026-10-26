@@ -15,13 +15,17 @@ flowchart TD
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
     %% components
-    CliRouter["fa:fa-terminal <br/> <b>CLI App and Command Router</b> <br/> <small>[Component: Rust / Clap]</small> <br/> <small>Parses global options and dispatches setup, evaluator, run, coordinator, and worker commands.</small>"]:::component
+    CliRouter["fa:fa-terminal <br/> <b>CLI App and Command Router</b> <br/> <small>[Component: Rust / Clap]</small> <br/> <small>Parses global options and dispatches setup, dataset, evaluator, run, coordinator, and worker commands.</small>"]:::component
     RuntimeContext["fa:fa-layer-group <br/> <b>Runtime Context Provider</b> <br/> <small>[Component: Rust]</small> <br/> <small>Lazily initializes routed database access, messaging, output, registry cache, and Wasm runtime clients.</small>"]:::component
     OutputRenderer["fa:fa-file-lines <br/> <b>Output Renderer</b> <br/> <small>[Component: Rust]</small> <br/> <small>Writes structured command responses as JSON or TOON.</small>"]:::component
 
     SetupManager["fa:fa-screwdriver-wrench <br/> <b>Setup Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Applies schema migrations and bootstraps built-in evaluator packages.</small>"]:::component
     EvaluatorRegistry["fa:fa-box-archive <br/> <b>Evaluator Registry Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Publishes, searches, inspects, tests, and changes evaluator registry state.</small>"]:::component
     EvaluatorPreparer["fa:fa-cubes <br/> <b>Evaluator Package Preparer</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Resolves the static ABI adapter registry, typed-links versioned components, and computes artifact metadata.</small>"]:::component
+
+    DatasetIngestion["<b>Dataset Ingestion</b><br/>Bounded preparation, upload progress,<br/>explicit recovery and catalog publication"]:::component
+    BlobAdapter["<b>Storage Adapter</b><br/>Verified immutable file I/O<br/>and exact owned cleanup"]:::component
+    ObjectStorage[("<b>Object Storage</b><br/>Case batches, indexes and manifests")]:::component
 
     RunPlanner["fa:fa-list-check <br/> <b>Run Input Planner</b> <br/> <small>[Component: Rust]</small> <br/> <small>Reads profile and dataset payloads, canonicalizes case data, and plans run chunks.</small>"]:::component
     RunValidator["fa:fa-shield-halved <br/> <b>Run Validation Service</b> <br/> <small>[Component: Rust]</small> <br/> <small>Checks policy, resolves exact evaluator artifacts and ABIs, and builds the immutable execution plan.</small>"]:::component
@@ -40,6 +44,8 @@ flowchart TD
         SetupManager
         EvaluatorRegistry
         EvaluatorPreparer
+        DatasetIngestion
+        BlobAdapter
         RunPlanner
         RunValidator
         RunPersistence
@@ -56,6 +62,11 @@ flowchart TD
     Coordinator["fa:fa-compass <br/> <b>Coordinator</b> <br/> <small>[Container: Rust]</small> <br/> <small>Owns run-creation recovery, dispatch, finalization, and outbox publication.</small>"]:::component
     Worker["fa:fa-gear <br/> <b>Worker</b> <br/> <small>[Container: Rust]</small> <br/> <small>Consumes chunks, invokes the agent target, runs evaluators, and persists results.</small>"]:::component
     EvaluatorPackages["fa:fa-folder-tree <br/> <b>Evaluator Packages</b> <br/> <small>[External Files]</small> <br/> <small>Local evaluator crates, Vigilo.toml manifests, WIT references, and compiled Wasm artifacts.</small>"]:::external
+
+    CliRouter -->|"Uploads, resumes and cleans datasets"| DatasetIngestion
+    DatasetIngestion -->|"Persists compact ownership and progress"| Database
+    DatasetIngestion --> BlobAdapter
+    BlobAdapter --> ObjectStorage
 
     %% edges
     User & AgentClient -->|"Manages evaluators, runs, and services using"| CliRouter

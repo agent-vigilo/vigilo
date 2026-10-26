@@ -34,6 +34,7 @@ use cli::{
 mod context;
 use context::Context;
 mod contracts;
+mod dataset_ingestion;
 mod db;
 mod evaluator_abi;
 mod evaluators;

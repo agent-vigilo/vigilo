@@ -1,0 +1,39 @@
+erDiagram
+    DATASET_UPLOADS ||--o{ DATASET_UPLOAD_OBJECTS : owns
+    DATASET_UPLOADS ||--o| DATASET_CATALOG : publishes
+    DATASET_UPLOADS {
+        uuid id PK
+        text status
+        text storage_alias
+        text binding_hash
+        jsonb identity
+        jsonb limits
+        integer case_cursor
+        integer batch_count
+        bigint generation
+        uuid lease_owner
+        timestamp leased_until
+        timestamp expires_at
+        timestamp cleanup_after
+        timestamp cleaned_at
+    }
+    DATASET_UPLOAD_OBJECTS {
+        uuid upload_id PK,FK
+        text object_key PK
+        text kind
+        smallint level
+        integer range_start
+        integer range_end
+        jsonb reference
+        boolean acknowledged
+        boolean cleaned
+    }
+    DATASET_CATALOG {
+        uuid id PK,FK
+        text storage_alias
+        text binding_hash
+        text dataset_hash
+        uuid dataset_version_id
+        jsonb limits
+        jsonb manifest
+    }

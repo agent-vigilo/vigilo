@@ -201,6 +201,21 @@ cargo test -p vigilo --locked --features blob-storage-services \
   --test blob_storage_services -- --nocapture
 ```
 
+For dataset ingestion acceptance, also start the disposable PostgreSQL service,
+set `DATABASE_URL`, and initialize it through `vigilo setup --skip-evaluators`.
+Then run:
+
+```bash
+cargo test -p vigilo --locked --features blob-storage-services \
+  --test dataset_ingestion_services -- --nocapture
+```
+
+This tier terminates its own CLI processes, resumes their recorded uploads, and
+checks cleanup through real PostgreSQL and Ceph. It removes only its two upload
+IDs and their recorded object keys, including its deliberately finalized fixture.
+See [Dataset Ingestion](https://agentvigilo.com/docs/architecture/case-storage/ingestion)
+for the owner configuration and production command contract.
+
 These variables select the test endpoint; they do not configure runtime commands.
 The suite creates unique namespaces, checks real signing and immutable replay,
 injects bounded transport faults, and removes only its exact keys. Missing test

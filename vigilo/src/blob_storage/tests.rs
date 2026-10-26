@@ -77,7 +77,7 @@ impl Transport for Fake {
             revision: s.revision.clone(),
         })
     }
-    async fn delete_probe(&self, key: &str) -> Result<()> {
+    async fn delete_object(&self, key: &str) -> Result<()> {
         let mut s = self.0.lock().unwrap();
         s.calls.push(format!("delete:{key}"));
         if s.cleanup_error {
@@ -609,4 +609,40 @@ async fn shared_disk_admission_times_out_without_another_remote_read() {
     drop(file);
     store.read(&r, Budget::standard(), &cancel).await.unwrap();
     assert_eq!(resources.disk.available_permits(), 7);
+}
+
+#[tokio::test]
+async fn owned_deletion_is_exact_idempotent_and_budgeted() {
+    let fake = Fake::default();
+    let store = store(fake.clone()).await;
+    let r = reference(b"hello");
+    fake.0
+        .lock()
+        .unwrap()
+        .objects
+        .insert(r.key.clone(), b"hello".to_vec());
+    fake.0
+        .lock()
+        .unwrap()
+        .objects
+        .insert("unrelated".into(), b"keep".to_vec());
+    let cancel = CancellationToken::new();
+    store
+        .remove_owned(&r, Budget::standard(), &cancel)
+        .await
+        .unwrap();
+    store
+        .remove_owned(&r, Budget::standard(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(fake.0.lock().unwrap().objects.len(), 1);
+    assert!(fake.0.lock().unwrap().objects.contains_key("unrelated"));
+    let mut bad = r;
+    bad.storage_alias = "other".into();
+    let calls = fake.0.lock().unwrap().calls.len();
+    assert_eq!(
+        kind(store.remove_owned(&bad, Budget::standard(), &cancel).await).kind,
+        ErrorKind::Invalid
+    );
+    assert_eq!(calls, fake.0.lock().unwrap().calls.len());
 }

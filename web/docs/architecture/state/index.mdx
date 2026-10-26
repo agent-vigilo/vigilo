@@ -20,6 +20,9 @@ State diagrams for the database-backed lifecycle boundaries in Agent Vigilo.
 Each <GlossaryTerm term="state">state</GlossaryTerm> changes through a guarded
 <GlossaryTerm term="transition">transition</GlossaryTerm>.
 
+The [dataset ingestion lifecycle](/docs/architecture/case-storage/ingestion#authority-and-publication)
+covers upload staging, fenced publication, abort/expiry, and exact cleanup.
+
 These views focus on:
 
 - lifecycle states stored in PostgreSQL

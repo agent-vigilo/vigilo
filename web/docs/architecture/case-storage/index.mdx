@@ -34,6 +34,9 @@ See [Formats and Budgets](/docs/architecture/case-storage/formats/) for case-sto
 layouts and [Example](/docs/architecture/case-storage/examples/) for downloadable
 objects with exact sizes and hashes.
 
+[Dataset Ingestion](./ingestion) defines upload commands, bounded preparation,
+progress, generation-fenced publication, recovery, and exact cleanup.
+
 ## Ownership and Identity
 
 Application code owns case validation, identity, batching, manifest publication,
@@ -104,7 +107,8 @@ Streams must apply backpressure; SDK types must not cross this boundary.
 | --- | --- |
 | Create immutable object | Consume a bounded byte stream, validate exact byte count and digest, and expose a completed object only after successful completion. Return a verified reference. Never overwrite published content. |
 | Read verified object | Resolve the recorded owner/revision and consume a bounded stream. Verify exact length and digest. Missing, truncated, altered, or excessive bytes cannot be reported as success. |
-| Abort an owned upload | Cancel remote work and release stream resources. Record unfinished multipart upload IDs for exact cleanup. Successful abort is idempotent; an uncertain abort remains cleanup work. |
+| Abort an owned upload | Cancel remote work and release stream resources. Retain exact owned keys for bounded cleanup; uncertain completion requires reconciliation. Single-object S3 uploads create no multipart sessions. |
+| Remove owned unpublished object | Require application cleanup authority and delete one recorded key idempotently within the caller budget. Never enumerate a bucket or infer authority from a prefix. |
 
 Object metadata requests may support these operations; do not issue one HEAD per
 case. Readers retrieve complete bounded objects and verify their exact byte

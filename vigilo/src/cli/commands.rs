@@ -18,6 +18,7 @@ use crate::context::{
 };
 
 pub(super) mod coordinator;
+pub(super) mod dataset;
 pub(super) mod evaluators;
 pub(super) mod run;
 pub(super) mod setup;
@@ -53,6 +54,9 @@ pub(crate) enum Command {
 
     /// Manage system evaluators
     Evaluator(evaluators::CanonicalCommand),
+
+    /// Store and manage immutable datasets
+    Dataset(dataset::Command),
 
     /// Manage runs, inputs, results, and owned shards
     Run(run::Command),
@@ -131,6 +135,10 @@ impl Command {
                     database_operation_timeout = Some(database_operation_timeout_options.config()?);
                 }
             }
+            Self::Dataset(_) => {
+                database_operation_timeout =
+                    Some(args::DatabaseOperationTimeoutOptions::default().config()?);
+            }
             Self::Database(command) => {
                 database_operation_timeout = Some(command.database_operation_timeout.config()?);
             }
@@ -156,6 +164,7 @@ impl Executable for Command {
     /// Dispatches the selected top-level command to its concrete handler.
     async fn exec(self, context: Context) -> anyhow::Result<()> {
         match self {
+            Command::Dataset(cmd) => cmd.exec(context).await,
             Command::Coordinator(cmd) => cmd.exec(context).await,
             Command::Database(cmd) => cmd.exec(context).await,
             Command::Evaluator(cmd) => cmd.exec(context).await,
@@ -357,6 +366,7 @@ mod tests {
             [
                 "setup",
                 "evaluator",
+                "dataset",
                 "run",
                 "database",
                 "rebalance",
