@@ -1,0 +1,15 @@
+flowchart TD
+    bytes["Downloaded object bytes + expected reference"]
+    verify["Verify<br/>limits, byte count, BLAKE3 digest"]
+    decode["Decode<br/>canonical JSON and field types"]
+    validate["Validate<br/>ranges, counts, case content<br/>all cases at ingestion; assigned cases at execution"]
+    ready["Use locally validated content<br/>publication checks still apply"]
+    reject["Reject content"]
+
+    bytes --> verify
+    verify -->|"VerifiedObject"| decode
+    decode -->|"Decoded content"| validate
+    validate -->|"All checks succeed"| ready
+    verify -->|"Failure"| reject
+    decode -->|"Failure"| reject
+    validate -->|"Failure"| reject

@@ -24,7 +24,8 @@ Use uncompressed UTF-8 JSONL for case batches and compact UTF-8 JSON for metadat
 indexes, dataset manifests, and run-plan manifests. Object keys are sorted
 recursively; arrays preserve order. JSONL has one compact JSON value per line,
 LF terminators including the last line, no BOM, and no literal newlines inside
-strings. Use the JSON serializer's number and string representation;
+strings. Readers require this compact canonical representation, including key
+order, whitespace, and LF terminators. Use the JSON serializer's number and string representation;
 do not substitute a different canonicalization standard or hash algorithm.
 Readers reject duplicate object keys, unknown schema identifiers, unexpected
 metadata fields, malformed UTF-8, and missing required fields. Arbitrary user
@@ -33,21 +34,25 @@ Objects are uncompressed and read in full within their byte budget. Object
 hashes cover the exact stored bytes, so verification does not depend on range
 indexes or compression metadata.
 
+`StorageFormat` identifies the stored format using the JSON `schema` field.
+`StorageDocument` is the Rust interface for metadata objects, providing their
+format identifier and structural validation to the bounded codecs.
+
 ### Object Reference
 
 Every metadata reference uses these fields:
 
 | Field | Value |
 | --- | --- |
-| `storage_alias` | Configured non-secret owner alias. |
-| `key` | Logical key, at most 1,024 UTF-8 bytes, not a URL. |
+| `storage_alias` | Configured non-secret owner alias: 1–128 ASCII letters, digits, underscores, or hyphens. |
+| `key` | Nonempty relative logical key, at most 1,024 UTF-8 bytes. No empty, `.` or `..` segments, backslashes, control characters, colon, query, or fragment delimiters. |
 | `schema` | One of the encoding identifiers below. |
 | `hash_scheme` | `blake3-256`. |
 | `digest` | 64 lowercase hex characters; BLAKE3 of exact object bytes. |
 | `byte_count` | Exact positive byte count. |
-| `revision` | Opaque revision token or null; required if the adapter's immutability strategy needs it. |
+| `revision` | Explicit null or a nonempty opaque token of at most 1,024 UTF-8 bytes without control characters; required if the adapter's immutability strategy needs it. |
 
-Buckets, endpoints, credentials, and signed URLs are not wire fields. Dataset and
+Buckets, endpoints, credentials, and signed URLs are not stored fields. Dataset and
 plan publication use atomic conditional object creation at unique attempt keys,
 followed by lease-fenced publication of the finalized root reference in control
 storage. Replays verify the exact existing object; they do not overwrite it.
@@ -82,12 +87,21 @@ or silently omit it. No object is uploaded before its complete size and hash
 are known; a bounded spool enables replay without retaining a whole dataset.
 Batch boundaries are storage boundaries, not execution-chunk boundaries.
 
+Each case batch is one JSONL file. `CaseBatchHeader` represents its first record;
+`CaseBatchBuilder` builds that file within its case-count and byte limits;
+`CaseBatchReader` reads and validates its case records. `decode_case_batch` requires
+verified bytes and returns `DecodedCaseBatch`; explicit `validate` checks its
+header and limits before creating that reader. One execution chunk can
+use part of a case-batch file or span several files.
+
 ### Source Fields: `vigilo/dataset-source-fields/v1`
 
 This JSON object has exactly `schema`, `cases_present`, and `fields`. `fields`
 retains all original top-level dataset fields except `cases`, with recursive
 key sorting and field presence preserved. `cases_present` records whether that
 key was supplied. The root manifest references this bounded object.
+The Rust type `DatasetSourceFields` represents this object, including original
+`dataset_id`, `dataset_version`, and any additional top-level dataset metadata.
 
 Together with ordered raw `source` cases, this permits reconstruction of the
 exact compact canonical dataset JSON used by the submitted dataset hash. Merge
@@ -97,6 +111,11 @@ or record envelopes as the submitted dataset hash. Compute dataset-version UUID
 from normalized ordered membership using the identity algorithm independently.
 Reject invalid top-level shapes; runs require a nonempty dataset.
 
+`DatasetIdentityBuilder` starts from the original dataset-level fields and accepts
+case records in submitted order. It calculates the submitted dataset hash,
+normalized dataset-version UUID, and case count without retaining every case.
+Finishing returns those values; verification compares them with the manifest.
+
 ### Dataset Manifest: `vigilo/dataset-manifest/v1`
 
 The root is a small JSON object with exactly:
@@ -104,11 +123,16 @@ The root is a small JSON object with exactly:
 - `schema`, `dataset_id`, `dataset_version` (string or null), `dataset_version_id`.
 - `dataset_hash` (the submitted canonical JSON hash),
   `identity_scheme` (`vigilo/dataset-json/v1`), and `case_count`.
+- `batch_limits`, containing exactly `max_cases` and `max_bytes`, recording the
+  admitted batching policy.
 - `source_fields` (object reference) and `batches` (root index descriptor).
 
 `identity_scheme` names the identity algorithms; it adds no bytes to their hash
 preimages. The root does not embed case lists, batch lists, or upload progress.
-Its object digest is distinct from `dataset_hash`. Publication requires bounded
+Its object digest is distinct from `dataset_hash`. Changing batching defaults
+does not change these recorded limits or repack a finalized dataset. Readers
+explicitly admit the published policy within their configured memory and spool
+budgets before loading its batches. Publication requires bounded
 verification of all descendants, case identity, unique case IDs, contiguous
 ordinals, source hash, and dataset-version UUID. Detect duplicate IDs using a
 bounded external sort/spool; do not retain a dataset-wide in-memory set.
@@ -116,16 +140,17 @@ bounded external sort/spool; do not retain a dataset-wide in-memory set.
 ### Index Page: `vigilo/ordinal-index/v1`
 
 Use one interval tree shape for dataset batch lookup and run-plan page lookup.
+Ranges are start-inclusive and end-exclusive (`[range_start, range_end)`).
 A page has exactly `schema`, `kind` (`dataset-batches` or `run-chunks`), `level`,
-`ordinal_start`, `ordinal_end`, and `entries`. Each entry has exactly
-`ordinal_start`, `ordinal_end`, and `object` (a verified reference).
+`range_start`, `range_end`, and `entries`. Each entry has exactly
+`range_start`, `range_end`, and `object` (a verified reference).
 
 At level zero entries reference case batches or run-chunk pages as selected by
 `kind`. Higher levels reference index pages at the immediately preceding level
 with the same kind. Entries are sorted, nonempty, adjacent half-open ranges;
 their union equals the parent range. Parent references verify child byte counts,
 hashes, schema, and ranges. The root descriptor has exactly `level`,
-`ordinal_start`, `ordinal_end`, and `object`. Record counts and level are bounded.
+`range_start`, `range_end`, and `object`. Record counts and level are bounded.
 Cycles, overlap, gaps, invalid level transitions, and excessive depth fail closed.
 
 Dataset index intervals are case ordinals. Run index intervals are zero-based
@@ -161,15 +186,25 @@ placement owner.
 The root contains exactly `schema`, `run_id`, `dataset` (finalized manifest
 reference), `profile_hash`, `aggregation_policy_hash`, `execution_plan_hash`,
 `configuration` (verified reference), `chunk_count`, `chunks` (index descriptor),
-and `shards` (at most 128 records).
+and `shards` (at most 128 records). Each record is represented by the Rust
+`RunPlanShard` type and describes one logical shard's planned work.
 
 Each shard record contains exactly `run_shard`, `case_count`, `chunk_count`,
 `planned_chunk_hash`, and `gate_counts` (a descriptor with exactly `first`,
   `page_count`, and `entry_count`; `first` is a verified reference or null for zero
   entries). Settlement membership hashes and gate denominators are distinct
 from object digests. `configuration` uses `vigilo/run-configuration/v1` with exactly `schema` and
-`snapshot`. The snapshot contains agent configuration, profile identity,
-executability, chunk size, evaluator ABI plan, and the logical dataset reference.
+`snapshot`. The snapshot contains exactly `profile`, `agent`, `dataset_ref`,
+`dataset_version_id`, `profile_version_id`, `profile_hash`, `dataset_hash`,
+`aggregation_policy_hash`, `execution_plan_hash`, `execution_plan`, `chunk_size`,
+and `executability`. The logical `dataset_ref` contains exactly `dataset_id`,
+`dataset_version` (string or explicit null), `dataset_version_id`, `dataset_hash`,
+and positive `case_count`. The agent agrees with the profile; the profile and
+execution-plan hashes and repeated dataset identities must agree. Executability
+contains the nonnegative integer counts `expected_execution_count`,
+`expected_evaluator_execution_count`, `unique_evaluator_ref_count`, and
+`runnable_evaluator_ref_count`. Run planning validates profile/evaluator policy
+separately from these storage-format checks.
 It contains no case payload snapshots or per-case lists.
 
 Gate counts use `vigilo/gate-counts/v1`: a bounded JSON page with exactly `schema`,
@@ -179,6 +214,16 @@ across pages, without duplicates; page chains must match the descriptor's verifi
 contain cycles. Include eligible
 cases without executions in denominators. Gate counts and configuration are
 independently bounded objects; a large profile is not copied into every chunk.
+
+The Rust type `GateCountPage` represents one count file. `GateCountDescriptor`
+represents its manifest reference and file/entry totals.
+`GateCountChainValidator` checks the linked files; it is not stored in the JSON.
+
+Shard records are strictly ordered by shard number; their chunk totals equal
+the root count. Run-chunk pages contain consecutive chunk indexes and adjacent
+case ranges. Gate IDs are nonempty and at most 1,024 UTF-8 bytes; planned counts
+are nonnegative and cannot exceed the owning shard's case count. Profile group
+IDs are nonempty and at most 1,024 UTF-8 bytes.
 
 Ordinals and chunk counts use signed 32-bit integers. Require
 `case_count <= 2,147,483,647` and every exclusive case end within that bound.
@@ -219,7 +264,28 @@ A MiB is 1,048,576 bytes. Validate positive limits and relationships before I/O:
 one complete record plus header must fit a batch; each index descriptor must fit
 its page; stream buffering and active batch/spool reservations must fit process
 budgets. Overrides need explicit finite maxima and the same boundary tests; they
-must not become unchecked multipliers. Spool saturation applies backpressure
+must not become unchecked multipliers. The format configuration enforces these override ceilings:
+
+| Setting | Accepted range |
+| --- | --- |
+| Cases per batch | 1–65,536 |
+| Encoded batch bytes | 256 bytes–64 MiB |
+| Page entries | 1–4,096 |
+| Page bytes | 256 bytes–8 MiB |
+| Root bytes | 256 bytes–1 MiB |
+| Source/configuration bytes | 256 bytes–64 MiB |
+| Index height | 1–8 |
+| Resident batches | 1–16, with at most 1 GiB encoded reservation |
+| Staging spool | At least one admitted batch, at most 4 GiB |
+
+The resident count multiplied by the admitted batch byte cap must fit the encoded
+resident reservation. All products and integer totals use checked arithmetic.
+These ceilings bound configuration; actual records and descriptors must still
+fit their encoded budgets. They are not capacity or throughput guarantees. Remote
+request, timeout, retry, and disk-validation quotas are enforced at their
+respective I/O and ingestion boundaries.
+
+Spool saturation applies backpressure
 and suspends new uploads rather than filling the disk. Reserve storage before
 writing. Retries do not allocate another spool copy for the same attempt.
 
@@ -258,3 +324,18 @@ Admission reserves bounded memory and spool capacity before work starts.
 Cancellation and operation deadlines apply to queued requests, transfers,
 backoff, and verification. Unfinished cleanup retains durable ownership so a
 process restart can resume it.
+
+The [Rust case-storage contracts](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/contracts/case_storage.rs)
+provide the service-free encoding and validation boundary.
+`ObjectRef::verify` checks reference limits and byte integrity and returns
+`VerifiedObject`. `decode` requires that proof and parses typed metadata; callers
+then invoke `StorageDocument::validate` for semantics. For JSONL, `decode_case_batch`
+returns `DecodedCaseBatch`, whose explicit validation creates the streaming
+reader. Records are parsed and validated one at a time. To establish full-file
+validity before initial publication, exhaust the reader or call
+`CaseBatchReader::validate_remaining` to check the unread suffix and final count.
+Workers verify the complete bytes of published immutable files and validate
+assigned cases; completing validation of unassigned records is not an additional
+worker requirement. Local structural checks do not establish dataset-wide
+ID uniqueness, descendant existence, profile executability, or publication
+ownership. Ingestion verifies those independently in bounded passes.

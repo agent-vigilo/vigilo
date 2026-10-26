@@ -54,8 +54,8 @@ pub(super) async fn exec(
     // reproducibility and later export/debugging.
     let (case_blobs, dataset_cases) = build_case_plans(&parsed.dataset)?;
     let dataset_version_id = compute_dataset_version_id(&parsed.dataset, &dataset_cases)?;
-    let profile_hash = hash_json(&profile_payload)?;
-    let dataset_hash = hash_json(&dataset_payload)?;
+    let profile_hash = hash_serialized_json(&profile_payload)?;
+    let dataset_hash = hash_serialized_json(&dataset_payload)?;
     let aggregation_policy_hash = compute_aggregation_policy_hash(&parsed.profile)?;
     let execution_plan = EvaluatorExecutionPlan::new(
         aggregation_policy_hash.clone(),

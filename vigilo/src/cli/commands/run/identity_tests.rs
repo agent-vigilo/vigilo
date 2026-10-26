@@ -15,7 +15,7 @@ use super::{
     build_chunks,
     canonical_json,
     compute_dataset_version_id,
-    hash_json,
+    hash_serialized_json,
     parse_structured_payload,
 };
 use crate::contracts::run::RunDataset;
@@ -58,7 +58,10 @@ fn json_and_yaml_preserve_exact_dataset_bytes_and_hash() {
             serde_json::to_string(&canonical).unwrap(),
             golden["dataset_canonical"]
         );
-        assert_eq!(hash_json(&canonical).unwrap(), golden["dataset_hash"]);
+        assert_eq!(
+            hash_serialized_json(&canonical).unwrap(),
+            golden["dataset_hash"]
+        );
     }
 }
 
@@ -129,8 +132,8 @@ fn omitted_and_explicit_nulls_have_same_case_identity_but_distinct_source_hash()
     assert_eq!(case_hashes(&original), case_hashes(&explicit));
     assert_eq!(version_id(&original), version_id(&explicit));
     assert_ne!(
-        hash_json(&canonical_json(&original)).unwrap(),
-        hash_json(&canonical_json(&explicit)).unwrap()
+        hash_serialized_json(&canonical_json(&original)).unwrap(),
+        hash_serialized_json(&canonical_json(&explicit)).unwrap()
     );
 }
 
@@ -142,8 +145,8 @@ fn tag_order_is_normalized_but_duplicate_tags_are_preserved() {
     assert_eq!(case_hashes(&original), case_hashes(&reordered));
     assert_eq!(version_id(&original), version_id(&reordered));
     assert_ne!(
-        hash_json(&original).unwrap(),
-        hash_json(&reordered).unwrap()
+        hash_serialized_json(&original).unwrap(),
+        hash_serialized_json(&reordered).unwrap()
     );
     reordered["cases"][0]["tags"] = json!(["alpha", "zeta"]);
     assert_ne!(case_hashes(&original)[0], case_hashes(&reordered)[0]);
@@ -197,7 +200,10 @@ fn case_order_changes_ordinals_and_version_identity() {
     hashes.reverse();
     assert_eq!(hashes, case_hashes(&reversed));
     assert_ne!(version_id(&original), version_id(&reversed));
-    assert_ne!(hash_json(&original).unwrap(), hash_json(&reversed).unwrap());
+    assert_ne!(
+        hash_serialized_json(&original).unwrap(),
+        hash_serialized_json(&reversed).unwrap()
+    );
     let dataset: RunDataset = serde_json::from_value(reversed).unwrap();
     let (_, members) = build_case_plans(&dataset).unwrap();
     for (ordinal, member) in members.iter().enumerate() {

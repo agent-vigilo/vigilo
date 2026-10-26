@@ -25,5 +25,5 @@ cargo test -p vigilo --locked --bin vigilo identity_tests
 ```
 
 This freezes existing observable identity behavior. It does not lock unsupported
-input acceptance or prescribe the future batch/manifest wire format. See the
+input acceptance or prescribe the future batch/manifest storage format. See the
 [blob storage contract](https://agentvigilo.com/docs/architecture/case-storage/).

@@ -29,4 +29,6 @@ or provider URLs. Storage configuration resolves the alias to a provider and buc
 
 Source cases preserve omitted fields and original tag ordering. Workers normalize
 and validate them before execution. The manifest records the dataset hash and dataset-version UUID separately
-from object-byte digests.
+from object-byte digests. It also records the admitted limit of 100 cases and
+8 MiB per batch. Service-free contract tests decode these exact files, verify
+every reference and logical identity, and reproduce the encoded bytes.

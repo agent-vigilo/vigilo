@@ -1,1 +1,1 @@
-{"byte_count":903,"digest":"5ab28725204ffeea37995515e56def3bb25413412c5ecb32646d44e03dd33a44","hash_scheme":"blake3-256","key":"datasets/example/dataset-manifest.json","revision":null,"schema":"vigilo/dataset-manifest/v1","storage_alias":"development"}
+{"byte_count":952,"digest":"5d80e08ddd5bccf5da30a28609cdcbb601fe81058de43d5ee82578728eb542e5","hash_scheme":"blake3-256","key":"datasets/example/dataset-manifest.json","revision":null,"schema":"vigilo/dataset-manifest/v1","storage_alias":"development"}

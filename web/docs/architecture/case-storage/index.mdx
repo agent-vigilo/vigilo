@@ -11,6 +11,7 @@ keywords:
 
 import Mermaid from '@theme/Mermaid';
 import storageBoundaryDiagram from './diagram.mmd';
+import readValidationDiagram from './read-validation.mmd';
 
 # Case Storage
 
@@ -28,7 +29,7 @@ and execution evidence; immutable case data and run plans live in object storage
 
 <Mermaid value={storageBoundaryDiagram} />
 
-See [Formats and Budgets](/docs/architecture/case-storage/formats/) for wire
+See [Formats and Budgets](/docs/architecture/case-storage/formats/) for case-storage
 layouts and [Example](/docs/architecture/case-storage/examples/) for downloadable
 objects with exact sizes and hashes.
 
@@ -56,6 +57,11 @@ are equal. Omitted optional fields and explicit defaults can have equal case
 hashes and version UUIDs while their submitted dataset hashes differ. Reordered
 cases change membership identity. Different case IDs can reference equal content.
 Do not silently replace source identity with a hash of the typed/defaulted model.
+The Rust helper `normalized_case_payload` builds the normalized case-hash content
+described above. The original source case remains a separate representation.
+`hash_serialized_json` serializes the prepared JSON value compactly and hashes
+those bytes with BLAKE3. Callers prepare key ordering and normalization explicitly;
+the hashing helper does not apply those transformations or add a trailing newline.
 
 Object integrity is separate: use BLAKE3 over the exact stored bytes. Record the
 encoding and hash scheme explicitly; use `blake3-256` for byte integrity. An
@@ -118,6 +124,9 @@ Workers may not execute unverified streamed records. Verify the complete assigne
 batch before admitting its cases, using a bounded batch buffer or bounded disk
 spool. Only verified immutable content may enter a bounded cache. Hash validation
 must be followed by schema, case, ordinal, membership, and policy validation.
+Ingestion validates every case before publication. Workers verify complete file
+bytes and validate their assigned cases without a requirement to revalidate
+unassigned cases.
 
 ## Immutability and Publication
 
@@ -171,6 +180,30 @@ and retries alongside SQL statements, inserted rows, and WAL; moving bytes must
 not hide costs in another service.
 
 ## Validation
+
+<Mermaid value={readValidationDiagram} />
+
+Reads use three explicit steps:
+
+| Step | Responsibility |
+| --- | --- |
+| Verify | Check reference/admission limits, exact byte count, and BLAKE3 digest. Return `VerifiedObject`. |
+| Decode | Require `VerifiedObject`, then parse canonical JSON and typed fields. |
+| Validate | Check semantic rules, including ranges, counts, membership, and case content before use. |
+
+`VerifiedObject` has private fields, borrows immutable payload bytes, and keeps a
+fixed reference snapshot. It proves byte integrity, not valid JSON or valid
+membership. Diagnostics expose reference context and byte count without payloads.
+Metadata callers explicitly validate the decoded document. Batch decoding returns
+`DecodedCaseBatch`; its validation checks the header and admits a
+`CaseBatchReader`, which parses and validates records one at a time. Successful
+exhaustion establishes full-file validity before initial publication.
+`CaseBatchReader::validate_remaining` completes this check after a partial read,
+including validation of the unread suffix and final record count. This helper
+supports ingestion and tests; it adds no worker requirement to revalidate
+unassigned records of already validated immutable files. No valid prefix alone
+proves that the remainder is valid. Publication and run activation also require the
+cross-object and policy checks below.
 
 Object reads validate schema, byte count, content hash, and recorded ownership.
 Dataset publication additionally validates unique case IDs, contiguous ordinals,

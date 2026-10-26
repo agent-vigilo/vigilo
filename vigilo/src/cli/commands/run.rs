@@ -11,7 +11,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use blake3::Hasher;
 use clap::{
     Args,
     Subcommand,
@@ -43,6 +42,12 @@ use super::{
 use crate::{
     context::Context,
     contracts::{
+        case_storage::identity::{
+            canonical_json,
+            hash_serialized_json,
+            normalized_case_payload,
+            uuid_from_json,
+        },
         evaluator_abi::EvaluatorExecutionPlan,
         run::{
             RunDataset,
@@ -140,59 +145,6 @@ fn parse_structured_payload(raw: &str, field: &str) -> anyhow::Result<Value> {
         .map_err(|err| anyhow::anyhow!("invalid {} payload (yaml/json expected): {}", field, err))
 }
 
-/// Converts JSON objects into deterministic key order recursively.
-///
-/// This ensures stable hashing and snapshot serialization.
-fn canonical_json(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut sorted = BTreeMap::new();
-            for (key, val) in map {
-                sorted.insert(key.clone(), canonical_json(val));
-            }
-
-            let mut out = serde_json::Map::new();
-            for (key, val) in sorted {
-                out.insert(key, val);
-            }
-
-            Value::Object(out)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
-        _ => value.clone(),
-    }
-}
-
-/// Hashes a JSON value after serialization using BLAKE3.
-fn hash_json(value: &Value) -> anyhow::Result<String> {
-    let bytes = serde_json::to_vec(value)?;
-    let mut hasher = Hasher::new();
-    hasher.update(&bytes);
-    Ok(hasher.finalize().to_hex().to_string())
-}
-
-/// Builds a deterministic UUID from canonical JSON bytes.
-fn uuid_from_json(value: &Value) -> anyhow::Result<Uuid> {
-    let bytes = serde_json::to_vec(value)?;
-    let mut hasher = Hasher::new();
-    hasher.update(&bytes);
-    let hash = hasher.finalize();
-
-    let mut uuid_bytes = [0u8; 16];
-    uuid_bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x80;
-    uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
-
-    Ok(Uuid::from_bytes(uuid_bytes))
-}
-
-/// Sorts tags lexicographically for deterministic storage and hashing.
-fn canonical_tags(tags: &[String]) -> Value {
-    let mut ordered = tags.to_vec();
-    ordered.sort();
-    Value::Array(ordered.into_iter().map(Value::String).collect())
-}
-
 /// Builds case blob and dataset membership drafts from a parsed run dataset.
 ///
 /// Returns:
@@ -205,23 +157,9 @@ fn build_case_plans(
     let mut dataset_cases = Vec::with_capacity(dataset.cases.len());
 
     for (idx, case) in dataset.cases.iter().enumerate() {
-        let expected_output = canonical_json(case.expected.as_ref().unwrap_or(&Value::Null));
-        let metadata = canonical_json(&serde_json::to_value(&case.metadata)?);
-        let input_payload = canonical_json(&case.input);
-        let context_payload = canonical_json(case.context.as_ref().unwrap_or(&Value::Null));
-        let tags = canonical_tags(&case.tags);
+        let blob_payload = normalized_case_payload(case)?;
 
-        let blob_payload = json!({
-            "task_type": case.task_type.clone(),
-            "case_group": case.case_group.clone(),
-            "input": input_payload,
-            "expected_output": expected_output,
-            "context": context_payload,
-            "tags": tags,
-            "metadata": metadata,
-        });
-
-        let case_hash = hash_json(&blob_payload)?;
+        let case_hash = hash_serialized_json(&blob_payload)?;
 
         case_blobs.push(CaseBlobDraft {
             case_hash: case_hash.clone(),
@@ -282,7 +220,7 @@ fn compute_aggregation_policy_hash(profile: &RunProfile) -> anyhow::Result<Strin
         })
         .collect::<Vec<_>>();
 
-    hash_json(&json!({
+    hash_serialized_json(&json!({
         "defaults": {
             "fail_on_any_blocking_failure": profile.defaults.fail_on_any_blocking_failure,
             "min_execution_score": profile.defaults.min_execution_score,
