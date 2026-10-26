@@ -256,7 +256,7 @@ changes. Capacity depends on payload sizes, backend latency, and concurrency.
 | Connection timeout | 5 seconds | Included in the total operation deadline. |
 | No-progress stream timeout | 15 seconds | Reset only on transferred bytes; also bounded by total deadline. |
 | Object-operation deadline | 120 seconds | Includes semaphore wait, attempts, backoff, transfer, and verification. |
-| Attempts | 3 total | Disable hidden SDK retries or charge them to this budget. |
+| Remote request attempts | 3 total, at most 32 | Includes PUT and verification/reconciliation GETs; SDK retries are disabled. |
 | Retry backoff | Full jitter from zero to min(2 seconds, 250 ms × 2^retry_index) | Only classified transient failures. |
 | Failed-attempt cleanup deadline | 30 seconds | Separate bounded cleanup budget; unresolved cleanup stays durable work. |
 

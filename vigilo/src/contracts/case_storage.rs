@@ -11,9 +11,14 @@
 // Case-storage contracts are exercised independently until ingestion consumes them.
 #![allow(dead_code)]
 
+// Explicit paths also let the opt-in service target reuse these binary contracts.
+#[path = "case_storage/codec.rs"]
 mod codec;
+#[path = "case_storage/formats.rs"]
 mod formats;
+#[path = "case_storage/identity.rs"]
 pub(crate) mod identity;
+#[path = "case_storage/limits.rs"]
 mod limits;
 
 #[allow(unused_imports)]
@@ -32,4 +37,5 @@ pub(crate) use limits::{
 };
 
 #[cfg(test)]
+#[path = "case_storage/tests.rs"]
 mod tests;

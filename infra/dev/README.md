@@ -188,6 +188,35 @@ docker compose --env-file infra/dev/.env.single \
   exec -T ceph python3.12 /opt/vigilo-ceph/test-s3.py
 ```
 
+Run the Rust adapter acceptance suite from the host after starting Ceph:
+
+```bash
+. infra/dev/.env.single
+export VIGILO_BLOB_TEST_ENDPOINT="http://127.0.0.1:$DEV_S3_PORT"
+export VIGILO_BLOB_TEST_BUCKET="$DEV_S3_BUCKET"
+export VIGILO_BLOB_TEST_ACCESS_KEY_ID="$DEV_S3_ACCESS_KEY_ID"
+export VIGILO_BLOB_TEST_SECRET_ACCESS_KEY="$DEV_S3_SECRET_ACCESS_KEY"
+export VIGILO_BLOB_TEST_INVALID_SECRET_ACCESS_KEY=deliberately-invalid
+cargo test -p vigilo --locked --features blob-storage-services \
+  --test blob_storage_services -- --nocapture
+```
+
+These variables select the test endpoint; they do not configure runtime commands.
+The suite creates unique namespaces, checks real signing and immutable replay,
+injects bounded transport faults, and removes only its exact keys. Missing test
+configuration fails rather than silently skipping. `ceph_fault_contract` requires
+the disposable local HTTP endpoint.
+
+To verify service restart persistence, set `VIGILO_BLOB_TEST_RESTART_CONTAINER`
+to the exact disposable Ceph container name and select `signed_storage_contract`.
+This test restarts that container, so run it without other users of that service.
+For AWS acceptance, set the endpoint variable to `aws`, select
+`signed_storage_contract`, and supply a disposable general-purpose bucket,
+`VIGILO_BLOB_TEST_REGION`, and credentials scoped to that test namespace. Temporary
+credentials also use `VIGILO_BLOB_TEST_SESSION_TOKEN`. Do not set the restart
+container variable for AWS. A local Ceph pass does not establish AWS acceptance
+or production Ceph redundancy.
+
 With the AWS CLI installed, connect from the repository root:
 
 ```bash

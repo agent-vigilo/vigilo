@@ -12,6 +12,7 @@ keywords:
 import Mermaid from '@theme/Mermaid';
 import storageBoundaryDiagram from './diagram.mmd';
 import readValidationDiagram from './read-validation.mmd';
+import objectIoDiagram from './object-io.mmd';
 
 # Case Storage
 
@@ -127,6 +128,45 @@ must be followed by schema, case, ordinal, membership, and policy validation.
 Ingestion validates every case before publication. Workers verify complete file
 bytes and validate their assigned cases without a requirement to revalidate
 unassigned cases.
+
+## Object I/O
+
+<Mermaid value={objectIoDiagram} />
+
+The S3 adapter uses signed, conditional single-object PUTs for bounded files;
+it creates no multipart uploads. Uploads first spool and verify the input through
+a fixed-size buffer. Reads spool and hash the entire object before returning a
+verified file. A reader borrows its owning verified file so the shared disk
+reservation remains held until the reader closes. Decoding and semantic checks
+remain explicit application responsibilities.
+
+One shared resource pool covers every configured alias in a process. The pool
+limits concurrent operations and reserves disk bytes before creating scratch
+files. Cancellation drops the active transfer and local spool. An uncertain
+completed PUT remains an exact-key reconciliation item; cancellation never
+implies permission to delete published content.
+
+Connection validates conditional creation and immediate visibility using a
+unique caller-owned probe key under `capability-probes/`. The caller records this
+key before I/O so process interruption cannot lose cleanup ownership. A second
+conditional PUT must fail and the original bytes must remain readable. Exact
+probe deletion has a separate 30-second cleanup budget; failed cleanup reports
+the owned key. A conflict on the first PUT never authorizes deleting an existing
+object. Endpoint checks do not run once per case or batch.
+
+SDK retries are disabled. The caller's request allowance counts every remote
+attempt, including replay and lost-response verification GETs. A successful
+create normally uses one PUT and one GET; a read uses one GET. Three requests
+are allowed by default, with an explicit ceiling of 32. The total deadline
+includes admission waits, disk staging, requests, backoff, and hashing. Provider
+status and error category are retained without signed URLs, credentials, or case
+payloads. Request latency and remaining allowance are available through tracing.
+
+The S3 owner configuration supplies bucket, namespace prefix, region, endpoint,
+and addressing style. AWS uses its regional endpoint and default credential
+chain; explicit environment-variable names select credentials for a configured
+endpoint. HTTP requires an explicit local-development opt-in. These settings
+stay outside durable references and do not change evaluator or SQL policy.
 
 ## Immutability and Publication
 

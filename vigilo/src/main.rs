@@ -24,6 +24,7 @@ use tracing_subscriber::{
 };
 
 mod agent_client;
+mod blob_storage;
 mod circuit_breaker;
 mod cli;
 use cli::{

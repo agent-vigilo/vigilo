@@ -93,6 +93,16 @@ It is feature-gated and therefore does not expand normal workspace, database,
 migration, or end-to-end test commands. Build, workload, artifact, and
 isolation details are in [`performance/README.md`](performance/README.md).
 
+The signed object-storage tier is also explicitly opt-in. Configure the endpoint,
+bucket, and credentials using the [development storage instructions](infra/dev/README.md#local-object-storage), then run:
+
+```bash
+cargo test -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
+```
+
+This tier checks Ceph persistence and transport faults; its CI coverage joins the
+same aggregate report and 80% gate.
+
 After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:
 
 ```bash
@@ -107,12 +117,12 @@ separately because they require the complete distributed dependency set. The
 workflow builds the evaluator Wasm and supplies the required database,
 messaging, and opt-in environment variables.
 
-The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, migration, end-to-end, evaluator Wasm, and web production build checks run as separate required CI jobs.
+The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, object storage, migration, end-to-end, evaluator Wasm, and web production build checks run as separate required CI jobs.
 
-The unit/performance, PostgreSQL, and end-to-end jobs collect coverage in
+The unit/performance, PostgreSQL, object-storage, and end-to-end jobs collect coverage in
 parallel while running their existing test tiers. The Linux unit pass also runs
 the performance contract check and Docker-backed service ownership test. A
-final job merges the three reports, requires at least 80% aggregate line
+final job merges the four reports, requires at least 80% aggregate line
 coverage, and uploads that report under the `rust-all` Codecov flag. Project
 coverage and the repository badge therefore reflect code reached through unit,
 integration, and distributed runtime tests.
@@ -133,6 +143,7 @@ cargo llvm-cov clean --workspace
 cargo llvm-cov --no-report --workspace --locked --lib --bins
 cargo llvm-cov run --no-report -p xtask --locked -- perf check
 cargo llvm-cov --no-report -p xtask --locked --features performance-services --test performance_services -- --nocapture
+cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_routing -- --nocapture
 VIGILO_E2E_MULTI_DATABASE=1 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e -- --nocapture

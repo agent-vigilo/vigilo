@@ -28,6 +28,7 @@ jobs:
       - database-integration-tests
       - migration-tests
       - end-to-end-tests
+      - blob-storage-services
       - coverage-report
       - evaluator-wasm
       - web
@@ -53,6 +54,7 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy -p vigilo --locked --features blob-storage-services --test blob_storage_services -- -D warnings
 
   unit-tests:
     name: Unit and Contract Tests (${{ matrix.os }})
@@ -270,6 +272,62 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  blob-storage-services:
+    name: Blob Storage Acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEV_S3_ACCESS_KEY_ID: vigilo-ci-storage
+      DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-storage-secret
+      DEV_S3_BUCKET: vigilo-ci-storage
+      DEV_S3_PORT: 13900
+      COMPOSE_PROJECT_NAME: vigilo-storage-${{ github.run_id }}-${{ github.run_attempt }}
+      VIGILO_BLOB_TEST_ENDPOINT: http://127.0.0.1:13900
+      VIGILO_BLOB_TEST_BUCKET: vigilo-ci-storage
+      VIGILO_BLOB_TEST_ACCESS_KEY_ID: vigilo-ci-storage
+      VIGILO_BLOB_TEST_SECRET_ACCESS_KEY: vigilo-ci-storage-secret
+      VIGILO_BLOB_TEST_INVALID_SECRET_ACCESS_KEY: deliberately-invalid
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Start isolated Ceph gateway
+        run: >-
+          docker compose -p "$COMPOSE_PROJECT_NAME"
+          -f infra/dev/docker-compose.single.yml
+          up -d --build --wait --wait-timeout 240 ceph
+      - name: Verify signed storage and restart persistence with coverage
+        run: >-
+          VIGILO_BLOB_TEST_RESTART_CONTAINER="${COMPOSE_PROJECT_NAME}-ceph-1"
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features blob-storage-services --test blob_storage_services
+          signed_storage_contract -- --exact --nocapture
+      - name: Verify transport faults with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features blob-storage-services --test blob_storage_services
+          ceph_fault_contract -- --exact --nocapture
+      - name: Generate storage coverage report
+        run: >-
+          cargo llvm-cov report
+          --ignore-filename-regex '[/\\]postgres_tests(\.rs|[/\\])'
+          --lcov --output-path lcov-storage.info
+      - name: Store storage coverage
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-storage
+          path: lcov-storage.info
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove isolated service and volumes
+        if: always()
+        run: >-
+          docker compose -p "$COMPOSE_PROJECT_NAME"
+          -f infra/dev/docker-compose.single.yml
+          down --volumes --remove-orphans --timeout 45
+
   coverage-report:
     name: Aggregate Rust Coverage
     runs-on: ubuntu-latest
@@ -277,6 +335,7 @@ jobs:
       - unit-tests
       - database-integration-tests
       - end-to-end-tests
+      - blob-storage-services
     steps:
       - uses: actions/checkout@v6
       - name: Download coverage reports
@@ -295,6 +354,7 @@ jobs:
           --add-tracefile coverage/lcov-unit.info
           --add-tracefile coverage/lcov-sqlx.info
           --add-tracefile coverage/lcov-e2e.info
+          --add-tracefile coverage/lcov-storage.info
           --output-file coverage/lcov-rust-all.info
       - name: Enforce aggregate Rust coverage
         run: >-
