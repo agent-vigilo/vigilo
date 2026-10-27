@@ -67,8 +67,10 @@ git config core.hooksPath scripts/hooks
 | Database integration | SQL, migrations, transactions, advisory locks, leases, and concurrency | One PostgreSQL server; `DATABASE_URL` must use a role that can create test databases | `Database Integration Tests` |
 | Migration | Greenfield schema application through the CLI setup path | One fresh PostgreSQL database | `Migration Tests` |
 | End-to-end | Routing and the real distributed runtime across process and protocol boundaries | Two PostgreSQL servers, RabbitMQ, S3-compatible object storage, evaluator Wasm, and the test HTTP agent | `End-to-End Tests` |
-| Blob storage | Signed object I/O, transport faults, upload/run-plan recovery, and exact cleanup | PostgreSQL and disposable Ceph Object Gateway | `Blob Storage Acceptance` |
-| Performance services | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | Linux `Unit and Contract Tests`; explicit opt-in locally |
+| Blob storage integration | Signed object I/O, transport faults, upload/run-plan recovery, and exact cleanup | PostgreSQL and disposable Ceph Object Gateway | `Blob Storage Integration Tests` |
+| Performance service integration | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | `Performance Service Integration Tests` |
+| Evaluator compatibility | Fixture-backed evaluator ABI compatibility | Built Wasm fixtures; no live services | `Evaluator Compatibility Tests` |
+| Documentation | Website typecheck and production build | Node.js and installed website dependencies | `Documentation Checks` |
 
 Run the service-free tier with:
 
@@ -127,12 +129,13 @@ separately because they require the complete distributed dependency set. The
 workflow builds the evaluator Wasm and supplies the required database,
 messaging, storage-owner configuration (`VIGILO_STORAGE_CONFIG`), and opt-in environment variables.
 
-The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, object storage, migration, end-to-end, evaluator Wasm, and web production build checks run as separate required CI jobs.
+The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, blob storage integration, performance service integration, migration, end-to-end, evaluator compatibility, and documentation checks run as separate required CI jobs.
 
-The unit/performance, PostgreSQL, object-storage, and end-to-end jobs collect coverage in
-parallel while running their existing test tiers. The Linux unit pass also runs
-the performance contract check and Docker-backed service ownership test. A
-final job merges the four reports, requires at least 80% aggregate line
+The unit and contract, performance service integration, database integration,
+blob storage integration, and end-to-end jobs collect coverage in parallel. The
+Linux unit pass includes the service-free performance contract check; Docker-backed
+service ownership tests run in their own integration job. A final job merges
+the five reports, requires at least 80% aggregate line
 coverage, and uploads that report under the `rust-all` Codecov flag. Project
 coverage and the repository badge therefore reflect code reached through unit,
 integration, and distributed runtime tests.

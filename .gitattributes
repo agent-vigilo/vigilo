@@ -1,0 +1,4 @@
+# Downloadable case-storage objects are also byte-exact integrity fixtures.
+# Preserve their stored bytes across checkouts, including with core.autocrlf=true.
+/web/static/examples/case-storage/*.json -text
+/web/static/examples/case-storage/*.jsonl -text
