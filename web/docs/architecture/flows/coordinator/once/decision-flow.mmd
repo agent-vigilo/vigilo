@@ -11,7 +11,10 @@ flowchart TD
 
     CoordinatorId[Load throughput knobs and generate coordinator id]
     Database{Database context available?}
-    RecoverCreation[Resume expired creating runs]
+    RecoverCreation[Claim ready plans with execution requested]
+    ReadPlan[Verify immutable roots, configuration and gate counts]
+    AdmitPlan[Replay compact admission and verify coverage]
+    CreationDeferred[Release ownership and continue bounded candidates]
     RecoveryCatalog{Execution placement catalog available?}
     RecoveryPlacement{Execution placements remain?}
     Recover[Recover expired chunk leases]
@@ -56,7 +59,10 @@ flowchart TD
     Database -- No --> ContextFail
     Database -- Yes --> RecoverCreation
 
-    RecoverCreation --> RecoveryCatalog
+    RecoverCreation --> ReadPlan --> AdmitPlan --> RecoveryCatalog
+    ReadPlan -. Unavailable or invalid object .-> CreationDeferred
+    AdmitPlan -. Candidate fails .-> CreationDeferred
+    CreationDeferred --> RecoveryCatalog
     RecoverCreation -. Recovery fails .-> RecoveryFail
 
     RecoveryCatalog -- No --> RecoveryFail
@@ -121,6 +127,6 @@ flowchart TD
 
     class Start command
     class Success success
-    class CoordinatorId,Database,RecoverCreation,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeCandidate,ReadSummaries,FinalizeClaim,FinalizeRun,FinalizeIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
+    class CoordinatorId,Database,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeCandidate,ReadSummaries,FinalizeClaim,FinalizeRun,FinalizeIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
     class Publish component
     class ContextFail,RecoveryFail,DispatchFail,FinalizeFail,OutboxFail error

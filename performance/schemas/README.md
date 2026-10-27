@@ -57,8 +57,8 @@ profiles.
 | --- | --- |
 | `id` | Stable semantic workload ID recorded in profiles and result artifacts. |
 | `owner` | Repository component responsible for the protected production boundary. |
-| `status` | `implemented` when the runner can execute the workload; `planned` reserves the contract but fails if selected. |
-| `capability` | Exact capability required in every selected build manifest. This is separate from `id` so future adapters can map one workload to version-specific binary capabilities. |
+| `status` | Only `implemented` workloads can execute; selecting an unsupported entry fails validation. |
+| `capability` | Exact binary capability required in every selected build manifest, checked independently from the workload `id`. |
 | `fixture` | Versioned fixture catalog used to generate deterministic setup and expected counts. |
 | `tuples` | Allowed fixture shapes. Profiles must select one exact value from this list. |
 | `unit` | Denominator used to interpret the result, such as one process start, case, evaluation, chunk, or run. |
@@ -68,7 +68,7 @@ profiles.
 | `watchdog_ms` | Hard outer deadline for one execution. Exceeding it terminates the process tree. |
 | `planning_duration_ms` | Conservative duration estimate used to prove the campaign fits its profile cap. It is not an execution timeout. |
 | `preconditioning` | `none`, or `one-per-binary` for one unmeasured execution of each binary before sampling. |
-| `command` | Arguments passed directly to the measured Vigilo executable without shell interpretation. Currently used by the startup workload. |
+| `command` | Arguments passed directly to the measured Vigilo executable without shell interpretation. Used by the startup workload. |
 | `help_signatures` | Required substrings in startup stdout. A missing signature is a fixture/capability mismatch. |
 | `scaling_model` | Optional fixed-plus-slope or explicit stepped model contract for a scalable component. |
 | `reliability` | Optional bounded duration, observation interval, recovery deadline, RSS/descriptor ceilings, throughput retention, and attempt/delivery amplification policy. Required by soak and recovery timing modes. |
@@ -153,7 +153,7 @@ service credentials or provisioning scripts.
 
 | Field | Meaning |
 | --- | --- |
-| `schema_id` | Environment document shape, currently `environment/v1`. |
+| `schema_id` | Environment document shape: `environment/v1`. |
 | `id` | Stable host contract identity. Results from different IDs are not canonical blocking comparisons. |
 | `canonical` | Whether results may support calibrated blocking verdicts. |
 | `provider`, `region`, `availability_zone_id`, `instance_type`, `market` | Infrastructure provider, stable placement, on-demand market, and host shape. |
@@ -204,9 +204,8 @@ The harness owns these additive machine-readable contracts:
 | `performance-suppressions/v1` | Metric-specific temporary suppression ownership, issue, reason, and expiry. Empty by default. |
 
 Every persisted document carries its schema ID. Readers reject an unknown
-schema ID and preserve unknown additive fields. Retained version fixtures are
-required before a schema is revised; format migrations are deferred until a
-second version exists.
+schema ID and preserve unknown additive fields. Retained fixtures verify the
+accepted document shapes; readers do not transform unsupported schema versions.
 
 `campaign.json` links only to run-relative files. Before measurement, the
 harness freezes the validated workload registry, exact resolved profile,

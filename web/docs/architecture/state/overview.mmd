@@ -13,6 +13,9 @@ flowchart TD
     Attempt[Attempt state]
     Outbox[Outbox ledger]
     Delivery[Delivery queue]
+    Plan[Immutable blob plan and compact admission checkpoints]
+    Receipt[Immutable chunk settlements]
+    Summary[Shard progress and sealed scorecards]
 
     Create([Run create])
     Coordinator[Coordinator]
@@ -21,7 +24,9 @@ flowchart TD
     Queue[Queue publication]
 
     Create --> Run
-    Create --> Chunk
+    Create --> Plan
+    Plan -->|verified admission| Chunk
+    Coordinator -->|resumes requested admission| Plan
 
     Coordinator --> Run
     Coordinator --> Outbox
@@ -31,6 +36,11 @@ flowchart TD
     Worker --> Chunk
     Worker --> Execution
     Worker --> Attempt
+    Worker -->|terminal chunk transaction| Receipt
+    Cancel -->|settles remaining chunks| Receipt
+    Coordinator -->|folds receipts| Summary
+    Receipt --> Summary
+    Summary -->|exact seals allow finalization| Run
 
     Cancel --> Run
     Cancel --> Chunk
@@ -48,5 +58,5 @@ flowchart TD
 
     class Create,Cancel command
     class Coordinator,Worker system
-    class Run,Chunk,Execution,Attempt,Outbox,Delivery component
+    class Run,Chunk,Execution,Attempt,Outbox,Delivery,Plan,Receipt,Summary component
     class Queue external

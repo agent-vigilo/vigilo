@@ -20,9 +20,9 @@ Describes the major internal responsibilities of the coordinator runtime.
 
 ## Notes
 
-- Run-creation recovery runs first. It claims expired `creating` runs, replays
-  idempotent placement seeds, and opens dispatch cursors only after every
-  placement is recorded as seeded.
+- Run-creation recovery runs first. It claims ready `creating` runs with execution
+  requested and an available lease, replays compact metadata, and enables
+  dispatch only after verifying exact local chunk coverage.
 - Chunk lease recovery then runs before dispatch and finalization: expired worker chunk leases are either requeued with recovery-scoped chunk-ready outbox event records or marked failed after the recovery limit.
 - Dispatch claims an open `run_id + run_shard` cursor, selects one bounded chunk window from that shard, and inserts one `run.chunk.ready` outbox event record per selected chunk.
 - Already-running run dispatch is cursor-owned and takes only a compatible shared `runs` lock, allowing multiple coordinators to dispatch different shard cursors for the same run while cancellation and finalization retain exclusive lifecycle guards.
@@ -87,6 +87,13 @@ finalization candidate inspections. A shard can publish progress and complete it
 canonical fold in the same cycle when ready work and budgets allow. Scheduling
 bounds describe work admission, not guaranteed throughput or a completion deadline;
 database capacity, contention, payload size, and other cycle work still matter.
+
+Creation recovery claims ready plans with execution requested before reading
+immutable roots and gate counts through the storage adapter. It resumes compact
+execution metadata admission and activates only after exact placement verification.
+Preparation-only runs remain held; interrupted dataset ingestion and unpublished
+plan preparation are resumed by their callers. See
+[Run Preparation](/docs/architecture/case-storage/run-preparation).
 
 ## Related
 

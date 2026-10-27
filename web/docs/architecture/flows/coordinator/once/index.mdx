@@ -15,10 +15,10 @@ import Mermaid from '@theme/Mermaid';
 import executionFlowDiagram from './execution-flow.mmd';
 import decisionFlowDiagram from './decision-flow.mmd';
 
-# Coordinator Once Command
+# Once
 
 How `vigilo coordinator once` executes one configurable bounded orchestration
-cycle and exits. It first resumes expired `creating` runs, then performs chunk
+cycle and exits. It first resumes ready `creating` runs with execution requested and an available lease, then performs chunk
 lease recovery, dispatch, receipt aggregation, finalization, and outbox publication. Dispatch work is
 claimed through a `run_id + run_shard` cursor, and each operation selects a
 partition-local chunk window before inserting one outbox event record per chunk.

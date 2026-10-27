@@ -22,7 +22,7 @@ flowchart TD
     Database[("<b>Database Placements</b> <br/> <small>[Container: PostgreSQL]</small> <br/> <small>Store control metadata and routed execution data across one or more placements.</small>")]:::component
     Queue[("<b>Queue</b> <br/> <small>[Container: RabbitMQ]</small> <br/> <small>Stores and distributes routed broker messages.</small>")]:::component
 
-    Objects[("<b>Object Storage</b> <br/> <small>[Container: Blob Service]</small> <br/> <small>Stores immutable case batches, indexes, and manifests.</small>")]:::component
+    Objects[("<b>Object Storage</b> <br/> <small>[Container: Blob Service]</small> <br/> <small>Stores immutable case batches, run plans, indexes, and manifests.</small>")]:::component
 
     %% system boundary
     subgraph VigiloSystem["&nbsp;"]
@@ -51,8 +51,8 @@ flowchart TD
     Worker -->|"Sends case prompts to and receives agent responses from <br> <small>[TEXT/HTTP]</small>"| TargetAgent
 
     Vigilo -->|Publishes verified datasets and run plans through adapters| Objects
-    Coordinator -->|Resumes publication and reads verified plans| Objects
-    Worker -->|Retrieves and verifies assigned case batches| Objects
+    Coordinator -->|Reads verified plans for admission recovery| Objects
+    Worker -->|Verifies configuration and assigned case files| Objects
 
     %% links
     click Vigilo "/docs/architecture/structure/components/vigilo/"

@@ -1,7 +1,7 @@
 ---
 title: System Structure
 sidebar_position: 1
-description: System structure guide for Agent Vigilo runtime boundaries, CLI, coordinator, worker, database, RabbitMQ, Wasm evaluator isolation, and documentation map.
+description: System structure guide for Agent Vigilo runtime boundaries, CLI, coordinator, worker, database, object storage, RabbitMQ, Wasm evaluator isolation, and documentation map.
 keywords:
   - Agent Vigilo system structure
   - AI evaluation architecture
@@ -15,7 +15,7 @@ keywords:
 
 # System Structure
 
-This section describes the static structure of Agent Vigilo: the CLI runtime, coordinator, worker, PostgreSQL placement model, RabbitMQ message broker, evaluator registry, and Wasmtime evaluator boundary.
+This section describes the static structure of Agent Vigilo: the CLI runtime, coordinator, worker, PostgreSQL placement model, immutable object storage, RabbitMQ message broker, evaluator registry, and Wasmtime evaluator boundary.
 
 Agent Vigilo is structured as a distributed AI evaluation system. Runs are created through the CLI, dispatched by coordinators, processed by workers, evaluated through isolated Wasm components, persisted through routed PostgreSQL workflows, and signaled through durable outbox publication.
 
@@ -98,12 +98,13 @@ Agent Vigilo is structured as a distributed AI evaluation system. Runs are creat
   </div>
 </div>
 
-## Current Runtime Shape
+## Runtime Components
 
 - **CLI runtime** parses commands, initializes shared context, applies migrations, publishes evaluators, creates runs, starts services, and renders JSON or TOON output.
-- **Coordinator** recovers expired chunk leases, marks abandoned running attempts stale, claims coordinator-owned work, dispatches bounded chunk windows, finalizes completed runs, and publishes outbox event records as broker messages.
+- **Coordinator** resumes requested run admission, recovers expired chunk leases, marks abandoned attempts stale, dispatches bounded chunk windows, folds immutable receipts into sealed shard summaries, finalizes settled runs, and publishes outbox event records as broker messages.
 - **Worker** consumes `run.chunk.ready` broker messages, claims chunk leases, allocates due attempts with worker and message ownership, renews chunk and attempt leases, delays retry-scheduled chunks until `retry_after`, invokes agent targets, runs evaluator bindings, verifies required evaluator completeness, persists results, and settles RabbitMQ deliveries.
-- **PostgreSQL placements** hold control metadata and routed execution data: evaluators, datasets, runs, shard-partitioned chunks, attempts, evaluator results, execution aggregates, coordinator leases, outbox ledger rows, and hot delivery rows.
+- **PostgreSQL placements** hold control metadata and routed execution data: evaluators, dataset catalogs and upload checkpoints, plan references, runs, shard-partitioned chunks, attempts, evaluator results, execution aggregates, coordinator leases, outbox ledger rows, and hot delivery rows.
+- **Object storage** holds immutable case batches, run configuration, chunk plans, indexes, and manifests, accessed through bounded provider adapters.
 - **RabbitMQ** distributes chunk-ready broker messages published from durable outbox event records.
 - **Wasmtime** executes versioned WASI 0.2 (Preview 2) evaluator components with per-invocation store limits and a process-wide active-evaluation semaphore.
 

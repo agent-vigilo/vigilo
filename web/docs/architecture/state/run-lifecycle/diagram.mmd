@@ -71,7 +71,6 @@ flowchart TD
     CancelGuard -- Completed or failed --> Reject
     Cancelled -->|Repeated cancel| Noop
 
-    Running -. Unrecoverable system error .-> Failed
 
     class Create command
     class Creating,Seed,SeedGuard,Activate,Pending,Running,Finalizing,DispatchGuard,DispatchLock,DispatchEvents,DispatchCursor,FinalizeGuard,FinalizeCheck,Scorecard,Gate,CompletedEvent,CancelGuard,CancelCascade,CancelEvent system

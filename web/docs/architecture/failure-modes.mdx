@@ -13,15 +13,21 @@ keywords:
 
 ## Run creation crash
 
-Run creation commits a control-owned `creating` run, placement ledger, and exact
-chunk plan before seeding remote execution databases. Each placement seed is an
-idempotent transaction. If the process exits after a remote commit but before
-its control acknowledgement, a coordinator claims the expired creation lease
-and safely applies the same seed again for the original `run_id`. Dispatch
-cursors are created only when every ledger row is seeded, in the same control
-transaction that moves the run to `pending` and deletes the temporary plan.
-Retryable failures leave progress durable; incompatible existing rows mark the
-run `failed` without making it dispatchable.
+Run creation publishes immutable configuration and chunk plans to object storage.
+The control database retains a `creating` run, exact file ownership, generation,
+and admission checkpoints. Admission commits bounded chunks and snapshots to
+execution databases before acknowledging progress in control storage.
+
+If a process stops after a local commit but before its acknowledgement, a
+coordinator claims the available creation lease and replays identical metadata.
+Recovery selects only ready plans with execution requested. Unpublished plans
+and preparation-only runs remain with their caller; resume with the same run ID.
+One fenced control transaction publishes routes and dispatch cursors and moves
+the run to `pending` after independent local coverage verification. Immutable
+plan objects remain available to workers; activation does not delete them.
+Retryable failures retain progress. Immutable admission conflicts mark the run
+`failed` without enabling dispatch. See
+[Run Preparation](/docs/architecture/case-storage/run-preparation).
 
 ## Worker crash
 
@@ -119,12 +125,12 @@ and seals only verified membership. Workers never wait for this claim. Invalid
 policy, membership, or seal data defers that candidate while other runs continue.
 See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
+## Evaluator resource exhaustion
+
+Each Wasm evaluator invocation runs in a fresh Wasmtime store with memory, table, instance, fuel, timeout, and log-message limits. A worker-wide semaphore caps active evaluator invocations so aggregate Wasm memory and CPU exposure stay bounded. If an evaluator exceeds its budget, the worker records an evaluator runtime error and continues through the normal result persistence path.
+
 ## Related
 
 - [State ownership](/docs/architecture/state/ownership/)
 - [Outbox lifecycle](/docs/architecture/state/outbox-lifecycle/)
 - [Glossary](/docs/glossary)
-
-## Evaluator resource exhaustion
-
-Each Wasm evaluator invocation runs in a fresh Wasmtime store with memory, table, instance, fuel, timeout, and log-message limits. A worker-wide semaphore caps active evaluator invocations so aggregate Wasm memory and CPU exposure stay bounded. If an evaluator exceeds its budget, the worker records an evaluator runtime error and continues through the normal result persistence path.

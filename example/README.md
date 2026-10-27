@@ -7,7 +7,7 @@ This example demonstrates a file-based run profile and dataset that target a loc
 - `profile.yaml`: Qwen sentiment evaluation profile using `agent.http`
 - `dataset.yaml`: minimal sentiment classification dataset
 
-The profile points at `http://agent_vigilo_agent:8080/v1/chat/completions`, the llama.cpp-backed agent service in `infra/dev/docker-compose.yml`. Workers send an OpenAI-compatible chat completions request and map the agent response into the evaluator `actual` envelope.
+The profile points at `http://agent_vigilo_agent:8080/v1/chat/completions`, the llama.cpp-backed agent service in `infra/dev/docker-compose.single.yml`. Workers send an OpenAI-compatible chat completions request and map the agent response into the evaluator `actual` envelope.
 
 The example uses one `quality` dimension. Each execution must meet `defaults.min_execution_score`, then the run-level `quality_release` scorecard gate requires complete coverage, no errors or abstentions, and a mean quality score of at least `0.85`.
 
@@ -34,12 +34,17 @@ cargo build --manifest-path evaluators/sentiment-basic-en/Cargo.toml --target wa
 DATABASE_URL='postgres://postgres:password@localhost:5432/agent_vigilo' cargo run -p vigilo -- evaluator publish evaluators/sentiment-basic-en --release
 ```
 
-## Run
+## Validate
 
 ```bash
-docker compose -f infra/dev/docker-compose.yml up -d
+docker compose --env-file infra/dev/.env.single \
+  -f infra/dev/docker-compose.single.yml up -d
 DATABASE_URL='postgres://postgres:password@localhost:5432/agent_vigilo' cargo run -p vigilo -- run validate --profile-file example/profile.yaml --dataset-file example/dataset.yaml
 ```
+
+To create and execute the run, follow the
+[Getting Started guide](https://agentvigilo.com/docs/guides/getting-started),
+including the storage owner configuration and host credentials.
 
 Notes:
 

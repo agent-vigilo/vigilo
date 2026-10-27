@@ -1,7 +1,7 @@
 erDiagram
-    DATASET_UPLOADS ||--o{ DATASET_UPLOAD_OBJECTS : owns
-    DATASET_UPLOADS ||--o| DATASET_CATALOG : publishes
-    DATASET_UPLOADS {
+    dataset_uploads ||--o{ dataset_upload_objects : owns
+    dataset_uploads ||--o| dataset_catalog : publishes
+    dataset_uploads {
         uuid id PK
         text status
         text storage_alias
@@ -12,12 +12,12 @@ erDiagram
         integer batch_count
         bigint generation
         uuid lease_owner
-        timestamp leased_until
-        timestamp expires_at
-        timestamp cleanup_after
-        timestamp cleaned_at
+        timestamptz leased_until
+        timestamptz expires_at
+        timestamptz cleanup_after
+        timestamptz cleaned_at
     }
-    DATASET_UPLOAD_OBJECTS {
+    dataset_upload_objects {
         uuid upload_id PK,FK
         text object_key PK
         text kind
@@ -28,7 +28,7 @@ erDiagram
         boolean acknowledged
         boolean cleaned
     }
-    DATASET_CATALOG {
+    dataset_catalog {
         uuid id PK,FK
         text storage_alias
         text binding_hash

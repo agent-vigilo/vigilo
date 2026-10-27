@@ -65,8 +65,7 @@ evaluator measurement -> host binding policy -> dimension_scores -> execution st
 - `aggregate_score` is one total score for the execution, calculated across scored dimensions.
 - `defaults.min_execution_score` is an overall score gate for `aggregate_score`, not a per-dimension threshold.
 - An <GlossaryTerm term="execution">execution</GlossaryTerm> passes when
-  evaluator completeness is satisfied, `aggregate_score >= defaults.min_execution_score`, and no hard blocking
-  host-derived blocking result fails.
+  evaluator completeness is satisfied, `aggregate_score >= defaults.min_execution_score`, and no host-derived blocking result fails.
 - A run passes when execution coverage is complete, no chunk or execution failed, and every configured run scorecard gate passes.
 
 A result is blocking only when its evaluator binding or dimension policy says
@@ -83,7 +82,9 @@ case attempt -> execution -> run -> gate
 - <GlossaryTerm term="attempt">Attempts</GlossaryTerm> can fail because the
   agent call, evaluator runtime, persistence, or retry budget failed.
 - Executions can fail because evaluator completeness is not satisfied, the total `aggregate_score` is below the overall score gate, or a host-derived blocking result failed.
-- Runs can fail operationally because chunks failed, coverage is incomplete, aggregates are missing, or executions errored.
+- Runs with settled failed chunks or incomplete results complete with a failed
+  gate and explicit missing/unresolved counts. An unavailable shard keeps
+  finalization pending. Invalid immutable admission can fail creation.
 - Gates fail when the run completes but its
   <GlossaryTerm term="gate-status">`gate_status`</GlossaryTerm> is `fail`.
 

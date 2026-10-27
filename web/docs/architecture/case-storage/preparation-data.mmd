@@ -5,32 +5,33 @@ erDiagram
     run_plans ||--o{ run_plan_shards : seals
     database_placements ||--o{ run_plan_shards : selects
     run_plans {
-        uuid run_id PK
+        uuid run_id PK,FK
         uuid dataset_upload_id FK
         text status
-        json limits
-        json execution_plan
-        json assignments
+        text storage_binding_hash
+        jsonb limits
+        jsonb execution_plan
+        jsonb assignments
         bigint generation
         boolean execution_requested
         int admission_cursor
-        json admission_state
+        jsonb admission_state
         int chunk_cursor
-        json manifest
+        jsonb manifest
     }
     run_plan_objects {
-        uuid run_id PK
+        uuid run_id PK,FK
         text object_key PK
         text kind
-        int level
+        smallint level
         int range_start
         int range_end
-        json reference
+        jsonb reference
         boolean acknowledged
     }
     run_plan_shards {
-        uuid run_id PK
-        int run_shard PK
+        uuid run_id PK,FK
+        smallint run_shard PK
         text database_alias FK
         int case_count
         int chunk_count
@@ -39,16 +40,17 @@ erDiagram
     }
     run_snapshots {
         uuid run_id PK
-        int run_shard PK
-        json config_snapshot
+        smallint run_shard PK
+        jsonb config_snapshot
         int expected_execution_count
     }
     run_chunks {
         uuid run_id PK
-        int run_shard PK
+        smallint run_shard PK
         uuid id PK
         int ordinal_start
         int ordinal_end
         text status
     }
-    run_snapshots ||--o{ run_chunks : admits
+    runs ||--o{ run_chunks : schedules
+    runs ||..o{ run_snapshots : "copied context (logical)"

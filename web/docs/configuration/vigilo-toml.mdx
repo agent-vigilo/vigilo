@@ -1,6 +1,6 @@
 ---
 sidebar_label: Vigilo.toml
-title: Vigilo.toml Configuration Reference
+title: Vigilo.toml
 description: Complete reference for the Vigilo.toml manifest file used to configure wasm component publishing.
 keywords:
   - Vigilo.toml
@@ -10,7 +10,7 @@ keywords:
   - Agent Vigilo configuration
 ---
 
-# `Vigilo.toml` Reference
+# Vigilo.toml
 
 The <GlossaryTerm term="evaluator-manifest">`Vigilo.toml` evaluator manifest</GlossaryTerm>
 tells `vigilo` how to prepare and publish an evaluator WebAssembly component.
@@ -73,7 +73,7 @@ Required. Path to the Cargo manifest file, relative to `Vigilo.toml`.
 manifest = "Cargo.toml"
 ```
 
-Current publishing code supports `Cargo.toml`. `vigilo` reads evaluator `name`, `version`, Cargo description, Cargo keywords, and optional `[package.metadata.vigilo]` from this manifest.
+Publishing supports `Cargo.toml`. `vigilo` reads evaluator `name`, `version`, Cargo description, Cargo keywords, and optional `[package.metadata.vigilo]` from this manifest.
 
 ### `description`
 
@@ -128,17 +128,16 @@ Fields:
 - `package`: expected WIT package name
 - `version`: expected WIT package version
 - `interface`: expected exported evaluator interface
-- `strict`: retained for manifest compatibility; supported ABI declarations are
-  always verified, even when this is `false`
+- `strict`: supported ABI declarations are always verified, even when this is
+  `false`; the flag does not disable contract checks
 
 Publication fails when `[wit]` is omitted, the declared ABI is unsupported, the
 referenced WIT does not match the declaration, or the compiled component does
 not link against the selected host adapter. Use `strict = true` for clarity.
 
-Before the first release, `v1.0.0` is the only supported contract. Released WIT
-files are immutable; see
-[Evaluator Compatibility](../guides/evaluator-compatibility.mdx) for the ABI
-release and upgrade rules.
+`v1.0.0` is the supported contract. See
+[Evaluator Compatibility](../guides/evaluator-compatibility.mdx) for exact
+identity checks, artifact pinning, and adapter isolation.
 
 ---
 
@@ -176,7 +175,7 @@ Published evaluators use the strict identifier format:
 <namespace>/<name>:<version>
 ```
 
-Current CLI publishing inserts into the built-in `vigilo` namespace and reads `name` and `version` from `Cargo.toml`.
+CLI publishing inserts into the built-in `vigilo` namespace and reads `name` and `version` from `Cargo.toml`.
 
 The selected profile chooses which artifact path to publish; it is not part of
 the <GlossaryTerm term="evaluator-identifier">evaluator identifier</GlossaryTerm>.

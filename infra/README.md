@@ -22,9 +22,10 @@ is the source of truth for identity, durable references, bounded I/O, publicatio
 and adapter acceptance.
 
 Application storage is provider-neutral; adapters own provider APIs and connection
-settings. The adapter boundary targets S3-compatible storage, Azure Blob, and
-native Google Cloud Storage. Object storage holds immutable case batches and
-run plans; PostgreSQL holds coordination metadata and execution evidence.
+settings. The S3-compatible adapter connects to AWS S3 or Ceph Object Gateway.
+Native Azure Blob and Google Cloud Storage APIs are not implemented adapters.
+Object storage holds immutable case batches and run plans; PostgreSQL holds
+coordination metadata and execution evidence.
 
 Ceph Object Gateway supplies the local S3-compatible endpoint. Its bootstrap and
 administration belong in infrastructure. See [local object storage](dev/README.md#local-object-storage)
@@ -34,8 +35,7 @@ requires its own real-backend acceptance before provider support is claimed.
 ### Self-Hosted Storage
 
 [Ceph Object Gateway](https://docs.ceph.com/en/latest/radosgw/) exposes the
-S3-compatible interface over an open-source Ceph storage cluster. Ceph is the
-self-hosted storage target and supplies the development S3 endpoint. The bundled
+S3-compatible interface over an open-source Ceph storage cluster. Ceph supplies the self-hosted development S3 endpoint. The bundled
 single-node configuration is for local integration testing; production deployment
 sizing, redundancy, and operations require separate validation. AWS S3 and Ceph use the S3-compatible adapter behind the provider-neutral
 storage contract.

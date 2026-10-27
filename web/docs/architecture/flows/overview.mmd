@@ -10,6 +10,10 @@ flowchart TD
     Command([User command])
     Family{Command family}
 
+    Setup[Setup command]
+    Dataset[Dataset commands]
+    Databases[Database commands]
+    Rebalance[Rebalance commands]
     Evaluators[Evaluator commands]
     Runs[Run commands]
     Coordinator[Coordinator commands]
@@ -22,16 +26,25 @@ flowchart TD
     DB[(DB)]
     Broker[Message broker]
     Artifacts[Evaluator artifacts]
+    Storage[Immutable dataset and run-plan storage]
 
     Success[Success response]
     Failure[Error response]
 
     Command --> Family
+    Family --> Setup
+    Family --> Dataset
+    Family --> Databases
+    Family --> Rebalance
     Family --> Evaluators
     Family --> Runs
     Family --> Coordinator
     Family --> Worker
 
+    Setup --> Decision
+    Dataset --> Decision
+    Databases --> Decision
+    Rebalance --> Decision
     Evaluators --> Decision
     Runs --> Decision
     Coordinator --> Decision
@@ -42,18 +55,20 @@ flowchart TD
     Execution --> DB
     Execution --> Broker
     Execution --> Artifacts
+    Execution --> Storage
 
     Contracts --> Success
     DB --> Success
     Broker --> Success
     Artifacts --> Success
+    Storage --> Success
 
     Decision --> Failure
     Execution --> Failure
 
     class Command command
     class Family,Decision,Execution,Contracts,DB system
-    class Evaluators,Runs,Coordinator,Worker component
-    class Broker,Artifacts external
+    class Setup,Dataset,Databases,Rebalance,Evaluators,Runs,Coordinator,Worker component
+    class Broker,Artifacts,Storage external
     class Success success
     class Failure error

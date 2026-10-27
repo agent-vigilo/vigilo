@@ -64,7 +64,7 @@ requires them. Their setup remains outside the measured process boundary.
 
 The `performance` directory is for the external process and service harness.
 Criterion targets are added under `vigilo/benches` only when production already
-has a stable library surface worth measuring. Vigilo currently keeps runtime,
+has a stable library surface worth measuring. Vigilo keeps runtime,
 database, and CLI modules binary-private, so there is no Criterion target and no
 API is widened solely for benchmarking.
 
@@ -345,57 +345,18 @@ capacity evidence, and an existing output directory. It emits digested evidence,
 `reference-v2`, its budget policy, and the frozen build manifest beneath
 `target/perf/baselines/reference-v2`.
 
-## Regression Testing With MadSim
+## Regression Verification
 
-MadSim and `cargo perf` answer different questions and must remain separate.
-MadSim validates deterministic state, scheduling, timeout, retry, and fault
-outcomes under virtual time. It must not write virtual durations into
-`samples.jsonl`, calibration evidence, or regression budgets. `cargo perf`
-measures the real release executable, operating-system processes, PostgreSQL,
-RabbitMQ, HTTP, and Wasmtime on the canonical host.
+`cargo perf` measures the real release executable and its PostgreSQL, RabbitMQ,
+object-storage, HTTP, and Wasmtime dependencies. Samples contribute timing only
+after their exact correctness oracle passes. Virtual or simulated durations do
+not qualify as performance evidence.
 
-The simulation rollout must not change Tokio, task supervision, shared workflow
-engines, or another measured production path until canonical calibration has
-published and review has accepted a gating profile such as `reference-v2` plus
-an immutable direct-Tokio baseline. Every later production-path change runs the
-affected workload IDs as an immutable same-host comparison under that published
-policy; resident lifecycle changes also run the applicable recovery or soak
-profile.
+For a candidate change:
 
-Recurring simulation has separate fixed-regression and discovery lanes. Fixed
-corpus seeds repeat; scheduled exploration uses persisted deterministic,
-non-overlapping epochs so later runs search new scenario/runtime pairs. A
-bounded longevity family also keeps one simulated system across repeated work,
-expiry, reconnect, fault/heal, and restart epochs to detect logical accumulation
-and starvation. Real RSS, descriptor, socket, dependency, and throughput
-behavior remains the authority of `system.soak.v1`, `system.recovery.v1`, and
-the release-binary comparison suite.
-
-Before calling a result a performance regression test:
-
-1. Establish canonical repeatability, publish and review a gating profile such
-   as `reference-v2`, and commit its profile and budget policy.
-2. Make the MadSim implementation expose a stable test command, named scenarios,
-   fixed seeds, and exact logical outcomes. A failing or flaky simulation is a
-   correctness failure; do not interpret performance measurements until it is
-   resolved.
-3. Record which real workload contracts correspond to each simulated scenario.
-   Use the narrowest affected set:
-
-| Simulated behavior | Real performance contracts to select |
-| --- | --- |
-| Run creation or dispatch scheduling | `run.create.v1`, `coordinator.dispatch.v1` |
-| Worker execution, retry, or evaluator scheduling | `worker.execute-wasm.v1`, `system.lifecycle.v1` |
-| Broker outage or reconnect | `coordinator.recovery.v1`, `system.recovery.v1` |
-| Routed database or administrative behavior | Matching `admin-smoke-v1` or `admin-nightly-v1` workload IDs |
-
-For a candidate change, use this order:
-
-1. Run the documented MadSim command with the checked-in scenarios and fixed
-   seeds. Require exact state and operation counts, not virtual elapsed time.
-2. On the exclusive canonical host, build immutable baseline and candidate
-   snapshots from the merge base and candidate revisions.
-3. Compare the affected workloads with the published gating profile:
+1. Run the affected correctness tiers from the [test-tier guide](../README.md#test-tiers).
+2. Build immutable baseline and candidate snapshots for the exclusive canonical host.
+3. Compare the affected workload contracts under a published gating profile:
 
    ```bash
    cargo perf compare \
@@ -410,18 +371,16 @@ For a candidate change, use this order:
 
 4. If the first over-budget interval exits `2`, repeat the identical campaign
    with an independent schedule using
-   `--confirmation-of target/perf/runs/candidate-comparison`. A matching second
-   interval is the performance regression. Do not rerun arbitrary times or
-   change the budget after seeing the result.
-5. When the MadSim scenario covers outage or sustained operation, also run the
-   real `recovery-v1` or `soak-v1` profile against the candidate. Those profiles
-   enforce operational safety bounds; they are not substitutes for the A/B
-   latency and throughput comparison.
+   `--confirmation-of target/perf/runs/candidate-comparison`. Only the matching
+   second interval establishes a regression. Keep the budget fixed.
+5. For outage or sustained-operation changes, also run `recovery-v1` or `soak-v1`.
+   Their operational safety bounds complement the A/B latency and throughput
+   comparison.
 
-Acceptance requires all applicable layers to pass: MadSim exact outcomes, real
-workload exact oracles, the published A/B regression budget, and relevant
-recovery or soak bounds. Report the conclusion as "no regression detected at
-the published budgets and confidence," not "no performance change."
+Acceptance requires the applicable correctness tiers, exact workload oracles,
+published regression budgets, and recovery or soak bounds to pass. A passing
+comparison means no regression was detected at the published budget and
+confidence; it does not establish unlimited capacity or identical performance.
 
 ## Capacity Projection
 
@@ -461,7 +420,7 @@ Projection confidence is explicit:
 - `calibrated` additionally requires canonical matching evidence and an accepted
   staging observation.
 
-The current coordinator RabbitMQ publish/confirm operation has no encompassing
+The coordinator RabbitMQ publish/confirm operation has no encompassing
 deadline. The checked-in deployment therefore declares that path unbounded and
 cannot receive a supported confidence label. A real staging observation may be
 added as `[staging]`; its projected and observed rate, relative error, and

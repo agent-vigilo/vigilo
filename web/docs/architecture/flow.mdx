@@ -1,5 +1,5 @@
 ---
-title: Execution Flow & State Model
+title: Runtime Model
 sidebar_label: Runtime Model
 sidebar_position: 2
 description: Architecture overview for Agent Vigilo evaluation execution, worker attempts, retries, aggregation, and run state transitions.
@@ -12,9 +12,10 @@ keywords:
   - evaluator result aggregation
 ---
 
-# Execution Flow & State Model
+# Runtime Model
 
-This document describes how Agent Vigilo processes an evaluation run from start to completion, including execution lifecycle, retry behavior, and event publication.
+Agent Vigilo creates durable runs, distributes case evaluation, retains partial
+results, and publishes gate decisions after exact settlement.
 
 ---
 
@@ -84,11 +85,19 @@ Reference formats:
 - [Dataset Format](../configuration/dataset-format.mdx)
 
 ```text
-run.status = pending
+run.status = creating
 run.gate_status = unknown
 ```
 
-Run chunks are then generated and assigned a stable `run_shard` from the 128 logical shard range. Executions are allocated later by workers from the chunk's dataset cases:
+Dataset ingestion publishes immutable case files. Preparation publishes run
+configuration, chunk membership, and expected gate counts. Admission seeds
+compact execution metadata and verifies exact local coverage before atomically
+publishing routes and dispatch cursors and changing the run to `pending`.
+`--prepare-only` holds a ready plan in `creating` until execution is requested.
+
+Chunks receive a stable `run_shard` from the 128 logical shard range. Workers
+read their cases from verified object storage and allocate executions when work
+is due:
 
 ```text
 run_chunk.status = pending
@@ -294,10 +303,14 @@ The ledger row is retained for idempotency, audit, and replay. The delivery queu
 ### Run Lifecycle
 
 ```text
-pending → running → finalizing → completed
-                  ↘ failed
-                  ↘ cancelled
+creating → pending → running → finalizing → completed (gate pass or fail)
+    └─ immutable admission conflict → failed
+open run → cancellation → cancelled
 ```
+
+Completion requires exact settlement, not a successful result for every case.
+Missing or unresolved results remain explicit and fail the gate. See the
+[Run Lifecycle](./state/run-lifecycle/) for guarded transitions and recovery.
 
 ### Execution Lifecycle
 

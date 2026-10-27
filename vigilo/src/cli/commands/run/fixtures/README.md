@@ -13,7 +13,7 @@ UTF-8 bytes without a trailing newline. The UUID uses the first 16 digest bytes,
 with byte 6 masked/set to `(byte & 0x0f) | 0x80` and byte 8 to
 `(byte & 0x3f) | 0x80`. These tools are not needed to run the tests.
 
-The tests compare the existing CLI implementation to these fixed values, then
+The tests compare the CLI implementation to these fixed values, then
 exercise identity-preserving and identity-changing variations. Do not regenerate
 the oracle from implementation output. An intentional identity change requires
 an explicit scheme and compatibility decision, not updated snapshots alone.
@@ -24,6 +24,6 @@ Run with:
 cargo test -p vigilo --locked --bin vigilo identity_tests
 ```
 
-This freezes existing observable identity behavior. It does not lock unsupported
-input acceptance or prescribe the future batch/manifest storage format. See the
-[blob storage contract](https://agentvigilo.com/docs/architecture/case-storage/).
+These fixtures verify logical input identity independently from stored-object
+encoding. Byte integrity, batch layouts, and manifest validation are defined by
+the [case-storage contract](https://agentvigilo.com/docs/architecture/case-storage/).

@@ -225,4 +225,4 @@ For example, the defaults allow up to 8 active evaluator invocations at 64 MiB e
 
 If an evaluator exceeds its sandbox budget, the invocation is recorded as an evaluator runtime error. The worker continues processing the rest of the batch and persists the error result through the normal evaluator-result path.
 
-Outbound evaluator HTTP remains denied unless a future policy explicitly enables it.
+Outbound evaluator HTTP is denied by the host adapter.

@@ -24,16 +24,16 @@ no coordinator claims a local input file. The storage adapter owns provider I/O
 and exact key deletion, while PostgreSQL stores compact upload progress and
 ownership. See [Dataset Ingestion](/docs/architecture/case-storage/ingestion).
 
-## Related
-
-- [Structure overview](../..)
-- [Container view](../../containers)
-- [Coordinator components](../coordinator)
-- [Worker components](../worker)
-
 Dataset-reference run preparation traverses verified batches through the storage
 adapter, freezes chunk and gate membership, and seals compact control references.
 Execution admission verifies compact local metadata before activation. The
 foreground caller resumes preparation; coordinators recover requested admission
 under the run creation lease. See
 [Run Preparation](/docs/architecture/case-storage/run-preparation).
+
+## Related
+
+- [Structure overview](../..)
+- [Container view](../../containers)
+- [Coordinator components](../coordinator)
+- [Worker components](../worker)

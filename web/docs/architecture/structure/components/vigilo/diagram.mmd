@@ -15,8 +15,8 @@ flowchart TD
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
     %% components
-    CliRouter["fa:fa-terminal <br/> <b>CLI App and Command Router</b> <br/> <small>[Component: Rust / Clap]</small> <br/> <small>Parses global options and dispatches setup, dataset, evaluator, run, coordinator, and worker commands.</small>"]:::component
-    RuntimeContext["fa:fa-layer-group <br/> <b>Runtime Context Provider</b> <br/> <small>[Component: Rust]</small> <br/> <small>Lazily initializes routed database access, messaging, output, registry cache, and Wasm runtime clients.</small>"]:::component
+    CliRouter["fa:fa-terminal <br/> <b>CLI App and Command Router</b> <br/> <small>[Component: Rust / Clap]</small> <br/> <small>Parses global options and dispatches setup, dataset, evaluator, run, database, rebalance, coordinator, and worker commands.</small>"]:::component
+    RuntimeContext["fa:fa-layer-group <br/> <b>Runtime Context Provider</b> <br/> <small>[Component: Rust]</small> <br/> <small>Lazily initializes routed database access, storage adapters, messaging, output, registry cache, and Wasm runtime clients.</small>"]:::component
     OutputRenderer["fa:fa-file-lines <br/> <b>Output Renderer</b> <br/> <small>[Component: Rust]</small> <br/> <small>Writes structured command responses as JSON or TOON.</small>"]:::component
 
     SetupManager["fa:fa-screwdriver-wrench <br/> <b>Setup Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Applies schema migrations and bootstraps built-in evaluator packages.</small>"]:::component
@@ -29,7 +29,7 @@ flowchart TD
 
     RunPlanner["fa:fa-list-check <br/> <b>Run Input Planner</b> <br/> <small>[Component: Rust]</small> <br/> <small>Validates profile and dataset inputs; streams finalized datasets into immutable run plans.</small>"]:::component
     RunValidator["fa:fa-shield-halved <br/> <b>Run Validation Service</b> <br/> <small>[Component: Rust]</small> <br/> <small>Checks policy, resolves exact evaluator artifacts and ABIs, and builds the immutable execution plan.</small>"]:::component
-    RunPersistence["fa:fa-database <br/> <b>Run Persistence Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Persists recoverable control plans, shard assignments, and idempotent execution seed data.</small>"]:::component
+    RunPersistence["fa:fa-database <br/> <b>Run Persistence Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Persists compact plan checkpoints, shard assignments, and idempotent execution metadata.</small>"]:::component
     RunQueries["fa:fa-magnifying-glass <br/> <b>Run Query, Export, and Shard Admin Component</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Serves routed run reads and manages shard route inspection, move, and rebalance operations.</small>"]:::component
 
     CoordinatorFacade["fa:fa-compass <br/> <b>Coordinator Command Facade</b> <br/> <small>[Component: Rust]</small> <br/> <small>Starts or executes coordinator orchestration cycles.</small>"]:::component
@@ -80,7 +80,7 @@ flowchart TD
     CliRouter -->|"Runs setup commands using"| SetupManager
     CliRouter -->|"Runs evaluator commands using"| EvaluatorRegistry
     CliRouter -->|"Runs run commands using"| RunPlanner
-    CliRouter -->|"Runs run inspection commands using"| RunQueries
+    CliRouter -->|"Runs inspection and placement administration using"| RunQueries
     CliRouter -->|"Starts and runs service mode using"| CoordinatorFacade
     CliRouter -->|"Starts and runs service mode using"| WorkerFacade
 
@@ -95,7 +95,7 @@ flowchart TD
     RunPlanner -->|"Validates executability with"| RunValidator
     RunPlanner -->|"Persists planned runs through"| RunPersistence
     RunValidator -->|"Checks evaluator registry and profile data in <br> <small>[SQL/TCP]</small>"| Database
-    RunPersistence -->|"Writes recoverable control plans and idempotent execution seeds to <br> <small>[SQL/TCP]</small>"| Database
+    RunPersistence -->|"Writes compact plan checkpoints and idempotent execution metadata to <br> <small>[SQL/TCP]</small>"| Database
     RunQueries -->|"Reads and updates run state in <br> <small>[SQL/TCP]</small>"| Database
     RunQueries -->|"Writes formatted results using"| OutputRenderer
 

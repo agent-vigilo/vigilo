@@ -1,10 +1,8 @@
 # AWS Performance Host
 
 `template.yaml` provisions the ephemeral EC2 host for the canonical
-`aws-m6i-2xlarge-al2023-v1` performance environment. It is adapted from PAQ's
-[`ec2-benchmark-template.yaml`](https://github.com/gregl83/paq/blob/main/infra/ec2-benchmark-template.yaml),
-with Vigilo's service topology and stricter environment boundary substituted for
-PAQ's automatic benchmark execution.
+`aws-m6i-2xlarge-al2023-v1` performance environment. It provisions the host, installs service prerequisites,
+and checks its declared environment identity before measurements.
 
 The template is the provisioning implementation for
 `performance/environments/aws-m6i-2xlarge-al2023-v1.toml`. The TOML remains the

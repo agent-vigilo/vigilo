@@ -13,11 +13,11 @@ flowchart TD
     DB[(DB guards)]
     Queue[Message broker]
 
-    RunCreate[Persist creating run and seed plan]
+    RunCreate[Publish immutable plan and record creating checkpoints]
     RunCancel[Cancel run and open work]
     RunRead[Read status, watch, results, export]
 
-    RecoverCreation[Resume expired run creation]
+    RecoverCreation[Resume requested admission from ready plans]
     Dispatch[Dispatch chunk windows]
     RecoverLeases[Recover expired chunk leases]
     Aggregate[Consume receipts and seal exact shard membership]
@@ -29,7 +29,7 @@ flowchart TD
     Execute[Allocate attempts, schedule retries, and persist results]
     CompleteChunk[Settle chunk and write immutable receipt]
 
-    GuardCreation[Creation ledger and coordinator lease]
+    GuardCreation[Plan generation and live creation lease]
     GuardRun[Run status and lifecycle lease]
     GuardDispatch[Run-shard dispatch cursor]
     GuardAdmission[Local shard admission, write epoch, and mover fence]

@@ -11,6 +11,7 @@ sequenceDiagram
     participant Vigilo
     participant ControlDB as Control DB
     participant ExecutionDB as Execution DBs
+    participant Objects as Object Storage
     participant Queue as RabbitMQ
 
     User->>Vigilo: vigilo coordinator once
@@ -18,17 +19,19 @@ sequenceDiagram
     Vigilo->>Vigilo: Load throughput knobs and generate coordinator id
     Vigilo->>Vigilo: Load database context
 
-    loop Bounded expired creation claims
-        Vigilo->>ControlDB: Claim one expired creating run
-        ControlDB-->>Vigilo: Persisted seed plan or no work
-        Vigilo->>ExecutionDB: Idempotently seed pending placements
-        ExecutionDB-->>Vigilo: Placement seed results
-        Vigilo->>ControlDB: Record progress or atomically activate run
+    loop Bounded ready-plan recovery candidates with execution requested
+        Vigilo->>ControlDB: Claim available creation lease and generation
+        ControlDB-->>Vigilo: Compact plan references and admission progress, or no work
+        Vigilo->>Objects: Verify roots, configuration, gate counts and bounded chunk pages
+        Vigilo->>ExecutionDB: Replay compact admission and independently verify exact coverage
+        ExecutionDB-->>Vigilo: Verified placement coverage or candidate failure
+        Vigilo->>ControlDB: Checkpoint progress or atomically publish routes and activate
+        Note over Vigilo,ControlDB: Returned failures release ownership and defer the candidate
     end
 
-    Vigilo->>ControlDB: List active execution placements
+    Vigilo->>ControlDB: List serviceable execution placements
     ControlDB-->>Vigilo: Execution database aliases
-    loop Active execution placements
+    loop Serviceable execution placements
         Vigilo->>ExecutionDB: Recover expired chunk leases for alias
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Recovered chunks and poison chunks failed
@@ -82,9 +85,9 @@ sequenceDiagram
     end
 
     Vigilo->>Vigilo: Load messaging context
-    Vigilo->>ControlDB: List active outbox placements
+    Vigilo->>ControlDB: List serviceable outbox placements
     ControlDB-->>Vigilo: Database aliases
-    loop Active outbox placements
+    loop Serviceable outbox placements
         Vigilo->>ExecutionDB: Count and claim publishable rows for alias
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Joined event payload batch

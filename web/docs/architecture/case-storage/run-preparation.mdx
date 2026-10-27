@@ -219,6 +219,10 @@ the dataset.
 
 <Mermaid value={preparationData} />
 
+The diagram shows the fields used by preparation and admission. Run snapshots
+are local copies linked by run/shard identity; their logical relationship to
+control runs is not a cross-database foreign key.
+
 `run_plans` freezes the dataset catalog ID, storage binding, limits, evaluator
 artifacts and initial placements, then records generation, acknowledged chunk
 progress, execution intent, admission cursor/folds and the published root. `run_plan_objects` holds one compact reference

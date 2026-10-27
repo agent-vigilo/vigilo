@@ -102,7 +102,7 @@ Agent Vigilo separates database responsibility from database location.
 
 - The **control database** owns evaluator registry rows, global run metadata,
   placement catalog rows, recoverable
-  <GlossaryTerm term="run-creation-plan">run creation plans</GlossaryTerm>, dispatch cursors,
+  <GlossaryTerm term="run-creation-plan">run preparation checkpoints</GlossaryTerm>, dataset catalogs, dispatch cursors,
   coordinator leases, and global run lifecycle updates.
 - An **execution database** owns high-volume run work: chunks,
   <GlossaryTerm term="run-snapshot">run snapshots</GlossaryTerm>, executions,
@@ -306,8 +306,9 @@ skipped while healthy aliases finish the pass.
 
 ## Control Database Scale
 
-The control database stays singular and authoritative. It is expected to scale
-vertically first, while execution rows spread across shard-capable placements.
+The control database is singular and authoritative. Its CPU, memory, storage,
+and connection limits bound control-plane capacity; execution rows spread across
+shard-capable placements.
 Coordinator hot paths emit structured log fields that can be treated as metrics:
 dispatch cursor backlog, finalization candidate backlog, per-placement outbox
 backlog, oldest finalization candidate lag, route resolution timing, pool
@@ -317,9 +318,9 @@ placements, failed placement operations, and retryable versus terminal
 placement errors. Contained failure logs include the database alias, operation,
 error kind, and retryability.
 
-The hot outbox publisher scan is indexed by availability time. Worker runtime
-metadata reads remain centralized for now; evaluator metadata replication is an
-explicit future contract, not hidden routing behavior.
+The hot outbox publisher scan is indexed by availability time. Evaluator registry reads use the control database; immutable case payloads and
+run configuration are read from object storage. Connection settings are fixed
+for each process lifetime.
 
 ## Operating Placements
 
@@ -613,44 +614,3 @@ changed with `--lease-seconds` or `VIGILO_REBALANCE_LEASE_SECONDS`.
 Drain-source planning includes shards owned by an `active` or `draining`
 source. Every target is revalidated as `active` when the route is activated,
 so a target that begins draining during a copy cannot receive the shard.
-
-## Current Scope
-
-Implemented today:
-
-- Single-database default with a seeded `primary` placement.
-- 128 logical shards and partitioned execution tables.
-- Stored database and shard placement catalogs.
-- Provisioning, active, draining, and disabled database-placement lifecycle with atomic
-  new-ownership admission and guarded disable.
-- Recoverable routed run creation, dispatch, worker processing, lease recovery,
-  outbox publication, shard summaries, finalization, cancellation, live
-  status/watch progress, results, export, route inspection, route fencing,
-  placement assignment policy, explicit shard move, and persisted bulk
-  rebalance operations with leased concurrent apply claims.
-- Control-database scale hardening through outbox queue indexing and structured
-  backlog/timing logs for coordinator and routing hot paths.
-- Live placement admission checks that reject disabled targets and role changes
-  without discarding reusable connection pools.
-- Placement-isolated coordinator recovery, dispatch, finalization reads, and
-  outbox publication with per-cycle failure classification and counters.
-- Bounded fair finalization scanning that rotates blocked runs and continues to
-  later ready candidates without weakening the control-database finalization
-  lease.
-- CI coverage for the black-box and runtime multi-database paths: run creation
-  to `primary` and `shard_001`, recovery after a remote seed commit, route
-  inspection, control-owned cursors, coordinator dispatch, worker execution,
-  finalization, routed cancellation, spread-active assignment for one run,
-  shard move, rebalance plan/apply resume/verify, route-version inspection, and
-  prerequisite-copy verification. The runtime harness also verifies that an
-  unavailable shard does not stop healthy dispatch, lease recovery, or outbox
-  publication. Database integration coverage separately verifies worker access
-  to a healthy alias after another alias fails.
-
-Intentionally deferred:
-
-- Evaluator metadata replication to execution placements.
-- Runtime database-secret and connection-parameter refresh.
-
-These are product and operations contracts, not hidden formulas. Until they are
-designed explicitly, routing remains stored, inspectable, and conservative.

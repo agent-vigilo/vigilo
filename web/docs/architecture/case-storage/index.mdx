@@ -44,8 +44,9 @@ creation ownership, progress, and the boundary between readiness and dispatch.
 Application code owns case validation, identity, batching, manifest publication,
 and run settlement. Adapters own remote object I/O, credentials, SDKs, and mapping
 provider failures. They must not depend on evaluator, database, or queue policy.
-S3-compatible endpoints share an adapter. Native Azure Blob and Google Cloud
-Storage APIs require provider-specific adapters behind the same contract.
+The S3-compatible adapter serves AWS S3 and Ceph Object Gateway through
+configuration. Native Azure Blob and Google Cloud Storage adapters are not
+implemented.
 
 The executable identity oracle is
 [`identity_tests.rs`](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/cli/commands/run/identity_tests.rs), with independently
@@ -132,8 +133,8 @@ batch before admitting its cases, using a bounded batch buffer or bounded disk
 spool. Only verified immutable content may enter a bounded cache. Hash validation
 must be followed by schema, case, ordinal, membership, and policy validation.
 Ingestion validates every case before publication. Workers verify complete file
-bytes and validate their assigned cases without a requirement to revalidate
-unassigned cases.
+bytes and validate every record in each touched file, including records outside
+the assigned range, before admitting the selected cases.
 
 ## Object I/O
 
@@ -220,8 +221,8 @@ Use these semantic categories independently of provider status codes:
 | Timeout/unknown write outcome | Preserve uncertainty; reconcile the exact attempt before retrying publication. |
 | Cancelled | Stop admission and remote work; release streams and preserve cleanup ownership. |
 
-One layer owns retries. SDK retries count toward the same attempt/deadline budget;
-SDK and caller retry loops must not multiply attempts. Cancellation and deadline
+The adapter owns remote retries within the caller's attempt/deadline budget.
+SDK retries are disabled so retry loops cannot multiply attempts. Cancellation and deadline
 expiry stop backoff and further requests. Diagnostics must exclude credentials,
 signed query strings, and case payloads. Measure object requests, bytes, latency,
 and retries alongside SQL statements, inserted rows, and WAL; moving bytes must
@@ -248,8 +249,8 @@ Metadata callers explicitly validate the decoded document. Batch decoding return
 exhaustion establishes full-file validity before initial publication.
 `CaseBatchReader::validate_remaining` completes this check after a partial read,
 including validation of the unread suffix and final record count. This helper
-supports ingestion and tests; it adds no worker requirement to revalidate
-unassigned records of already validated immutable files. No valid prefix alone
+supports ingestion and tests. Workers exhaust each touched batch reader,
+validating both selected and unselected records before execution. No valid prefix alone
 proves that the remainder is valid. Publication and run activation also require the
 cross-object and policy checks below.
 

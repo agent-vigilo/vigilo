@@ -10,15 +10,15 @@
 
 # Agent Vigilo
 
-**Distributed AI evaluation infrastructure and deployment gating experiments for generative AI systems.**
+**Distributed AI evaluation infrastructure and deployment gating for generative AI systems.**
 
-Agent Vigilo explores what LLM and agent evaluation infrastructure can look like beyond ad hoc scripts: versioned WASM evaluators, durable evaluation runs, worker/coordinator execution, normalized results, and pass/fail gates that can sit in CI or release workflows.
+Agent Vigilo provides versioned WASM evaluators, durable evaluation runs, worker/coordinator execution, normalized results, and pass/fail gates that can sit in CI or release workflows.
 
 It focuses on the parts of AI evaluation that become hard as systems grow: idempotent distributed work, durable event delivery, evaluator isolation, retry-safe persistence, and auditable results.
 
 ## Why It Matters
 
-- **Run evaluations like infrastructure**: PostgreSQL-backed state, RabbitMQ work distribution, Rust workers, and deterministic state guards.
+- **Run evaluations like infrastructure**: Immutable datasets and run plans in object storage, PostgreSQL-backed state, RabbitMQ work distribution, and Rust workers.
 - **Ship versioned evaluators**: publish WASI Preview 2 WebAssembly evaluators with strict WIT contracts.
 - **Protect the runtime**: Wasmtime fuel, memory, timeout, log, and concurrency limits isolate evaluator execution.
 - **Avoid lost events**: durable outbox ledger plus hot delivery queue, RabbitMQ publisher confirms, and idempotency keys.
@@ -32,7 +32,7 @@ Run scorecard gates enforce dimension or evaluator thresholds across the full ru
 
 See [Measurement Normalization](web/docs/configuration/measurement-normalization.mdx) for copyable binary, numeric, curve, threshold, and ordinal policy examples.
 
-A run can fail operationally because work did not complete, or complete with a failed gate because evaluation policy failed.
+A run completes after exact chunk settlement, including when retained results are partial. Missing coverage or failed evaluation policy fails the release gate. Immutable admission conflicts can mark the run failed before dispatch.
 
 ## Start Here
 
@@ -48,7 +48,7 @@ A run can fail operationally because work did not complete, or complete with a f
 
 ## Core Stack
 
-Rust, Tokio, PostgreSQL, SQLx, RabbitMQ, Wasmtime, WASI Preview 2, WIT, Docusaurus.
+Rust, Tokio, PostgreSQL, SQLx, RabbitMQ, S3-compatible object storage, Wasmtime, WASI Preview 2, WIT, Docusaurus.
 
 ## Development Checks
 
@@ -67,7 +67,8 @@ git config core.hooksPath scripts/hooks
 | Database integration | SQL, migrations, transactions, advisory locks, leases, and concurrency | One PostgreSQL server; `DATABASE_URL` must use a role that can create test databases | `Database Integration Tests` |
 | Migration | Greenfield schema application through the CLI setup path | One fresh PostgreSQL database | `Migration Tests` |
 | End-to-end | Routing and the real distributed runtime across process and protocol boundaries | Two PostgreSQL servers, RabbitMQ, S3-compatible object storage, evaluator Wasm, and the test HTTP agent | `End-to-End Tests` |
-| Performance services | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | Opt-in local tier |
+| Blob storage | Signed object I/O, transport faults, upload/run-plan recovery, and exact cleanup | PostgreSQL and disposable Ceph Object Gateway | `Blob Storage Acceptance` |
+| Performance services | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | Linux `Unit and Contract Tests`; explicit opt-in locally |
 
 Run the service-free tier with:
 
@@ -142,7 +143,8 @@ SQLx creates each isolated PostgreSQL test database with `CREATE DATABASE`,
 which clones PostgreSQL's built-in `template1` database. The PostgreSQL coverage
 job migrates `template1` once, so each test validates the recorded migrations
 instead of rebuilding every partition and index. The separate migration job
-still applies the complete migration set to an empty database.
+applies the complete migration set to an empty database. The
+[migration layout](migrations/README.md) documents dependency order and file ownership.
 
 Accumulate the same reports locally after starting the services and setting the
 environment variables required by each tier:
