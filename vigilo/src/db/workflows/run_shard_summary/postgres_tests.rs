@@ -338,6 +338,32 @@ async fn changed_membership_and_stale_ownership_cannot_seal(pool: PgPool) {
             .to_string()
             .contains("admission")
     );
+    // SQLx queues rollback when the rejected transaction is dropped. Wait for
+    // its claim to be released before requiring progress from the nonblocking
+    // aggregator; another pool connection can otherwise correctly defer.
+    // This standalone statement releases its own transaction lock on completion.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':summary', 4))",
+        )
+        .bind(run)
+        .execute(&pool),
+    )
+    .await
+    .expect("rejected aggregation must release its claim after rollback")
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM run_chunk_settlement_consumptions WHERE run_id=$1 AND consumed"
+        )
+        .bind(run)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0,
+        "stale ownership must not consume receipts"
+    );
     assert!(advance_shard_summary(&pool, run, 4, 1).await.unwrap());
     let error = advance_shard_summary(&pool, run, 4, 1).await.unwrap_err();
     assert!(error.to_string().contains("membership"));
