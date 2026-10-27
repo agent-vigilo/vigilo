@@ -98,6 +98,23 @@ pub struct RunInputs {
     pub dataset: PathBuf,
 }
 
+/// Adds deterministic gates that cover every fixture case; zero leaves the
+/// ordinary fixture unchanged. This runs outside the measured process boundary.
+pub fn set_gates(inputs: &RunInputs, count: usize) -> Result<()> {
+    if count > 8 {
+        bail!("fixture gate limit exceeded");
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    let mut value: Value = serde_yaml::from_str(&fs::read_to_string(&inputs.profile)?)?;
+    value["scorecard"] = json!({"gates": (0..count).map(|n| json!({
+        "id":format!("gate-{n:02}"),"dimension":"quality","min_coverage":1.0
+    })).collect::<Vec<_>>()});
+    fs::write(&inputs.profile, serde_yaml::to_string(&value)?)?;
+    Ok(())
+}
+
 /// Loads and validates a fixture catalog by stable ID.
 pub fn load(root: &Path, id: &str) -> Result<FixtureCatalog> {
     if !id

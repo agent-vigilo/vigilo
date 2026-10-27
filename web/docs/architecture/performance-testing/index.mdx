@@ -61,6 +61,13 @@ PostgreSQL normalized statements, planning time/counts, shared/temp buffers,
 and WAL counters are captured after the timed process exits. The
 `cargo perf diagnose` command renders them as
 <GlossaryTerm term="performance-diagnostics">non-gating diagnostics</GlossaryTerm>.
+Complete statement counters also separate control, execution, and shared
+databases into read, DML, mixed, transaction, and other categories. These counters
+include statements outside the diagnostic query ranking. `cargo perf check-queries`
+checks every measured repetition against the campaign's frozen absolute statement
+ceilings; missing or inconsistent evidence fails validation. Shared databases
+retain combined attribution, and statement counts remain distinct from physical
+row writes.
 The model command writes the owned component-model artifact and fails closed on
 incomplete or nonlinear evidence.
 
@@ -148,8 +155,10 @@ prepares its first run before measurement, then measures only the second run.
 The exact oracle verifies stored payloads, membership, chunks, and zero premature
 execution or dispatch.
 
-Linux peak-memory samples use the child's post-exec high-water mark; inherited
-harness memory is excluded, and a missed measurement remains unavailable.
+Linux peak-memory samples use the child's high-water mark after the kernel
+confirms it has executed. Spawn can return before that transition, while the
+child still has the harness's inherited memory. Missing or malformed execution
+state and missed memory samples remain unavailable rather than being accepted.
 
 Samples separate SQL calls and returned rows from physical table-row insert,
 update, and delete counts. Their external counters are captured before oracle

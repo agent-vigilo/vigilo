@@ -18,6 +18,7 @@ use sqlx::{
     types::Json,
 };
 use uuid::Uuid;
+pub(crate) mod batches;
 mod queries;
 // Abort/expiry SQL quarantines writes for 120 seconds. Changing the shared
 // operation default requires updating and re-verifying that cleanup contract.
@@ -53,7 +54,7 @@ pub(crate) struct Lease {
     pub owner: Uuid,
     pub generation: i64,
 }
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub(crate) struct Object {
     pub object_key: String,
     pub kind: String,
@@ -220,47 +221,7 @@ pub(crate) async fn plan(
     bounded(async {
         let mut tx = db.begin().await?;
         let upload = guard(&mut tx, lease, cleanup).await?;
-        object.reference.validate(&upload.limits)?;
-        let expected_schema = match object.kind.as_str() {
-            "batch" => crate::contracts::case_storage::StorageFormat::CaseBatch,
-            "index" => crate::contracts::case_storage::StorageFormat::OrdinalIndex,
-            "source" => crate::contracts::case_storage::StorageFormat::DatasetSourceFields,
-            "manifest" | "probe" => crate::contracts::case_storage::StorageFormat::DatasetManifest,
-            _ => anyhow::bail!("unknown upload object kind"),
-        };
-        ensure!(
-            object.reference.schema == expected_schema
-                && (object.kind == "index" || object.level == 0),
-            "upload object kind/schema mismatch"
-        );
-        if object.kind != "probe" {
-            ensure!(
-                object.range_start.is_some_and(|s| s >= 0)
-                    && object
-                        .range_end
-                        .is_some_and(|e| e > object.range_start.unwrap_or(e)
-                            && e <= upload.identity.case_count),
-                "invalid upload object range"
-            );
-        }
-        ensure!(
-            object.reference.storage_alias == upload.storage_alias
-                && object.object_key == object.reference.key,
-            "object owner mismatch"
-        );
-        let prefix = if object.kind == "probe" {
-            format!("capability-probes/{}/", lease.id)
-        } else {
-            format!("uploads/{}/", lease.id)
-        };
-        ensure!(
-            object.object_key.starts_with(&prefix),
-            "object key is outside upload ownership"
-        );
-        ensure!(
-            !cleanup || object.kind == "probe",
-            "cleanup cannot plan data"
-        );
+        validate_object(&upload, lease, object, cleanup)?;
         sqlx::query(queries::REGISTER_OBJECT)
             .bind(lease.id)
             .bind(&object.object_key)
@@ -292,6 +253,49 @@ pub(crate) async fn plan(
         Ok(acknowledged)
     })
     .await
+}
+/// Validate the exact owned object independently of SQL batching.
+fn validate_object(upload: &Upload, lease: Lease, object: &Object, cleanup: bool) -> Result<()> {
+    object.reference.validate(&upload.limits)?;
+    let expected_schema = match object.kind.as_str() {
+        "batch" => crate::contracts::case_storage::StorageFormat::CaseBatch,
+        "index" => crate::contracts::case_storage::StorageFormat::OrdinalIndex,
+        "source" => crate::contracts::case_storage::StorageFormat::DatasetSourceFields,
+        "manifest" | "probe" => crate::contracts::case_storage::StorageFormat::DatasetManifest,
+        _ => anyhow::bail!("unknown upload object kind"),
+    };
+    ensure!(
+        object.reference.schema == expected_schema && (object.kind == "index" || object.level == 0),
+        "upload object kind/schema mismatch"
+    );
+    if object.kind != "probe" {
+        ensure!(
+            object.range_start.is_some_and(|s| s >= 0)
+                && object.range_end.is_some_and(
+                    |e| e > object.range_start.unwrap_or(e) && e <= upload.identity.case_count
+                ),
+            "invalid upload object range"
+        );
+    }
+    ensure!(
+        object.reference.storage_alias == upload.storage_alias
+            && object.object_key == object.reference.key,
+        "object owner mismatch"
+    );
+    let prefix = if object.kind == "probe" {
+        format!("capability-probes/{}/", lease.id)
+    } else {
+        format!("uploads/{}/", lease.id)
+    };
+    ensure!(
+        object.object_key.starts_with(&prefix),
+        "object key is outside upload ownership"
+    );
+    ensure!(
+        !cleanup || object.kind == "probe",
+        "cleanup cannot plan data"
+    );
+    Ok(())
 }
 pub(crate) async fn acknowledge(
     db: &PgPool,

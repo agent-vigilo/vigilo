@@ -183,6 +183,10 @@ pub struct Workload {
     pub oracle: String,
     /// External measurements required for a valid workload result.
     pub required_metrics: Vec<String>,
+    /// Absolute total SQL statement ceilings by tuple, frozen with the registry.
+    /// Evaluated independently of informative wall-time comparisons.
+    #[serde(default)]
+    pub statement_budgets: BTreeMap<String, u64>,
     /// Outer deadline for one workload execution.
     pub watchdog_ms: u64,
     /// Conservative per-execution duration used for campaign planning.
@@ -442,6 +446,10 @@ pub struct ProcessMeasurement {
 pub struct ExternalMeasurements {
     /// PostgreSQL statements executed in the sample scope.
     pub sql_calls: Option<u64>,
+    /// Complete statement categories per distinct database; empty when not collected.
+    /// Shared control/execution databases cannot be attributed to a single plane.
+    #[serde(default)]
+    pub sql_databases: Vec<DatabaseStatements>,
     /// PostgreSQL statement execution time in milliseconds.
     pub sql_time_ms: Option<f64>,
     /// Rows observed by scoped PostgreSQL statements.
@@ -449,6 +457,10 @@ pub struct ExternalMeasurements {
     /// Physical table-row mutation deltas, aggregated by public table across scoped databases.
     #[serde(default)]
     pub table_writes: BTreeMap<String, TableWrites>,
+    /// Ceph gateway object-operation and payload-byte deltas, excluding oracle reads.
+    /// Empty in artifacts recorded without this collector.
+    #[serde(default)]
+    pub storage_counters: BTreeMap<String, u64>,
     /// WAL bytes generated during the sample.
     pub wal_bytes: Option<u64>,
     /// Change in durable PostgreSQL database bytes.
@@ -473,6 +485,22 @@ pub struct ExternalMeasurements {
     /// Highest-cost PostgreSQL statement fingerprints captured after timing ends.
     #[serde(default)]
     pub query_diagnostics: Vec<QueryDiagnostic>,
+}
+
+/// Bounded aggregate counters, independent of top-query diagnostic retention.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DatabaseStatements {
+    /// Campaign-owned database name, never a connection URL or credential.
+    pub database: String,
+    /// `control`, `execution`, or `shared`, determined before measurement.
+    pub role: String,
+    /// Statement counts: read, dml, mixed (WITH), transaction, and other.
+    /// SELECT functions can have side effects; these classify syntax, not row writes.
+    pub calls: BTreeMap<String, u64>,
+    /// Server statement execution milliseconds across all categories.
+    pub execution_ms: f64,
+    /// Server statement planning milliseconds across all categories.
+    pub planning_ms: f64,
 }
 
 /// PostgreSQL tuple mutation counters, independent of statement batching and read rows.

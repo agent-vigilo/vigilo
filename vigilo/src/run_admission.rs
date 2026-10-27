@@ -3,7 +3,11 @@
 //! Creation leases fence compact control checkpoints. Bounded chunk pages seed
 //! execution-local scheduling rows and verified references, without case rows.
 //! Remote writes are immutable and idempotent across lost acknowledgements.
-//! Exact local membership is verified before routes become dispatchable.
+//! Placement-wide ordered pages fold each shard independently before routes
+//! become dispatchable. Renewals follow elapsed time; control checkpoints and
+//! activation always check live generation and ownership.
+mod lease;
+
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -50,6 +54,7 @@ use crate::{
 
 /// Seeds a bounded number of pages and yields its lease on every outcome.
 /// Returns true only after exact activation. The coordinator resumes ready plans.
+#[cfg(test)]
 pub(crate) async fn resume(
     context: &Context,
     plan: &Plan,
@@ -61,17 +66,12 @@ pub(crate) async fn resume(
         config.case_page_budget > 0 && config.case_batch_size > 0,
         "admission budgets must be positive"
     );
-    let reader = RunReader::open(
-        store,
-        plan.manifest
-            .as_ref()
-            .context("run plan is not published")?,
-        plan.limits.0.clone(),
-        plan.run_id,
-        cancel,
-    )
-    .await?;
-    resume_verified(context, plan, &reader, config, cancel).await
+    let budget = Budget::standard();
+    with_claim(context, plan, |lease| async move {
+        let reader = open_reader(plan, std::future::ready(Ok(store)), budget, cancel).await?;
+        admit(context, plan, &reader, config, cancel, lease).await
+    })
+    .await
 }
 
 /// Reuses roots already verified by the foreground creator, avoiding duplicate
@@ -92,6 +92,75 @@ pub(crate) async fn resume_verified(
                 .is_some_and(|r| r.0 == reader.reference),
         "reader differs from published run plan"
     );
+    with_claim(context, plan, |lease| async move {
+        admit(context, plan, reader, config, cancel, lease).await
+    })
+    .await
+}
+
+/// One recovery owner covers adapter opening, root reads, gate reads and local
+/// admission. Every returned outcome attempts release, including failures before
+/// local writes. A replaced owner cannot release its successor's generation.
+async fn with_claim<F, Fut>(context: &Context, plan: &Plan, work: F) -> Result<bool>
+where
+    F: FnOnce(run_plan::Lease) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
+    let db = context.dbr().await?.control().await?;
+    if !plan.execution_requested {
+        ledger::request(db, plan.run_id).await?;
+    }
+    let lease = ledger::claim(db, plan.run_id).await?;
+    let result = work(lease).await;
+    let error = result.as_ref().err().map(|e| format!("{e:#}"));
+    if let Err(error) = &result
+        && run_create::is_seed_invariant_error(error)
+        && let Err(failure) = ledger::fail(db, lease, &format!("{error:#}")).await
+    {
+        tracing::warn!(run_id=%plan.run_id,error=%failure,"could not mark failed admission");
+    }
+    let release = run_plan::release(db, lease, error.as_deref()).await;
+    let complete = result?;
+    release?;
+    Ok(complete)
+}
+
+/// Include adapter initialization and all root reads in one pre-claim deadline.
+/// Cancellation drops the read future; the surrounding owner still releases.
+async fn open_reader(
+    plan: &Plan,
+    store: impl std::future::Future<Output = Result<Arc<dyn BlobStorage>>>,
+    budget: Budget,
+    cancel: &CancellationToken,
+) -> Result<RunReader> {
+    let read = async {
+        let store = store.await?;
+        RunReader::open(
+            store,
+            plan.manifest
+                .as_ref()
+                .context("run plan is not published")?,
+            plan.limits.0.clone(),
+            plan.run_id,
+            cancel,
+        )
+        .await
+    };
+    tokio::select! { biased;
+        _ = cancel.cancelled() => anyhow::bail!("run admission cancelled"),
+        _ = tokio::time::sleep_until(budget.deadline) => anyhow::bail!("run admission metadata deadline exceeded"),
+        result = read => result,
+    }
+}
+
+async fn admit(
+    context: &Context,
+    plan: &Plan,
+    reader: &RunReader,
+    config: crate::db::workflows::run_creation::Config,
+    cancel: &CancellationToken,
+    lease: run_plan::Lease,
+) -> Result<bool> {
     let router = context.dbr().await?;
     let db = router.control().await?;
     ensure!(
@@ -122,7 +191,9 @@ pub(crate) async fn resume_verified(
     snapshot_template["profile"] = json!({"scorecard":{"gates":gates}});
     let mut gate_counts = BTreeMap::new();
     let mut expected = BTreeMap::new();
-    let metadata_budget = Budget::standard();
+    let mut clock = lease::Clock::new();
+    // Keep the whole gate traversal bounded, not a fresh full allowance per file.
+    let metadata_deadline = Budget::standard().deadline;
     for shard in &reader.manifest.shards {
         let last_index = i32::from(shard.run_shard) + (shard.chunk_count - 1) * 128;
         let last = ChunkIdentity {
@@ -148,8 +219,9 @@ pub(crate) async fn resume_verified(
             shard.case_count,
             &reader.limits,
         )?;
-        let budget = metadata_budget;
         while let Some(reference) = chain.next().cloned() {
+            let mut budget = clock.budget(db, lease).await?;
+            budget.deadline = budget.deadline.min(metadata_deadline);
             let page: GateCountPage = document(
                 reader.store.as_ref(),
                 &reference,
@@ -182,109 +254,206 @@ pub(crate) async fn resume_verified(
                 .all(|a| expected.contains_key(&a.run_shard)),
         "placement assignments differ from plan"
     );
-    if !plan.execution_requested {
-        ledger::request(db, plan.run_id).await?;
-    }
-    let lease = ledger::claim(db, plan.run_id).await?;
-    let result=async {
-        let fresh=run_plan::load(db,plan.run_id).await?.context("plan disappeared")?;
-        let mut state:BTreeMap<i16,Manifest>=serde_json::from_value(fresh.admission_state.0)?;
+    let seed = ledger::placement::Seed {
+        run_id: plan.run_id,
+        draft: &draft,
+        snapshot: &snapshot_template,
+        expected: &expected,
+        gate_counts: &gate_counts,
+    };
+    async {
+        let fresh = run_plan::load(db, plan.run_id)
+            .await?
+            .context("plan disappeared")?;
+        let mut state: BTreeMap<i16, Manifest> = serde_json::from_value(fresh.admission_state.0)?;
         if fresh.admission_cursor < fresh.chunk_cursor {
-            let mut cursor=IndexCursor::new(reader.manifest.chunks.clone(),IndexKind::RunChunks,fresh.admission_cursor,reader.manifest.chunk_count)?;
-            let mut next=fresh.admission_cursor;
+            let mut cursor = IndexCursor::new(
+                reader.manifest.chunks.clone(),
+                IndexKind::RunChunks,
+                fresh.admission_cursor,
+                reader.manifest.chunk_count,
+            )?;
+            let mut next = fresh.admission_cursor;
             for _ in 0..config.case_page_budget {
-                ledger::renew(db,lease).await?;
-                let Some((entry,bytes))=cursor.next(reader.store.as_ref(),&reader.limits,Budget::standard(),cancel).await? else {break};
-                let page:RunChunkPage=decode(&entry.object.verify(&bytes,&reader.limits)?)?;
+                let budget = clock.budget(db, lease).await?;
+                let Some((entry, bytes)) = cursor
+                    .next(reader.store.as_ref(), &reader.limits, budget, cancel)
+                    .await?
+                else {
+                    break;
+                };
+                let page: RunChunkPage = decode(&entry.object.verify(&bytes, &reader.limits)?)?;
                 page.validate(&reader.limits)?;
-                ensure!(page.run_id == plan.run_id && page.chunk_index_start == entry.range_start && page.chunk_index_end == entry.range_end
-                    && page.chunk_index_start == next, "admission chunk page is not contiguous");
-                let mut placements=BTreeMap::<&str,Vec<RunChunkDraft>>::new();
+                ensure!(
+                    page.run_id == plan.run_id
+                        && page.chunk_index_start == entry.range_start
+                        && page.chunk_index_end == entry.range_end
+                        && page.chunk_index_start == next,
+                    "admission chunk page is not contiguous"
+                );
+                let mut placements = BTreeMap::<&str, Vec<RunChunkDraft>>::new();
                 for chunk in &page.chunks {
-                    ensure!(chunk.run_shard == (chunk.chunk_index % 128) as i16 && chunk.ordinal_start == chunk.chunk_index*100
-                        && chunk.ordinal_end == ((i64::from(chunk.chunk_index)+1)*100).min(i64::from(reader.dataset.case_count)) as i32
-                        && chunk.chunk_id == identity::uuid_from_json(&json!({"run_id":plan.run_id,"chunk_index":chunk.chunk_index}))?, "chunk differs from frozen scheduling policy");
-                    let assignment=plan.assignments.iter().find(|a|a.run_shard == chunk.run_shard).context("unassigned chunk shard")?;
-                    state.entry(chunk.run_shard).or_default().push(&ChunkIdentity { chunk_id:chunk.chunk_id,run_shard:chunk.run_shard,ordinal_start:chunk.ordinal_start,ordinal_end:chunk.ordinal_end })?;
-                    placements.entry(&assignment.database_alias).or_default().push(RunChunkDraft { chunk_id:chunk.chunk_id,run_shard:chunk.run_shard,
-                        ordinal_start:chunk.ordinal_start,ordinal_end:chunk.ordinal_end,profile_group_id:chunk.profile_group_id.clone() });
+                    ensure!(
+                        chunk.run_shard == (chunk.chunk_index % 128) as i16
+                            && chunk.ordinal_start == chunk.chunk_index * 100
+                            && chunk.ordinal_end
+                                == ((i64::from(chunk.chunk_index) + 1) * 100)
+                                    .min(i64::from(reader.dataset.case_count))
+                                    as i32
+                            && chunk.chunk_id
+                                == identity::uuid_from_json(
+                                    &json!({"run_id":plan.run_id,"chunk_index":chunk.chunk_index})
+                                )?,
+                        "chunk differs from frozen scheduling policy"
+                    );
+                    let assignment = plan
+                        .assignments
+                        .iter()
+                        .find(|a| a.run_shard == chunk.run_shard)
+                        .context("unassigned chunk shard")?;
+                    state
+                        .entry(chunk.run_shard)
+                        .or_default()
+                        .push(&ChunkIdentity {
+                            chunk_id: chunk.chunk_id,
+                            run_shard: chunk.run_shard,
+                            ordinal_start: chunk.ordinal_start,
+                            ordinal_end: chunk.ordinal_end,
+                        })?;
+                    placements
+                        .entry(&assignment.database_alias)
+                        .or_default()
+                        .push(RunChunkDraft {
+                            chunk_id: chunk.chunk_id,
+                            run_shard: chunk.run_shard,
+                            ordinal_start: chunk.ordinal_start,
+                            ordinal_end: chunk.ordinal_end,
+                            profile_group_id: chunk.profile_group_id.clone(),
+                        });
                 }
-                for (alias,chunks) in placements {
-                    ledger::renew(db,lease).await?;
-                    router.run_database_operation(alias,"immutable_plan_seed",async {
-                        let local=router.execution_database(alias).await?;
-                        let mut tx=local.begin().await?;
-                        sqlx::query("SET LOCAL statement_timeout='30s'").execute(&mut *tx).await?;
-                        run_create::upsert_dataset_version(&mut tx,draft.dataset_version_id,draft.dataset_id,&draft.dataset_version).await?;
-                        let status=if alias == router.control_database_alias() {"creating"} else {"pending"};
-                        run_create::insert_run_create(&mut tx,plan.run_id,&draft,status).await?;
-                        let shards=chunks.iter().map(|c|c.run_shard).collect::<std::collections::BTreeSet<_>>();
-                        for shard in shards {
-                            // Retain policy once, materializing only the current
-                            // local snapshot instead of one copy per shard.
-                            let mut snapshot=snapshot_template.clone();
-                            snapshot["settlement_plan"]=json!({"version":1,"shards":{shard.to_string():expected[&shard]}});
-                            snapshot["gate_planned_counts"]=gate_counts[&shard].clone();
-                            crate::db::shard_write_fence::lock_shared(&mut tx,plan.run_id,shard).await?;
-                            sqlx::query("INSERT INTO local_shard_admissions(run_id,run_shard,database_alias,write_epoch,state) VALUES($1,$2,$3,1,'open') ON CONFLICT DO NOTHING")
-                                .bind(plan.run_id).bind(shard).bind(alias).execute(&mut *tx).await?;
-                            let admitted:bool=sqlx::query_scalar("SELECT database_alias=$3 AND write_epoch=1 AND state='open' FROM local_shard_admissions WHERE run_id=$1 AND run_shard=$2")
-                                .bind(plan.run_id).bind(shard).bind(alias).fetch_one(&mut *tx).await?;
-                            if !admitted {return Err(run_create::seed_invariant_error("execution admission changed while seeding"));}
-                            sqlx::query("INSERT INTO run_snapshots(run_id,run_shard,run_key,dataset_id,dataset_version_id,dataset_version,evaluation_profile_id,evaluation_profile_version,profile_version_id,profile_hash,aggregation_policy_id,aggregation_policy_version,aggregation_policy_hash,agent_provider,agent_name,agent_version,prompt_config_id,prompt_config_version,config_snapshot,expected_execution_count) SELECT id,$2,run_key,dataset_id,dataset_version_id,dataset_version,evaluation_profile_id,evaluation_profile_version,profile_version_id,profile_hash,aggregation_policy_id,aggregation_policy_version,aggregation_policy_hash,agent_provider,agent_name,agent_version,prompt_config_id,prompt_config_version,$3,$4 FROM runs WHERE id=$1 ON CONFLICT DO NOTHING")
-                                .bind(plan.run_id).bind(shard).bind(&snapshot).bind(expected[&shard].case_count).execute(&mut *tx).await?;
-                            let matches:bool=sqlx::query_scalar("SELECT config_snapshot=$3 AND expected_execution_count=$4 FROM run_snapshots WHERE run_id=$1 AND run_shard=$2")
-                                .bind(plan.run_id).bind(shard).bind(&snapshot).bind(expected[&shard].case_count).fetch_one(&mut *tx).await?;
-                            if !matches {return Err(run_create::seed_invariant_error("local run snapshot changed"));}
-                        }
-                        for batch in chunks.chunks((config.case_batch_size / 100).max(1)) {
-                            run_create::bulk_insert_run_chunks(&mut tx,plan.run_id,draft.dataset_version_id,batch).await?;
-                        }
-                        tx.commit().await?;
-                        Ok(())
-                    }).await?;
+                for (alias, chunks) in placements {
+                    clock
+                        .database(
+                            db,
+                            lease,
+                            cancel,
+                            router.run_database_operation(alias, "immutable_plan_seed", async {
+                                let local = router.execution_database(alias).await?;
+                                let mut tx = local.begin().await?;
+                                sqlx::query("SET LOCAL statement_timeout='30s'")
+                                    .execute(&mut *tx)
+                                    .await?;
+                                let status = if alias == router.control_database_alias() {
+                                    "creating"
+                                } else {
+                                    "pending"
+                                };
+                                seed.write(
+                                    &mut tx,
+                                    alias,
+                                    status,
+                                    &chunks,
+                                    (config.case_batch_size / 100).max(1),
+                                )
+                                .await?;
+                                tx.commit().await?;
+                                Ok(())
+                            }),
+                        )
+                        .await?;
                 }
-                ledger::acknowledge(db,lease,next,page.chunk_index_end,&state).await?;
-                next=page.chunk_index_end;
-                if next == reader.manifest.chunk_count {break;}
+                ledger::acknowledge(db, lease, next, page.chunk_index_end, &state).await?;
+                next = page.chunk_index_end;
+                if next == reader.manifest.chunk_count {
+                    break;
+                }
             }
         }
-        let fresh=run_plan::load(db,plan.run_id).await?.context("plan disappeared")?;
-        if fresh.admission_cursor != fresh.chunk_cursor {return Ok(false);}
-        if state != expected {return Err(run_create::seed_invariant_error("admitted membership differs from frozen plan"));}
+        let fresh = run_plan::load(db, plan.run_id)
+            .await?
+            .context("plan disappeared")?;
+        if fresh.admission_cursor != fresh.chunk_cursor {
+            return Ok(false);
+        }
+        if state != expected {
+            return Err(run_create::seed_invariant_error(
+                "admitted membership differs from frozen plan",
+            ));
+        }
+        let mut placements = BTreeMap::<&str, Vec<i16>>::new();
         for assignment in plan.assignments.iter() {
-            ledger::renew(db,lease).await?;
-            let local=router.execution_database(&assignment.database_alias).await?;
-            let mut actual=Manifest::default();
-            loop {
-                let last=actual.last.as_ref().map_or(-1,|c|c.ordinal_start);
-                let last_id=actual.last.as_ref().map_or(Uuid::nil(),|c|c.chunk_id);
-                let page:Vec<(Uuid,i16,i32,i32,bool)>=router.run_database_operation(&assignment.database_alias,"verify_admitted_chunks",async {
-                    Ok(sqlx::query_as("SELECT id,run_shard,ordinal_start,ordinal_end,dataset_version_id=$5 AND profile_group_id='default' AND status='pending' AND dispatched_at IS NULL FROM run_chunks WHERE run_id=$1 AND run_shard=$2 AND (ordinal_start,id)>($3,$4) ORDER BY ordinal_start,id LIMIT 256")
-                        .bind(plan.run_id).bind(assignment.run_shard).bind(last).bind(last_id).bind(draft.dataset_version_id).fetch_all(&local).await?)
-                }).await?;
-                if page.is_empty() {break;}
-                for (chunk_id,run_shard,ordinal_start,ordinal_end,valid) in page {
-                    if !valid {return Err(run_create::seed_invariant_error("local chunk immutable metadata changed"));}
-                    actual.push(&ChunkIdentity{chunk_id,run_shard,ordinal_start,ordinal_end}).map_err(|error|run_create::seed_invariant_error(format!("local chunk coverage is invalid: {error:#}")))?;
-                }
-                ledger::renew(db,lease).await?;
-            }
-            if actual != expected[&assignment.run_shard] {return Err(run_create::seed_invariant_error("local placement has incomplete or unexpected chunk membership"));}
+            placements
+                .entry(&assignment.database_alias)
+                .or_default()
+                .push(assignment.run_shard);
         }
-        ledger::activate(db,lease,&expected).await?;
+        for (alias, mut shards) in placements {
+            shards.sort_unstable();
+            let mut actual = BTreeMap::<i16, Manifest>::new();
+            let mut after = (-1_i16, -1_i32, Uuid::nil());
+            loop {
+                let page: Vec<(Uuid, i16, i32, i32, bool)> = clock
+                    .database(
+                        db,
+                        lease,
+                        cancel,
+                        router.run_database_operation(alias, "verify_admitted_chunks", async {
+                            // Resolve current placement state once for this bounded page,
+                            // never retain mutable placement permission across pages.
+                            let local = router.execution_database(alias).await?;
+                            ledger::placement::read_chunks(
+                                &local,
+                                plan.run_id,
+                                draft.dataset_version_id,
+                                alias,
+                                &shards,
+                                after,
+                            )
+                            .await
+                        }),
+                    )
+                    .await?;
+                if page.is_empty() {
+                    break;
+                }
+                for (chunk_id, run_shard, ordinal_start, ordinal_end, valid) in page {
+                    if !valid {
+                        return Err(run_create::seed_invariant_error(
+                            "local chunk immutable metadata or admission changed",
+                        ));
+                    }
+                    actual
+                        .entry(run_shard)
+                        .or_default()
+                        .push(&ChunkIdentity {
+                            chunk_id,
+                            run_shard,
+                            ordinal_start,
+                            ordinal_end,
+                        })
+                        .map_err(|error| {
+                            run_create::seed_invariant_error(format!(
+                                "local chunk coverage is invalid: {error:#}"
+                            ))
+                        })?;
+                    after = (run_shard, ordinal_start, chunk_id);
+                }
+            }
+            if actual.len() != shards.len()
+                || shards
+                    .iter()
+                    .any(|shard| actual.get(shard) != expected.get(shard))
+            {
+                return Err(run_create::seed_invariant_error(
+                    "local placement has incomplete or unexpected chunk membership",
+                ));
+            }
+        }
+        ensure!(!cancel.is_cancelled(), "run admission cancelled");
+        ledger::activate(db, lease, &expected).await?;
         Ok(true)
-    }.await;
-    let error = result.as_ref().err().map(|e| format!("{e:#}"));
-    if let Err(error) = &result
-        && run_create::is_seed_invariant_error(error)
-    {
-        ledger::fail(db, lease, &format!("{error:#}")).await?;
     }
-    let release = run_plan::release(db, lease, error.as_deref()).await;
-    let complete = result?;
-    release?;
-    Ok(complete)
+    .await
 }
 
 /// Resumes one bounded discovery page. A failed run yields its lease and does
@@ -304,12 +473,22 @@ pub(crate) async fn recover(
     let mut stats = crate::db::workflows::run_creation::RunCreationRecoveryStats::default();
     for id in ids {
         stats.claimed_runs += 1;
-        let plan = run_plan::load(db, id).await?.context("plan disappeared")?;
+        let budget = Budget::standard();
         let result = async {
-            let store = context
-                .storage(&plan.storage_binding_hash, &plan.limits)
+            let plan = run_plan::load(db, id).await?.context("plan disappeared")?;
+            let plan = &plan;
+            with_claim(context, plan, |lease| async move {
+                let cancel = CancellationToken::new();
+                let reader = open_reader(
+                    plan,
+                    context.storage(&plan.storage_binding_hash, &plan.limits),
+                    budget,
+                    &cancel,
+                )
                 .await?;
-            resume(context, &plan, store, config, &CancellationToken::new()).await
+                admit(context, plan, &reader, config, &cancel, lease).await
+            })
+            .await
         }
         .await;
         match result {

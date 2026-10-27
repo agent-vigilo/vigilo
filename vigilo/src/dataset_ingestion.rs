@@ -1,8 +1,8 @@
 //! Resumable dataset publication, independent of run creation and worker policy.
 //!
 //! Preparation validates bounded inputs and duplicate IDs before remote work.
-//! A foreground caller claims one upload, records each exact object before PUT,
-//! and acknowledges only completed verified bytes. Recovery rebuilds deterministic
+//! A foreground caller claims one upload, registers bounded groups of exact case
+//! files before PUT, and atomically checkpoints verified contiguous prefixes. Recovery rebuilds deterministic
 //! batches from the same logical input, skips acknowledged writes, and re-verifies
 //! all membership before generation-fenced catalog publication. Explicit CLI
 //! resume/cleanup invocations own scheduling; no local file is delegated to a
@@ -39,6 +39,7 @@ use crate::{
     },
 };
 
+mod batches;
 pub(crate) mod input;
 use input::Prepared;
 
@@ -215,6 +216,9 @@ pub(crate) async fn ingest(
         tokio::io::BufReader::new(tokio::fs::File::open(prepared.records.path()).await?);
     let mut start = 0;
     let mut end = 0;
+    let mut offset = 0_u64;
+    let mut batch_offset = 0_u64;
+    let mut groups = batches::Uploader::new(db, store, upload, lease, prepared, cancel);
     let mut builder = CaseBatchBuilder::new(prepared.identity.dataset_id, 0, limits)?;
     loop {
         ensure!(!cancel.is_cancelled(), "dataset upload cancelled");
@@ -242,7 +246,8 @@ pub(crate) async fn ingest(
                 StorageFormat::CaseBatch,
                 &bytes,
             )?;
-            put(db, store, lease, &batch, bytes, cancel).await?;
+            groups.push(batch, batch_offset, bytes).await?;
+            batch_offset = offset;
             start = end;
             builder = CaseBatchBuilder::new(prepared.identity.dataset_id, start, limits)?;
             ensure!(
@@ -250,6 +255,9 @@ pub(crate) async fn ingest(
                 "single case cannot fit in a batch"
             );
         }
+        offset = offset
+            .checked_add(line.len() as u64)
+            .context("prepared offset overflow")?;
         end = record
             .case_ordinal
             .checked_add(1)
@@ -265,11 +273,13 @@ pub(crate) async fn ingest(
         StorageFormat::CaseBatch,
         &bytes,
     )?;
-    put(db, store, lease, &batch, bytes, cancel).await?;
+    groups.push(batch, batch_offset, bytes).await?;
+    groups.flush().await?;
     ledger::finalizing(db, lease).await?;
     // Re-read actual remote membership, not just ledger counters or the local
     // source. Acknowledged corruption/missing objects cannot activate a dataset.
     let mut identity = DatasetIdentityBuilder::new(&prepared.fields, limits)?;
+    let mut read_lease = batches::ReadLease::new();
     let mut after = -1;
     let mut next = 0;
     loop {
@@ -282,8 +292,7 @@ pub(crate) async fn ingest(
                 batch.range_start == Some(next),
                 "stored batch membership gap or overlap"
             );
-            let budget = Budget::standard();
-            ledger::renew(db, lease, false).await?;
+            let budget = read_lease.budget(db, lease).await?;
             let bytes = read_bytes(store, &batch.reference, budget, cancel).await?;
             let proof = batch.reference.verify(&bytes, limits)?;
             let decoded = decode_case_batch(&proof)?;

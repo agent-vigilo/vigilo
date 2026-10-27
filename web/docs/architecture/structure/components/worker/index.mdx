@@ -21,9 +21,10 @@ Describes the major internal responsibilities of the worker runtime.
 ## Notes
 
 - Workers use `VIGILO_STORAGE_CONFIG` to resolve the frozen storage owner, read
-  configuration and assigned case files through the provider-neutral adapter,
-  and verify complete files and exact chunk membership before execution. Large
-  assignments use a bounded verification/reread pass. See
+  configuration and assigned case files through a shared, bounded immutable-byte
+  cache, and fetch misses through the provider-neutral adapter. Every use verifies
+  complete files and exact chunk membership before execution. Large assignments
+  use a bounded verification/reread pass. See
   [Run Preparation](/docs/architecture/case-storage/run-preparation).
 
 - Workers consume `run.chunk.ready` broker messages carrying `run_id`,

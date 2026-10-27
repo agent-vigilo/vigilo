@@ -1,12 +1,19 @@
 flowchart TD
-    bytes["Downloaded object bytes + expected reference"]
+    lookup{"Worker immutable-byte cache hit?<br/>Exact binding and full reference"}
+    fetch["Bounded storage GET on miss<br/>or publication/admission read"]
+    bytes["Complete object bytes + expected reference"]
+    retain["Worker retains byte-verified files up to 1 MiB<br/>8 MiB charged / 256 entries; LRU eviction"]
     verify["Verify<br/>limits, byte count, BLAKE3 digest"]
     decode["Decode<br/>canonical JSON and field types"]
     validate["Validate<br/>ranges, counts, case content<br/>complete files at ingestion and execution"]
     ready["Use locally validated content<br/>publication checks still apply"]
     reject["Reject content"]
 
+    lookup -->|"Yes: owned copy"| bytes
+    lookup -->|"No"| fetch
+    fetch --> bytes
     bytes --> verify
+    verify -.->|"Worker byte proof; semantic checks still required"| retain
     verify -->|"VerifiedObject"| decode
     decode -->|"Decoded content"| validate
     validate -->|"All checks succeed"| ready

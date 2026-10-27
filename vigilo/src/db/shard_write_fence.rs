@@ -49,3 +49,22 @@ pub(crate) async fn lock_exclusive(
     .await?;
     Ok(())
 }
+
+/// Acquire a bounded set of shared fences in ascending shard order, matching
+/// cancellation's exclusive lock order. Each shard keeps its existing lock key.
+pub(crate) async fn lock_shared_many(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    shards: &[i16],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !shards.is_empty()
+            && shards.len() <= 128
+            && shards.iter().all(|s| (0..128).contains(s))
+            && shards.windows(2).all(|w| w[0] < w[1]),
+        "invalid ordered shard fences"
+    );
+    sqlx::query("WITH ordered AS MATERIALIZED (SELECT shard FROM unnest($2::smallint[]) AS shard ORDER BY shard) SELECT pg_advisory_xact_lock_shared(hashtextextended($1::uuid::text,shard::bigint)) FROM ordered ORDER BY shard")
+        .bind(run_id).bind(shards).execute(&mut **tx).await?;
+    Ok(())
+}

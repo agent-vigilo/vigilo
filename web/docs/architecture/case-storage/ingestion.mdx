@@ -40,6 +40,13 @@ the total under `identity.case_count`. Lease and expiry timestamps show when wor
 can be reclaimed; `cleanup_after` shows the quarantine deadline and `cleaned_at`
 records completed cleanup. File bytes never enter these progress rows.
 
+Case-file progress commits in bounded groups, so status advances at checkpoints.
+Each group contains at most 64 files, 64 MiB of encoded payload, and 256 KiB of
+queued metadata. Every exact file reference is registered together before any
+group upload. Files upload and verify individually, outside database transactions;
+one transaction acknowledges only a verified contiguous prefix. A failed group
+retains its exact ownership records for replay and cleanup.
+
 An operator or job scheduler runs `resume` with the original input after a failed
 invocation or process restart. Coordinators do not discover or retain local
 input paths. A live lease rejects competing resumptions; a terminated process's
@@ -85,6 +92,12 @@ UUIDs with 1 MiB sort runs and merges of at most 32 readers. One preparation/upl
 holds the process's 8 GiB validation-spool reservation. Remote transfer uses the
 separate shared [object I/O budgets](./formats/#resource-budgets). Batch case and
 byte caps both apply; they do not change execution chunk size.
+
+Checkpoint preparation retains small headers, references, and offsets into the
+canonical preparation spool. Upload reconstructs one file at a time from that
+spool and verifies its digest before remote I/O. It adds no group payload spool
+and does not retain 64 file payloads in memory. The file count and byte limits
+also bound the work that may need replay after a failed checkpoint.
 
 ## Storage Owner Configuration
 
@@ -132,11 +145,21 @@ This lets host creators and container workers share one owner configuration.
 <Mermaid value={ingestionState} />
 
 One upload lease owns a generation. Object registration and acknowledgement check
-that generation under a row lock. Each remote operation receives its finite
-monotonic deadline before the authority check and lease renewal. A paused owner
-therefore cannot start a fresh transfer after its admitted window expires.
+that generation under a row lock, including a live-time check after acquiring the
+lock. A case-file group receives a 150-second monotonic admission deadline
+before registration and lease renewal. Each file retains its normal 120-second
+operation budget, capped by that admission deadline. After 30 seconds of work,
+the next completed file triggers a prefix
+checkpoint and the remaining files require fresh admission. A paused owner cannot mint a fresh transfer window
+without a live authority check. Single metadata objects retain their own bounded
+operation and fenced checkpoint.
 No database transaction spans remote storage work. Database operations have a
 30-second outer budget covering pool and lock waits as well as SQL execution.
+
+Read-only finalization renews authority at the first file and when 60 seconds
+have elapsed, instead of renewing per file. Each read has its own 120-second
+deadline within the five-minute lease. Every file is still verified, and final
+publication checks live authority again.
 
 Finalization verifies contiguous ranges, exact case counts, source/membership
 identity, unique case IDs, and bounded index coverage. Catalog insertion and the

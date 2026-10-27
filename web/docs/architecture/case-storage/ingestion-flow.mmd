@@ -3,14 +3,19 @@ flowchart TD
     prepare --> reuse{"Matching finalized catalog?"}
     reuse -->|"Yes"| ready["Return compact dataset reference"]
     reuse -->|"No"| claim["Register upload and claim live generation"]
-    claim --> plan["Record exact file ownership before storage I/O"]
+    claim --> group["Bound case-file group<br/>retain headers and source offsets"]
+    group --> plan["Register all exact group references<br/>live generation and shared deadline"]
     plan --> acknowledged{"File acknowledged?"}
     acknowledged -->|"No"| put["Conditional upload or verify exact replay"]
-    put --> ack["Acknowledge completed file<br/>advance contiguous case progress"]
-    acknowledged -->|"Yes"| next{"More bounded batches?"}
-    ack --> next
-    next -->|"Yes"| plan
-    next -->|"No"| verify["Re-read and validate stored membership<br/>build bounded indexes and manifest"]
+    put --> checkpoint{"Group complete or 30 seconds elapsed?"}
+    acknowledged -->|"Yes"| checkpoint
+    checkpoint -->|"No"| acknowledged
+    checkpoint -->|"Yes"| ack["Atomically acknowledge verified prefix<br/>advance contiguous case progress"]
+    ack --> remaining{"Registered files remain?"}
+    remaining -->|"Yes"| plan
+    remaining -->|"No"| next{"More bounded groups?"}
+    next -->|"Yes"| group
+    next -->|"No"| verify["Re-read and validate every stored file<br/>renew by elapsed time<br/>build bounded indexes and manifest"]
     verify --> fence{"Generation still authoritative?"}
     fence -->|"Yes"| publish["Atomically publish catalog and finalized state"]
     publish --> ready

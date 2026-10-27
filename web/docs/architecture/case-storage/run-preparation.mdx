@@ -76,18 +76,29 @@ finalization projection from the same shard metadata in its atomic commit.
 
 <Mermaid value={preparationState} />
 
-The existing run creation lease lasts five minutes. Each claim also increments a
+The run creation lease lasts five minutes. Each claim also increments a
 plan generation. Mutations lock the run, then recheck the current owner,
 generation, status, and wall-clock expiry. No SQL transaction spans storage I/O.
 Read-only traversal renews the lease periodically, without a SQL mutation for
-every dataset file. Every remote write gets a finite operation deadline before
-its own authority check.
+every dataset file. Each group of remote writes gets a finite admission window
+before its authority check.
 
-File ownership is recorded before PUT. Acknowledgement follows successful
-creation and byte verification; chunk progress advances only across consecutive
-chunk ranges. Failed or uncertain writes retain their exact keys. Replaying a
-range with different bytes fails; acknowledged files are verified again without
-being uploaded again. Abandoned connection probes are reconciled by exact key.
+File ownership is recorded in bounded groups before PUT. A group contains at most
+64 files, 256 KiB of reference metadata, and 8 MiB of encoded payload. A single
+larger document admitted by its storage format is handled alone. Files are created
+and verified in dependency order: index levels flush before their parents are
+built, and gate chains are written from tail to head. The writer retains one
+bounded group plus the document being encoded; it does not collect all plan files.
+
+Acknowledgement follows successful creation and complete byte verification.
+After 30 seconds in a group, the writer checkpoints only its verified
+prefix and checks authority again before continuing. Each transfer keeps its
+120-second allowance within a 150-second window minted before registration.
+Chunk progress advances only across consecutive chunk ranges. A failed grouped
+acknowledgement changes no progress. Failed or uncertain writes retain their exact
+keys. Replaying a range with different bytes fails; acknowledged files are
+verified again without being uploaded again. Abandoned connection probes are
+reconciled by exact key.
 
 Choose `--run-id` before starting, or retain the ID included in command errors.
 After an interruption, repeat the command with the same run ID, profile, dataset
@@ -102,6 +113,18 @@ normal foreign-key integrity checks still apply.
 Frozen evaluator artifacts and placements are reused even when registry state or
 default placement policy changes. Changed source identity, profile, limits, or
 physical storage binding is rejected.
+
+Recovery claims the run before opening its storage adapter or reading roots,
+configuration, and gate files. Competing coordinators cannot duplicate those
+reads for the same live lease. Adapter initialization and root reads share a
+120-second deadline minted before the claim; the complete gate traversal has
+its own 120-second deadline. Returned errors and cancellation release ownership
+when control storage is reachable; process death falls back to lease expiry.
+Each coordinator processes recovery candidates sequentially. A failed candidate
+is deferred and the next candidate can proceed, but slow reads delay later
+candidates until the bounded read finishes or fails.
+The foreground creator reuses its already verified roots and claims authority
+before gate reads and local admission. Preparation-only runs remain held.
 
 `run status` and `run watch` expose `creation_progress.plan_status` and
 `creation_progress.plan_chunk_cursor`. The cursor counts contiguous acknowledged
@@ -127,6 +150,31 @@ shard with the published plan. One fenced control transaction publishes routes
 and dispatch cursors and changes the run to `pending`. No case payload or
 per-case membership table is required in either database.
 
+Admission groups each chunk page by execution database. Shared shard fences are
+acquired in ascending shard order before local writes, so cancellation tombstones
+and moved ownership are checked under the same locks. Admission rows and snapshots
+are inserted and compared in sets of at most 64 shards, targeting at most 8 MiB
+of logical snapshot metadata per statement. A single configuration admitted by
+the storage format may exceed that target and is handled alone. The common
+snapshot is transmitted once per set; SQL combines it with each shard's frozen
+manifest and gate counts. Chunk inserts also have ceilings of 256 metadata rows
+and 256 KiB, within the existing configured case-count limit.
+
+Local verification reads up to 256 ordered chunks across a database's assigned
+shards per query and folds each shard's identity independently. Placement
+serviceability is resolved once for each bounded database operation, including
+every verification page. Draining placements can replay metadata; activation
+still requires active placements. No mutable placement permission is cached for
+the lifetime of admission.
+
+Admission renews its creation lease on the first operation and after 60 seconds,
+while every control checkpoint and activation still checks live ownership and
+generation. Blob reads have 120-second deadlines minted before renewal. Local
+database operations have a 30-second outer deadline that includes placement
+resolution, pool and lock waits, and transaction completion. Cancellation or a
+timeout rolls back open local transactions; committed metadata remains exactly
+replayable if the control acknowledgement was lost.
+
 Workers hold a chunk lease and heartbeat while reading configuration and cases.
 They verify the claimed chunk against its immutable chunk file, traverse only
 the required dataset ranges, and check complete case files, including records
@@ -136,6 +184,23 @@ a bounded vector. Larger assignments verify first and then reread immutable
 files one at a time, preserving the encoded resident-byte budget. Storage
 failure follows the bounded chunk retry path, with the same lease fencing as
 agent and evaluator failure.
+
+Each worker command shares an immutable-byte cache across its run/shard contexts.
+It retains at most 256 files and 8 MiB of charged payload/reference bytes; files
+over 1 MiB bypass retention. Small bounded container overhead is additional.
+Cache keys include the verified physical storage binding and every object-reference
+field, including its digest and revision. Hits still undergo byte verification,
+decoding, complete-file validation and membership checks. Eviction or worker
+restart simply causes another verified storage read. A verified cached copy stays
+usable if the remote object becomes unavailable; a miss must fetch and verify it.
+Missing reads and bytes that fail integrity verification are never retained.
+
+The cache adds a fixed memory allowance to the existing per-assignment working
+budget. Returned buffers are owned copies, so an active reader cannot pin an
+evicted cache allocation. Concurrent misses may download independently; no lock
+is held over storage I/O. Cancellation and read deadlines apply to hits and misses.
+The cache holds no mutable lease, route or admission authority, and publication
+and admission reads bypass it.
 
 Chunk receipts retain actual execution evidence. Shard summaries apply the
 frozen per-gate planned counts, so cases that never execute still reduce gate

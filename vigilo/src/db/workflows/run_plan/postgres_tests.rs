@@ -51,6 +51,9 @@ use crate::{
 struct State {
     objects: HashMap<String, Vec<u8>>,
     creates: HashMap<String, u32>,
+    reads: usize,
+    blocked_read: Option<(String, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    delayed_put: Option<(String, std::time::Duration)>,
     stop: Option<String>,
 }
 #[derive(Clone, Default)]
@@ -75,6 +78,21 @@ impl Transport for Memory {
         _: usize,
         _: std::time::Duration,
     ) -> std::result::Result<(), StorageError> {
+        let delay = {
+            let mut state = self.0.lock().unwrap();
+            if state
+                .delayed_put
+                .as_ref()
+                .is_some_and(|(key, _)| r.key.contains(key))
+            {
+                state.delayed_put.take().map(|(_, delay)| delay)
+            } else {
+                None
+            }
+        };
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let bytes = tokio::fs::read(path).await.unwrap();
         let mut s = self.0.lock().unwrap();
         if s.objects.contains_key(&r.key) {
@@ -93,10 +111,16 @@ impl Transport for Memory {
         r: &ObjectRef,
         _: std::time::Duration,
     ) -> std::result::Result<Download, StorageError> {
-        let bytes = self
-            .0
-            .lock()
-            .unwrap()
+        let block = self.0.lock().unwrap().blocked_read.clone();
+        if let Some((key, entered, resume)) = block
+            && r.key == key
+        {
+            entered.notify_one();
+            resume.notified().await;
+        }
+        let mut state = self.0.lock().unwrap();
+        state.reads += 1;
+        let bytes = state
             .objects
             .get(&r.key)
             .cloned()
@@ -125,19 +149,27 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(db: &PgPool) -> Self {
+        Self::with_size(db, 205, 7, 2).await
+    }
+    async fn with_size(
+        db: &PgPool,
+        case_count: usize,
+        batch_cases: usize,
+        page_entries: usize,
+    ) -> Self {
         let file = tempfile::NamedTempFile::new().unwrap();
         let dataset_id = Uuid::now_v7();
         let mut source = format!(
             "{}\n",
             json!({"schema":"vigilo/dataset-upload/v1","fields":{"dataset_id":dataset_id,"dataset_version":"fixture"}})
         );
-        for ordinal in 0..205 {
-            source.push_str(&format!("{}\n",json!({"id":Uuid::from_u128(ordinal+1),"task_type":"classification","input":{"text":"hello"},"tags":if ordinal%2==0{vec!["selected"]}else{vec![]}})));
+        for ordinal in 0..case_count {
+            source.push_str(&format!("{}\n",json!({"id":Uuid::from_u128((ordinal+1) as u128),"task_type":"classification","input":{"text":"hello"},"tags":if ordinal%2==0{vec!["selected"]}else{vec![]}})));
         }
         std::fs::write(file.path(), source).unwrap();
         let mut limits = FormatLimits::default();
-        limits.batch.max_cases = 7;
-        limits.page_entries = 2;
+        limits.batch.max_cases = batch_cases;
+        limits.page_entries = page_entries;
         let cancel = CancellationToken::new();
         let prepared = prepare_input(
             file.path().into(),
@@ -218,9 +250,9 @@ impl Fixture {
             prompt_config_id: "default".into(),
             prompt_config_version: "v1".into(),
             config_snapshot: snapshot,
-            expected_execution_count: 205,
+            expected_execution_count: case_count as i32,
         };
-        let assignments = (0..3)
+        let assignments = (0..case_count.div_ceil(100).min(128) as i16)
             .map(|run_shard| RunShardPlacementAssignment {
                 run_shard,
                 database_alias: "primary".into(),
@@ -940,3 +972,59 @@ async fn admission_rejects_changed_local_membership_after_acknowledgement(db: Pg
             .unwrap();
     assert_eq!(cursors, 0);
 }
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn placement_admission_batches_snapshot_statements_without_changing_shard_snapshots(
+    db: PgPool,
+) {
+    let f = Fixture::new(&db).await;
+    let lease = claim(&db, f.plan.run_id).await.unwrap();
+    f.prepare(&db, lease).await.unwrap();
+    sqlx::raw_sql("CREATE TABLE snapshot_statement_sizes(n bigint NOT NULL); CREATE FUNCTION observe_snapshot_statement() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO snapshot_statement_sizes SELECT count(*) FROM inserted; RETURN NULL; END $$; CREATE TRIGGER observe_snapshot_statement AFTER INSERT ON run_snapshots REFERENCING NEW TABLE AS inserted FOR EACH STATEMENT EXECUTE FUNCTION observe_snapshot_statement();").execute(&db).await.unwrap();
+    let plan = load(&db, f.plan.run_id).await.unwrap().unwrap();
+    assert!(
+        crate::run_admission::resume(
+            &runtime_context(&db),
+            &plan,
+            Arc::new(f.store),
+            crate::db::workflows::run_creation::Config::default(),
+            &f.cancel
+        )
+        .await
+        .unwrap()
+    );
+    let sizes: Vec<i64> = sqlx::query_scalar("SELECT n FROM snapshot_statement_sizes ORDER BY n")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        sizes,
+        vec![1, 2],
+        "each bounded placement page should insert its shard snapshots together"
+    );
+    let rows: Vec<(i16, i32, serde_json::Value)> = sqlx::query_as("SELECT run_shard,expected_execution_count,config_snapshot FROM run_snapshots WHERE run_id=$1 ORDER BY run_shard").bind(plan.run_id).fetch_all(&db).await.unwrap();
+    assert_eq!(rows.len(), 3);
+    for (shard, count, snapshot) in rows {
+        assert_eq!(count, if shard == 2 { 5 } else { 100 });
+        assert_eq!(snapshot["gate_planned_counts"]["gate_0"], count);
+        assert_eq!(
+            snapshot["settlement_plan"]["shards"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            snapshot["settlement_plan"]["shards"]
+                .get(shard.to_string())
+                .is_some()
+        );
+    }
+}
+
+#[path = "postgres_tests/admission.rs"]
+mod batched_admission;
+
+#[path = "postgres_tests/metadata.rs"]
+mod metadata;

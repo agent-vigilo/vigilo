@@ -1,10 +1,11 @@
 stateDiagram-v2
     [*] --> Preparing: Dataset and profile admitted
-    Preparing --> Preparing: Fenced file writes and explicit resume
+    Preparing --> Preparing: Register file group, verify bytes, checkpoint prefix
     Preparing --> Ready: Verified manifest published
     Ready --> Ready: Preparation-only run held
-    Ready --> Admitting: Execution requested
-    Admitting --> Admitting: Replay local commits and acknowledge pages
+    Ready --> Admitting: Execution requested and creation lease claimed
+    Admitting --> Ready: Read failure or caller interruption yields lease
+    Admitting --> Admitting: Replay bounded placement commits and acknowledge pages
     Admitting --> Failed: Immutable seed conflict
     Failed --> [*]: No dispatch
     Admitting --> Pending: Exact local coverage and fenced activation

@@ -188,8 +188,10 @@ incomplete uploads never become finalized references. Unknown outcomes after a
 lost response require verification or reconciliation, not blind overwrite.
 
 Ingestion has staging, finalizing, finalized, and aborted/expired states. These
-are workflow states, not provider APIs. A page is acknowledged only after its
-object is complete and verified. An acknowledged page has an ordinal range and
+are workflow states, not provider APIs. Case-file references are registered in
+bounded groups before remote writes, and verified contiguous coverage is
+acknowledged atomically at group checkpoints. Each acknowledged file is complete
+and verified. An acknowledged file has an ordinal range and
 content identity; replayed content must match. Finalization verifies all objects,
 unique case IDs, contiguous membership, and supported ordinal/count bounds in
 bounded passes. Lease/generation fencing prevents an expired publisher from

@@ -70,6 +70,7 @@ use super::{
         atomic_text,
     },
     model::{
+        DatabaseStatements,
         ExternalMeasurements,
         QueryDiagnostic,
         TableWrites,
@@ -103,6 +104,7 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
     let scope = harness.create_sample_scope(database_url, "sentinel")?;
 
     let first = harness.begin_measurement(&scope)?;
+    harness.storage_reader()?.probe()?;
     let response = HttpClient::new()
         .post(harness.agent_url())
         .json(&json!({"sentinel": true}))
@@ -119,6 +121,12 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
     drop(client);
     let first_measurement =
         harness.finish_measurement(&scope, first, BTreeMap::from([("sentinel".into(), 1)]))?;
+    if first_measurement.sql_databases.len() != 1
+        || first_measurement.sql_databases[0].role != "shared"
+        || first_measurement.sql_databases[0].calls.get("dml") != Some(&3)
+    {
+        bail!("shared-database statement attribution differs");
+    }
     if first_measurement.table_writes.get("collector_rows")
         != Some(&TableWrites {
             inserted: 1,
@@ -130,6 +138,17 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
             "table mutation sentinel differs: {:?}",
             first_measurement.table_writes
         );
+    }
+    for name in ["put_obj_ops", "get_obj_ops", "del_obj_ops"] {
+        if first_measurement
+            .storage_counters
+            .get(name)
+            .copied()
+            .unwrap_or(0)
+            < 1
+        {
+            bail!("signed object operation sentinel missing: {name}");
+        }
     }
     if first_measurement.http_requests != Some(1)
         || first_measurement.durable_counts.get("sentinel") != Some(&1)
@@ -143,14 +162,97 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
 
     let second = harness.begin_measurement(&scope)?;
     let second_measurement = harness.finish_measurement(&scope, second, BTreeMap::new())?;
+    // Preserve the historical collector's one WAL-position read. New setup
+    // checks must not inflate the workload's measured statement count.
+    if second_measurement.sql_calls != Some(1) {
+        bail!(
+            "idle collector statement overhead changed: {:?}",
+            second_measurement.sql_calls
+        );
+    }
     if second_measurement.table_writes.get("collector_rows") != Some(&TableWrites::default()) {
         bail!("table mutation delta retained prior sample writes");
+    }
+    if second_measurement
+        .storage_counters
+        .values()
+        .any(|value| *value != 0)
+    {
+        bail!("object-counter delta retained prior sample operations");
     }
     if second_measurement.http_requests != Some(0)
         || second_measurement.durable_counts.contains_key("sentinel")
     {
         bail!("sample collector reset retained the prior sentinel");
     }
+    if second_measurement.sql_databases[0]
+        .calls
+        .get("dml")
+        .copied()
+        .unwrap_or(0)
+        != 0
+    {
+        bail!("statement categories retained prior writes");
+    }
+
+    // Separate planes, duplicate input URLs, data-modifying CTEs and >20
+    // distinct statements prove attribution is independent of diagnostic truncation.
+    let remote_url = harness.create_database("statement-remote")?;
+    let mut control = PgClient::connect(&scope.database_url, NoTls)?;
+    control.batch_execute("CREATE TABLE database_placements(alias text, role text); INSERT INTO database_placements VALUES('primary','control')")?;
+    let mut remote = PgClient::connect(&remote_url, NoTls)?;
+    remote.batch_execute("CREATE TABLE collector_rows(id integer)")?;
+    let baseline = harness.begin_measurement_with_databases(
+        &scope,
+        &[
+            scope.database_url.clone(),
+            remote_url.clone(),
+            remote_url.clone(),
+        ],
+    )?;
+    control.batch_execute("BEGIN; WITH changed AS (INSERT INTO collector_rows VALUES(2) RETURNING id) SELECT id FROM changed; COMMIT")?;
+    remote.batch_execute("INSERT INTO collector_rows VALUES(1),(2)")?;
+    for n in 1..=30 {
+        remote.simple_query(&format!("SELECT {}", vec!["1"; n].join(",")))?;
+    }
+    let measured = harness.finish_measurement(&scope, baseline, BTreeMap::new())?;
+    let total: u64 = measured
+        .sql_databases
+        .iter()
+        .flat_map(|db| db.calls.values())
+        .sum();
+    if measured.sql_databases.len() != 2 || measured.sql_calls != Some(total) {
+        bail!("duplicate database URLs were counted twice or category totals disagree");
+    }
+    let control_counts = measured
+        .sql_databases
+        .iter()
+        .find(|d| d.role == "control")
+        .context("missing control statement counters")?;
+    let execution_counts = measured
+        .sql_databases
+        .iter()
+        .find(|d| d.role == "execution")
+        .context("missing execution statement counters")?;
+    if control_counts.calls.get("mixed") != Some(&1)
+        || control_counts.calls.get("transaction") != Some(&2)
+        || execution_counts.calls.get("dml") != Some(&1)
+        || execution_counts.calls.get("read").copied().unwrap_or(0) < 30
+        || measured.query_diagnostics.len() > 20
+    {
+        bail!("complete statement categories lost CTEs, transactions or cheap reads");
+    }
+    let reset_baseline = harness.begin_measurement(&scope)?;
+    control.simple_query("SELECT pg_stat_statements_reset()")?;
+    if harness
+        .finish_measurement(&scope, reset_baseline, BTreeMap::new())
+        .is_ok()
+    {
+        bail!("reset counters were accepted as a valid measurement");
+    }
+    drop(remote);
+    drop(control);
+    harness.release_database(&remote_url)?;
     harness.restart_rabbitmq()?;
     harness.wait_for_queue_counts(&scope, 0, 0, Duration::from_secs(30))?;
     harness.wait_for_worker_deliveries(&scope, 0, Duration::from_secs(30))?;
@@ -189,12 +291,16 @@ struct ServiceManifest {
 /// Immutable observations taken immediately before a measured command.
 pub struct MeasurementBaseline {
     wal_lsn: String,
+    statement_epoch: (String, i64),
+    storage_counters: BTreeMap<String, u64>,
     databases: Vec<DatabaseBaseline>,
     service_sampler: ServiceSampler,
 }
 
 struct DatabaseBaseline {
     url: String,
+    name: String,
+    role: String,
     database_bytes: i64,
     table_writes: BTreeMap<String, TableWrites>,
 }
@@ -561,15 +667,35 @@ impl ServiceHarness {
     ) -> Result<MeasurementBaseline> {
         self.require_scope(scope)?;
         self.agent.reset()?;
+        let mut client = PgClient::connect(&scope.database_url, NoTls)?;
+        // Constant arguments are normalized out of pg_stat_statements query
+        // text, so perform this check before resetting the historical counter.
+        let settings = client.query_one("SELECT current_setting('pg_stat_statements.track_utility'), current_setting('pg_stat_statements.track')", &[])?;
+        if settings.get::<_, String>(0) != "on" || settings.get::<_, String>(1) != "top" {
+            bail!("statement accounting requires utility tracking and top-level statements");
+        }
         let urls = std::iter::once(scope.database_url.clone())
             .chain(routed_database_urls.iter().cloned())
             .collect::<Vec<_>>();
         let mut databases = Vec::with_capacity(urls.len());
         let mut wal_lsn = None;
+        let mut seen = BTreeSet::new();
         for url in urls {
-            self.owned_database_name(&url)?;
+            let name = self.owned_database_name(&url)?;
+            if !seen.insert(name.clone()) {
+                continue;
+            }
             let mut client = PgClient::connect(&url, NoTls)?;
             client.batch_execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")?;
+            let role = if url != scope.database_url {
+                "execution"
+            } else if client.query_one("SELECT to_regclass('public.database_placements') IS NOT NULL", &[])?.get::<_, bool>(0)
+                && client.query_one("SELECT EXISTS(SELECT 1 FROM database_placements WHERE alias='primary' AND role='control')", &[])?.get::<_, bool>(0)
+            {
+                "control"
+            } else {
+                "shared"
+            }.to_owned();
             if wal_lsn.is_none() {
                 wal_lsn = Some(
                     client
@@ -584,19 +710,25 @@ impl ServiceHarness {
             let _ = client.simple_query("SELECT pg_stat_statements_reset()")?;
             databases.push(DatabaseBaseline {
                 url,
+                name,
+                role,
                 database_bytes,
                 table_writes,
             });
         }
+        let storage_counters = self.storage_counters()?;
         let service_sampler = ServiceSampler::start(&self.root, self.container_ids())?;
+        let statement_epoch = statement_epoch(&mut client)?;
         Ok(MeasurementBaseline {
+            statement_epoch,
             wal_lsn: wal_lsn.context("measurement scope omitted its control database")?,
             databases,
+            storage_counters,
             service_sampler,
         })
     }
 
-    /// Collects scoped database, RabbitMQ, HTTP, and container measurements.
+    /// Collects scoped database, object-storage, broker, HTTP, and container measurements.
     pub fn finish_measurement(
         &self,
         scope: &SampleScope,
@@ -605,6 +737,8 @@ impl ServiceHarness {
     ) -> Result<ExternalMeasurements> {
         self.require_scope(scope)?;
         let services = baseline.service_sampler.finish()?;
+        let storage_counters =
+            storage_counter_delta(&self.storage_counters()?, &baseline.storage_counters)?;
         let mut control = PgClient::connect(&scope.database_url, NoTls)?;
         let wal_bytes: i64 = control
             .query_one(WAL_BYTES_QUERY, &[&baseline.wal_lsn])?
@@ -615,24 +749,25 @@ impl ServiceHarness {
         let mut database_bytes_delta = 0_i64;
         let mut table_writes = BTreeMap::<String, TableWrites>::new();
         let mut diagnostics = Vec::new();
+        let mut sql_databases = Vec::new();
         for database in baseline.databases {
             let mut client = PgClient::connect(&database.url, NoTls)?;
             diagnostics.extend(query_diagnostics(&mut client)?);
-            let stats = client.query_one(
-                r#"
-                SELECT
-                    COALESCE(SUM(calls), 0)::bigint,
-                    COALESCE(SUM(total_exec_time), 0)::double precision,
-                    COALESCE(SUM(rows), 0)::bigint
-                FROM pg_stat_statements
-                WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
-                  AND query NOT LIKE '%pg_stat_statements%'
-                "#,
-                &[],
-            )?;
-            sql_calls = sql_calls.saturating_add(nonnegative_u64(stats.get::<_, i64>(0))?);
-            sql_time_ms += stats.get::<_, f64>(1);
-            sql_rows = sql_rows.saturating_add(nonnegative_u64(stats.get::<_, i64>(2))?);
+            let (statements, rows) =
+                database_statements(&mut client, database.name, database.role)?;
+            let calls = statements
+                .calls
+                .values()
+                .try_fold(0_u64, |sum, n| sum.checked_add(*n))
+                .context("statement counter overflow")?;
+            sql_calls = sql_calls
+                .checked_add(calls)
+                .context("statement counter overflow")?;
+            sql_time_ms += statements.execution_ms;
+            sql_rows = sql_rows
+                .checked_add(rows)
+                .context("statement row counter overflow")?;
+            sql_databases.push(statements);
             let database_bytes: i64 = client
                 .query_one("SELECT pg_database_size(current_database())", &[])?
                 .get(0);
@@ -655,6 +790,9 @@ impl ServiceHarness {
                     .context("delete counter overflow")?;
             }
         }
+        if statement_epoch(&mut control)? != baseline.statement_epoch {
+            bail!("statement counters reset or evicted entries during measurement");
+        }
         diagnostics.sort_by(|left, right| {
             right
                 .total_exec_time_ms
@@ -665,7 +803,9 @@ impl ServiceHarness {
         let queue = self.queue_counts(&scope.vhost)?;
         let http = self.agent.snapshot();
         Ok(ExternalMeasurements {
+            storage_counters,
             sql_calls: Some(sql_calls),
+            sql_databases,
             sql_time_ms: Some(sql_time_ms),
             sql_rows: Some(sql_rows),
             table_writes,
@@ -969,6 +1109,38 @@ impl ServiceHarness {
         Ok(worker_queue_metrics(&queues).2)
     }
 
+    /// Reads only the campaign-owned gateway's object counters outside timing.
+    /// Docker and gateway commands share a deadline and bounded output capture.
+    fn storage_counters(&self) -> Result<BTreeMap<String, u64>> {
+        let container = self
+            .manifest
+            .containers
+            .iter()
+            .find(|c| c.name == format!("{}-ceph-1", self.project))
+            .context("owned Ceph container missing")?;
+        let script = "import glob,json,subprocess; p=glob.glob('/run/ceph/ceph-client.rgw.dev.*.asok'); assert len(p)==1; d=json.loads(subprocess.check_output(['ceph','daemon',p[0],'perf','dump'],timeout=10)); print(json.dumps(d['rgw_op']))";
+        let args = vec![
+            "exec".into(),
+            container.id.clone(),
+            "python3.12".into(),
+            "-c".into(),
+            script.into(),
+        ];
+        let output = super::process::execute(&super::process::ProcessSpec {
+            program: Path::new("docker"),
+            args: &args,
+            current_dir: Some(&self.root),
+            env: &[],
+            timeout: Duration::from_secs(15),
+            stdout_limit: 16 * 1024,
+            stderr_limit: 4096,
+        })?;
+        if output.exit_code != Some(0) || output.timed_out || output.stdout.truncated {
+            bail!("Ceph object-counter collection failed");
+        }
+        parse_storage_counters(&serde_json::from_slice(&output.stdout.data)?)
+    }
+
     fn container_ids(&self) -> Vec<String> {
         self.manifest
             .containers
@@ -1075,6 +1247,51 @@ fn table_write_delta(current: &TableWrites, baseline: Option<&TableWrites>) -> R
             .checked_sub(baseline.deleted)
             .context("delete counters reset during sample")?,
     })
+}
+
+/// Detects resets or capacity eviction that would otherwise undercount demand.
+fn statement_epoch(client: &mut PgClient) -> Result<(String, i64)> {
+    let row = client.query_one(
+        "SELECT stats_reset::text, dealloc::bigint FROM pg_stat_statements_info",
+        &[],
+    )?;
+    Ok((row.get(0), row.get(1)))
+}
+
+/// Counts every statement using the historical SQL-call filter in one snapshot.
+/// WITH is deliberately mixed: a read-looking CTE can execute mutations.
+/// Unknown syntax and comments remain visible as other, never silently discarded.
+fn database_statements(
+    client: &mut PgClient,
+    database: String,
+    role: String,
+) -> Result<(DatabaseStatements, u64)> {
+    let mut result = DatabaseStatements {
+        database,
+        role,
+        ..Default::default()
+    };
+    let mut rows = 0_u64;
+    for row in client.query(r#"
+        SELECT CASE
+          WHEN query ~* '^\s*(SELECT|SHOW|VALUES|TABLE)\M' THEN 'read'
+          WHEN query ~* '^\s*(INSERT|UPDATE|DELETE|MERGE|COPY)\M' THEN 'dml'
+          WHEN query ~* '^\s*WITH\M' THEN 'mixed'
+          WHEN query ~* '^\s*(BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|START|END|ABORT)\M' THEN 'transaction'
+          ELSE 'other' END AS category,
+          SUM(calls)::bigint, SUM(rows)::bigint,
+          SUM(total_exec_time)::double precision, SUM(total_plan_time)::double precision
+        FROM pg_stat_statements
+        WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND query NOT LIKE '%pg_stat_statements%'
+        GROUP BY category
+    "#, &[])? {
+        result.calls.insert(row.get(0), nonnegative_u64(row.get(1))?);
+        rows = rows.checked_add(nonnegative_u64(row.get(2))?).context("statement row counter overflow")?;
+        result.execution_ms += row.get::<_, f64>(3);
+        result.planning_ms += row.get::<_, f64>(4);
+    }
+    Ok((result, rows))
 }
 
 /// Captures normalized statement, planning, buffer, and WAL evidence after timing.
@@ -1871,6 +2088,45 @@ fn parse_size(value: &str) -> Option<u64> {
     Some((number * multiplier) as u64)
 }
 
+/// Object operations exclude bucket health probes; payload bytes exclude HTTP framing.
+fn parse_storage_counters(value: &Value) -> Result<BTreeMap<String, u64>> {
+    [
+        "put_obj_ops",
+        "put_obj_bytes",
+        "get_obj_ops",
+        "get_obj_bytes",
+        "del_obj_ops",
+    ]
+    .into_iter()
+    .map(|name| {
+        Ok((
+            name.into(),
+            value[name]
+                .as_u64()
+                .with_context(|| format!("missing or invalid gateway counter {name}"))?,
+        ))
+    })
+    .collect()
+}
+
+fn storage_counter_delta(
+    current: &BTreeMap<String, u64>,
+    baseline: &BTreeMap<String, u64>,
+) -> Result<BTreeMap<String, u64>> {
+    baseline
+        .iter()
+        .map(|(name, before)| {
+            let after = current.get(name).context("gateway counter disappeared")?;
+            Ok((
+                name.clone(),
+                after
+                    .checked_sub(*before)
+                    .context("gateway counters reset during measurement")?,
+            ))
+        })
+        .collect()
+}
+
 fn command_output(root: &Path, program: &str, args: &[&str]) -> Result<String> {
     let args = args
         .iter()
@@ -1898,6 +2154,20 @@ fn command_output_owned(root: &Path, program: &str, args: &[String]) -> Result<S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn object_counters_reject_missing_values_resets_and_report_exact_deltas() {
+        use serde_json::json;
+        let before = super::parse_storage_counters(&json!({"put_obj_ops":1,"put_obj_bytes":8,"get_obj_ops":2,"get_obj_bytes":16,"del_obj_ops":1})).unwrap();
+        let after = super::parse_storage_counters(&json!({"put_obj_ops":2,"put_obj_bytes":16,"get_obj_ops":4,"get_obj_bytes":32,"del_obj_ops":2})).unwrap();
+        let delta = super::storage_counter_delta(&after, &before).unwrap();
+        assert_eq!(delta["put_obj_ops"], 1);
+        assert_eq!(delta["get_obj_bytes"], 16);
+        assert!(super::storage_counter_delta(&before, &after).is_err());
+        assert!(super::storage_counter_delta(&Default::default(), &before).is_err());
+        assert!(super::parse_storage_counters(&json!({})).is_err());
+        assert!(super::parse_storage_counters(&json!({"put_obj_ops":-1})).is_err());
+    }
+
     #[test]
     fn table_write_counters_distinguish_mutations_and_reject_resets() {
         let current = super::TableWrites {

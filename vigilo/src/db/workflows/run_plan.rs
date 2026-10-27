@@ -19,6 +19,7 @@ use sqlx::{
 use uuid::Uuid;
 
 pub(crate) mod admission;
+pub(crate) mod batches;
 mod queries;
 
 use super::{
@@ -244,89 +245,11 @@ pub(crate) async fn release(db: &PgPool, lease: Lease, error: Option<&str>) -> R
 /// Register exact ownership before I/O. Unique range slots reject divergent
 /// retries, even when changed bytes would otherwise generate another key.
 pub(crate) async fn plan(db: &PgPool, lease: Lease, object: &Object) -> Result<bool> {
-    bounded(async {
-        let mut tx = db.begin().await?;
-        guard(&mut tx, lease).await?;
-        let (limits, alias): (Json<FormatLimits>, String) = sqlx::query_as(queries::SELECT_OWNER)
-            .bind(lease.run_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        ensure!(
-            object.reference.storage_alias == alias,
-            "run-plan object changes storage owner"
-        );
-        object.reference.validate(&limits)?;
-        ensure!(
-            object.object_key == object.reference.key
-                && (object
-                    .object_key
-                    .starts_with(&format!("runs/{}/", lease.run_id))
-                    || (object.kind == "probe"
-                        && object
-                            .object_key
-                            .starts_with(&format!("capability-probes/{}/", lease.run_id)))),
-            "unowned run-plan object key"
-        );
-        sqlx::query(queries::INSERT_OBJECT)
-            .bind(lease.run_id)
-            .bind(&object.object_key)
-            .bind(&object.kind)
-            .bind(object.level)
-            .bind(object.range_start)
-            .bind(object.range_end)
-            .bind(&object.reference)
-            .execute(&mut *tx)
-            .await?;
-        let existing = sqlx::query_as::<_, Object>(queries::SELECT_OBJECT)
-            .bind(lease.run_id)
-            .bind(&object.object_key)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("run-plan range replay changed bytes"))?;
-        ensure!(
-            existing.kind == object.kind
-                && existing.level == object.level
-                && existing.range_start == object.range_start
-                && existing.range_end == object.range_end
-                && existing.reference.0 == object.reference.0,
-            "run-plan replay changed reference"
-        );
-        tx.commit().await?;
-        Ok(existing.acknowledged)
-    })
-    .await
+    Ok(batches::plan(db, lease, std::slice::from_ref(object)).await?[0])
 }
-/// Acknowledge an owned verified object; first-time chunk acknowledgements must
-/// extend the contiguous cursor. Identical acknowledgements do not double-count.
+/// Acknowledge one verified owned object through the bounded checkpoint contract.
 pub(crate) async fn acknowledge(db: &PgPool, lease: Lease, object: &Object) -> Result<()> {
-    bounded(async {
-        let mut tx = db.begin().await?;
-        guard(&mut tx, lease).await?;
-        let old: bool = sqlx::query_scalar(queries::LOCK_ACKNOWLEDGEMENT)
-            .bind(lease.run_id)
-            .bind(&object.object_key)
-            .bind(&object.reference)
-            .fetch_one(&mut *tx)
-            .await?;
-        if !old && object.kind == "chunks" {
-            let n = sqlx::query(queries::ADVANCE_CHUNKS)
-                .bind(lease.run_id)
-                .bind(object.range_start)
-                .bind(object.range_end)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
-            ensure!(n == 1, "run chunk acknowledgement gap or overlap");
-        }
-        sqlx::query(queries::ACKNOWLEDGE_OBJECT)
-            .bind(lease.run_id)
-            .bind(&object.object_key)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        Ok(())
-    })
-    .await
+    batches::acknowledge(db, lease, std::slice::from_ref(object)).await
 }
 /// Read at most 256 acknowledged children after an exclusive range cursor.
 /// The indexed kind/level/range boundary supports level-wise tree construction.

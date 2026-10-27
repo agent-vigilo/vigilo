@@ -48,9 +48,12 @@ sequenceDiagram
                 Vigilo->>ExecutionDB: Extend chunk lease and start heartbeat
                 Vigilo->>ExecutionDB: Read compact snapshot and immutable plan reference
                 ExecutionDB-->>Vigilo: Compact plan, binding and gate metadata
-                Vigilo->>Objects: Verify frozen configuration and chunk plan
-                Vigilo->>Objects: Retrieve bounded assigned case batches
-                Objects-->>Vigilo: Immutable batch bytes
+                Vigilo->>Vigilo: Look up exact binding and file references in bounded byte cache
+                opt Cache miss or file over 1 MiB
+                    Vigilo->>Objects: Read required configuration, plan and case files
+                    Objects-->>Vigilo: Immutable complete file bytes
+                end
+                Vigilo->>Vigilo: Verify bytes and retain eligible files within shared cache bounds
                 Vigilo->>Vigilo: Verify complete files and exact assigned case membership
                 Vigilo->>ControlDB: Fetch pinned evaluator artifacts by database id
                 ControlDB-->>Vigilo: Exact artifact and ABI records

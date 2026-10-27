@@ -80,40 +80,11 @@ pub(super) const SELECT_OWNER: &str = r#"
     WHERE plan.run_id=$1
 "#;
 
-pub(super) const INSERT_OBJECT: &str = r#"
-    INSERT INTO run_plan_objects(run_id,object_key,kind,level,range_start,range_end,reference)
-    VALUES($1,$2,$3,$4,$5,$6,$7)
-    ON CONFLICT DO NOTHING
-"#;
-
-pub(super) const SELECT_OBJECT: &str = r#"
-    SELECT object_key,kind,level,range_start,range_end,reference,acknowledged
-    FROM run_plan_objects
-    WHERE run_id=$1
-    AND object_key=$2
-"#;
-
-pub(super) const LOCK_ACKNOWLEDGEMENT: &str = r#"
-    SELECT acknowledged
-    FROM run_plan_objects
-    WHERE run_id=$1
-    AND object_key=$2
-    AND reference=$3
-    FOR UPDATE
-"#;
-
 pub(super) const ADVANCE_CHUNKS: &str = r#"
     UPDATE run_plans
     SET chunk_cursor=$3
     WHERE run_id=$1
     AND chunk_cursor=$2
-"#;
-
-pub(super) const ACKNOWLEDGE_OBJECT: &str = r#"
-    UPDATE run_plan_objects
-    SET acknowledged=true
-    WHERE run_id=$1
-    AND object_key=$2
 "#;
 
 pub(super) const SELECT_OBJECTS: &str = r#"

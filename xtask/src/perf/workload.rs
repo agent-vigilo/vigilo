@@ -366,6 +366,12 @@ impl WorkloadRunner {
             )?;
             placements.push(PreparedPlacement { env_key, url });
         }
+        if workload_id == "run.create-ingestion.v1" && route_count > 1 {
+            Client::connect(&database_url, NoTls)?.execute(
+                "UPDATE database_placements SET role='control' WHERE alias='primary'",
+                &[],
+            )?;
+        }
         let run_id = if shape.create_run {
             let identity = format!("{workload_id}:{tuple}");
             let inputs = if workload_id == "run.create-ingestion.v1" {
@@ -385,16 +391,42 @@ impl WorkloadRunner {
             } else {
                 self.inputs(&identity, shape.cases, shape.evaluators)?
             };
-            Some(create_run(
-                binary,
-                &database_url,
-                &inputs,
-                &route_env,
-                route_count > 1 && !matches!(workload_id, "shard.move.v1" | "shard.rebalance.v1"),
-                Duration::from_secs(600),
-                limits.stdout,
-                limits.stderr,
-            )?)
+            if workload_id == "run.create-ingestion.v1" {
+                super::fixture::set_gates(&inputs, parse_ingestion_tuple(tuple)?.gates)?;
+            }
+            Some(
+                if workload_id == "run.create-ingestion.v1" && route_count > 1 {
+                    let mut args = ingestion_args(&database_url, &inputs, None)?;
+                    args.extend([
+                        "--default-shard-database-alias".into(),
+                        "perf_01".into(),
+                        "--shard-assignment-policy".into(),
+                        "spread-active".into(),
+                    ]);
+                    let process = invoke(
+                        binary,
+                        args,
+                        &route_env,
+                        Duration::from_secs(600),
+                        limits.stdout,
+                        limits.stderr,
+                    )?;
+                    require_success_ref(&process, "prepare routed ingestion fixture")?;
+                    parse_run_id(&process.stdout.text())?
+                } else {
+                    create_run(
+                        binary,
+                        &database_url,
+                        &inputs,
+                        &route_env,
+                        route_count > 1
+                            && !matches!(workload_id, "shard.move.v1" | "shard.rebalance.v1"),
+                        Duration::from_secs(600),
+                        limits.stdout,
+                        limits.stderr,
+                    )?
+                },
+            )
         } else {
             None
         };
@@ -499,27 +531,78 @@ impl WorkloadRunner {
                     evaluators,
                     shape.payload_bytes,
                 )?;
-                let baseline = service.begin_measurement(scope)?;
-                let process = invoke(
+                let upload = if shape.reference {
+                    let mut db = Client::connect(&scope.database_url, NoTls)?;
+                    Some(db.query_one("SELECT dataset_upload_id::text FROM run_plans WHERE run_id=$1::text::uuid", &[&prepared_run_id.context("reference fixture has no seed run")?])?.get::<_, String>(0))
+                } else {
+                    None
+                };
+                super::fixture::set_gates(&inputs, shape.gates)?;
+                let mut args = ingestion_args(&scope.database_url, &inputs, upload.as_deref())?;
+                if shape.placements > 0 {
+                    args.extend([
+                        "--default-shard-database-alias".into(),
+                        "perf_01".into(),
+                        "--shard-assignment-policy".into(),
+                        "spread-active".into(),
+                    ]);
+                }
+                let baseline = service.begin_measurement_with_databases(scope, placement_urls)?;
+                let started = Instant::now();
+                let outcomes = invoke_creators(
+                    shape.creators,
                     binary,
-                    create_args(&scope.database_url, &inputs)?,
+                    args,
                     &env,
                     watchdog,
                     stdout_limit,
                     stderr_limit,
                 )?;
-                product(require_success_ref(&process, "measured ingestion"))?;
-                // Freeze external counters before oracle reads pollute SQL observations.
+                let elapsed = started.elapsed();
+                // Freeze counters before any oracle reads.
                 let mut external =
                     service.finish_measurement(scope, baseline, DurableCounts::new())?;
-                let run_id = product(parse_run_id(&process.stdout.text()))?;
-                external.durable_counts = product(oracle_ingestion(
-                    service,
-                    &scope.database_url,
-                    &run_id,
-                    shape,
-                    cases.div_ceil(fixture.coordinator.cases_per_chunk) as i64,
-                ))?;
+                let mut run_ids = std::collections::BTreeSet::new();
+                for process in &outcomes {
+                    product(require_success_ref(process, "measured ingestion"))?;
+                    let run_id = product(parse_run_id(&process.stdout.text()))?;
+                    if !run_ids.insert(run_id.clone()) {
+                        return Err(product_failure("creators returned duplicate run IDs"));
+                    }
+                    let counts = product(oracle_ingestion(
+                        service,
+                        &scope.database_url,
+                        placement_urls,
+                        &run_id,
+                        shape,
+                        cases.div_ceil(fixture.coordinator.cases_per_chunk) as i64,
+                    ))?;
+                    for (name, count) in counts {
+                        if matches!(
+                            name.as_str(),
+                            "total_runs"
+                                | "dataset_versions"
+                                | "dataset_catalogs"
+                                | "referenced_datasets"
+                                | "case_payload_tables"
+                        ) {
+                            external.durable_counts.insert(name, count);
+                        } else {
+                            *external.durable_counts.entry(name).or_default() += count;
+                        }
+                    }
+                }
+                external
+                    .durable_counts
+                    .insert("created_runs".into(), shape.creators as i64);
+                let process = if shape.creators == 1 {
+                    outcomes
+                        .into_iter()
+                        .next()
+                        .context("missing creator result")?
+                } else {
+                    aggregate(outcomes, elapsed)
+                };
                 product(verify_exact_observations(&external, exact))?;
                 if external.http_requests != Some(0)
                     || external.queue_ready != Some(0)
@@ -1764,17 +1847,40 @@ struct IngestionShape {
     cases: usize,
     payload_bytes: usize,
     reuse: bool,
+    reference: bool,
+    gates: usize,
+    placements: usize,
+    creators: usize,
 }
 
-/// Caps fixture allocation and stays within one default 64-page creation pass.
+/// Caps fixture allocation and keeps the registered ingestion campaign bounded.
 fn parse_ingestion_tuple(tuple: &str) -> Result<IngestionShape> {
     let parts = tuple.split('-').collect::<Vec<_>>();
-    if parts.len() != 5
+    if !matches!(parts.len(), 5 | 11)
         || parts[0] != "cases"
         || parts[2] != "payload"
-        || !matches!(parts[4], "fresh" | "reuse")
+        || !matches!(parts[4], "fresh" | "reuse" | "reference")
     {
         bail!("invalid ingestion tuple: {tuple}");
+    }
+    let (gates, placements, creators) = if parts.len() == 11 {
+        if parts[5] != "gates" || parts[7] != "placements" || parts[9] != "creators" {
+            bail!("invalid ingestion dimensions");
+        }
+        (
+            parts[6].parse::<usize>()?,
+            parts[8].parse::<usize>()?,
+            parts[10].parse::<usize>()?,
+        )
+    } else {
+        (0, 0, 1)
+    };
+    if gates > 8
+        || placements > 4
+        || !matches!(creators, 1 | 2 | 4)
+        || (creators > 1 && parts[4] != "reference")
+    {
+        bail!("unsupported ingestion dimensions");
     }
     let cases = parts[1].parse::<usize>()?;
     let payload_bytes = parts[3].parse::<usize>()?;
@@ -1782,6 +1888,7 @@ fn parse_ingestion_tuple(tuple: &str) -> Result<IngestionShape> {
         || !(1..=65_536).contains(&payload_bytes)
         || cases
             .checked_mul(payload_bytes)
+            .and_then(|n| n.checked_mul(creators))
             .is_none_or(|bytes| bytes > 256 * 1024 * 1024)
     {
         bail!("ingestion fixture exceeds case, payload, or aggregate byte bounds");
@@ -1789,7 +1896,11 @@ fn parse_ingestion_tuple(tuple: &str) -> Result<IngestionShape> {
     Ok(IngestionShape {
         cases,
         payload_bytes,
-        reuse: parts[4] == "reuse",
+        reuse: parts[4] != "fresh",
+        reference: parts[4] == "reference",
+        gates,
+        placements,
+        creators,
     })
 }
 
@@ -1938,6 +2049,7 @@ fn required_routes(workload_id: &str, tuple: &str) -> Result<usize> {
         "run.read.v1" | "run.export.v1" => Ok(parse_read_tuple(tuple)?.routes),
         "shard.move.v1" | "shard.rebalance.v1" => Ok(2),
         "coordinator.placement-scaling.v1" => parse_placement_tuple(tuple),
+        "run.create-ingestion.v1" => Ok(1 + parse_ingestion_tuple(tuple)?.placements),
         _ => Ok(1),
     }
 }
@@ -2429,6 +2541,28 @@ fn rebalance_verify_args(database_url: &str, operation_id: &str, shards: usize) 
     )
 }
 
+/// Reference measurements submit no dataset source; file replay remains a separate tuple.
+fn ingestion_args(
+    database_url: &str,
+    inputs: &RunInputs,
+    upload: Option<&str>,
+) -> Result<Vec<String>> {
+    match upload {
+        Some(id) => Ok(base_args(
+            database_url,
+            [
+                "run".into(),
+                "create".into(),
+                "--profile-file".into(),
+                path_arg(&inputs.profile)?,
+                "--dataset-upload-id".into(),
+                id.into(),
+            ],
+        )),
+        None => create_args(database_url, inputs),
+    }
+}
+
 fn create_args(database_url: &str, inputs: &RunInputs) -> Result<Vec<String>> {
     create_args_with_placement(database_url, inputs, false)
 }
@@ -2745,6 +2879,94 @@ fn invoke_workers(
             })
             .collect()
     })
+}
+
+/// Starts a fixed, bounded group of creators together; every child is reaped
+/// even when another fails. Counts cover the entire group, never an average.
+#[allow(clippy::too_many_arguments)]
+fn invoke_creators(
+    count: usize,
+    binary: &Path,
+    args: Vec<String>,
+    env: &[(String, String)],
+    timeout: Duration,
+    stdout: usize,
+    stderr: usize,
+) -> Result<Vec<ProcessOutcome>> {
+    anyhow::ensure!(matches!(count, 1 | 2 | 4), "invalid creator concurrency");
+    if count == 1 {
+        return Ok(vec![invoke(binary, args, env, timeout, stdout, stderr)?]);
+    }
+    let barrier = std::sync::Barrier::new(count);
+    std::thread::scope(|scope| {
+        let handles = (0..count)
+            .map(|_| {
+                let args = args.clone();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    invoke(binary, args, env, timeout, stdout, stderr)
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("creator thread panicked"))?
+            })
+            .collect()
+    })
+}
+
+/// Checks every scheduled ordinal and local gate denominator across placements.
+/// Metadata is bounded by the fixture's maximum 640 chunks and 128 shards.
+fn verify_ingestion_chunks(
+    control: &str,
+    placements: &[String],
+    run_id: &str,
+    shape: IngestionShape,
+) -> Result<()> {
+    let mut chunks = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    let mut snapshots = std::collections::BTreeSet::new();
+    for url in routed_urls(control, placements) {
+        let mut db = Client::connect(&url, NoTls)?;
+        for row in db.query("SELECT id::text,run_shard,ordinal_start,ordinal_end,status::text,dispatched_at IS NULL,profile_group_id FROM run_chunks WHERE run_id=$1::text::uuid ORDER BY ordinal_start LIMIT 641",&[&run_id])? {
+            let id:String=row.get(0); anyhow::ensure!(ids.insert(id),"duplicate scheduled chunk");
+            let shard:i16=row.get(1); let start:i32=row.get(2); let end:i32=row.get(3);
+            anyhow::ensure!(row.get::<_,String>(4)=="pending" && row.get::<_,bool>(5) && row.get::<_,String>(6)=="default", "changed scheduled chunk state");
+            chunks.push((start,end,shard));
+        }
+        for row in db.query("SELECT run_shard,expected_execution_count,config_snapshot->'gate_planned_counts' FROM run_snapshots WHERE run_id=$1::text::uuid LIMIT 129",&[&run_id])? {
+            let shard:i16=row.get(0); let count:i32=row.get(1);
+            anyhow::ensure!(snapshots.insert(shard),"duplicate snapshot shard");
+            let expected=(0..shape.cases).filter(|n| (n/100%128) as i16 == shard).count();
+            anyhow::ensure!(count as usize == expected,"snapshot case count differs");
+            let counts:Value=row.get(2);
+            let wanted:serde_json::Map<String,Value>=(0..shape.gates).map(|n|(format!("gate-{n:02}"),serde_json::json!(expected))).collect();
+            anyhow::ensure!(counts==Value::Object(wanted),"snapshot gate counts differ");
+        }
+    }
+    anyhow::ensure!(
+        snapshots.len() == shape.cases.div_ceil(100).min(128),
+        "missing shard snapshot"
+    );
+    chunks.sort();
+    anyhow::ensure!(
+        chunks.len() == shape.cases.div_ceil(100),
+        "chunk count differs"
+    );
+    for (index, (start, end, shard)) in chunks.into_iter().enumerate() {
+        anyhow::ensure!(
+            start as usize == index * 100
+                && end as usize == ((index + 1) * 100).min(shape.cases)
+                && shard as usize == index % 128,
+            "scheduled ordinal coverage differs"
+        );
+    }
+    Ok(())
 }
 
 /// Creates a prerequisite run and extracts its stable machine-readable ID.
@@ -3454,18 +3676,44 @@ fn oracle_create(
 fn oracle_ingestion(
     service: &ServiceHarness,
     database_url: &str,
+    placements: &[String],
     run_id: &str,
     shape: IngestionShape,
     chunks: i64,
 ) -> Result<DurableCounts> {
-    let mut counts = oracle_create(database_url, run_id, shape.cases, chunks)?;
+    let mut counts = if placements.is_empty() {
+        oracle_create(database_url, run_id, shape.cases, chunks)?
+    } else {
+        let urls = routed_urls(database_url, placements);
+        let mut counts =
+            DurableCounts::from([("runs".into(), 1), ("cases".into(), shape.cases as i64)]);
+        for (name, table) in [
+            ("chunks", "run_chunks"),
+            ("executions", "executions"),
+            ("attempts", "execution_attempts"),
+            ("evaluator_results", "evaluator_results"),
+        ] {
+            counts.insert(name.into(), total_run_count(&urls, run_id, table, "TRUE")?);
+        }
+        let mut db = Client::connect(database_url, NoTls)?;
+        validate_create_oracle(&counts, &run_status_with(&mut db, run_id)?, chunks)?;
+        let owners:i64=db.query_one("SELECT count(DISTINCT database_alias) FROM shard_placements WHERE run_id=$1::text::uuid AND database_alias <> 'primary'",&[&run_id])?.get(0);
+        if owners != shape.placements as i64 {
+            bail!("execution placement count differs");
+        }
+        counts
+    };
+    verify_ingestion_chunks(database_url, placements, run_id, shape)?;
+    service
+        .storage_reader()?
+        .gate_counts(database_url, run_id, shape.gates, shape.cases)?;
     let mut client = Client::connect(database_url, NoTls)?;
     let cases = i64::try_from(shape.cases)?;
     for (name, query, expected) in [
         (
             "total_runs",
             "SELECT count(*)::bigint FROM runs",
-            if shape.reuse { 2 } else { 1 },
+            shape.creators as i64 + i64::from(shape.reuse),
         ),
         (
             "dataset_versions",
@@ -3513,7 +3761,7 @@ fn oracle_ingestion(
     Ok(counts)
 }
 
-/// Validates both completed creation and the bounded recovery handoff at 64 pages.
+/// Validates exact metadata admission across the registered creation boundaries.
 fn oracle_create_boundary(
     database_url: &str,
     run_id: &str,
@@ -4068,13 +4316,66 @@ mod tests {
     }
 
     #[test]
+    fn reference_creation_never_submits_the_dataset_file() {
+        let inputs = RunInputs {
+            profile: "profile.json".into(),
+            dataset: "missing.jsonl".into(),
+        };
+        let args =
+            ingestion_args("postgres://localhost/db", &inputs, Some("frozen-upload")).unwrap();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--dataset-upload-id", "frozen-upload"])
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dataset-file" || arg == "missing.jsonl")
+        );
+        assert!(
+            ingestion_args("postgres://localhost/db", &inputs, None)
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "--dataset-file")
+        );
+    }
+
+    #[test]
+    fn ingestion_matrix_bounds_concurrency_and_keeps_dimensions_independent() {
+        let shape = parse_ingestion_tuple(
+            "cases-50000-payload-1024-reference-gates-8-placements-2-creators-4",
+        )
+        .unwrap();
+        assert_eq!((shape.gates, shape.placements, shape.creators), (8, 2, 4));
+        assert_eq!(
+            required_routes(
+                "run.create-ingestion.v1",
+                "cases-101-payload-1024-fresh-gates-0-placements-2-creators-1"
+            )
+            .unwrap(),
+            3
+        );
+        for tuple in [
+            "cases-50000-payload-16384-reference-gates-0-placements-0-creators-4",
+            "cases-100-payload-1024-fresh-gates-0-placements-0-creators-4",
+            "cases-100-payload-1024-reference-gates-9-placements-0-creators-1",
+            "cases-100-payload-1024-reference-gates-0-placements-5-creators-1",
+            "cases-100-payload-1024-reference-gates-0-placements-0-creators-3",
+            "cases-100-payload-1024-reference-wrong-0-placements-0-creators-1",
+        ] {
+            assert!(parse_ingestion_tuple(tuple).is_err(), "{tuple}");
+        }
+    }
+
+    #[test]
     fn ingestion_tuples_bound_allocation_and_distinguish_dataset_reuse() {
-        for mode in ["fresh", "reuse"] {
+        for mode in ["fresh", "reuse", "reference"] {
             let shape =
                 parse_ingestion_tuple(&format!("cases-10000-payload-16384-{mode}")).unwrap();
             assert_eq!(shape.cases, 10_000);
             assert_eq!(shape.payload_bytes, 16_384);
-            assert_eq!(shape.reuse, mode == "reuse");
+            assert_eq!(shape.reuse, mode != "fresh");
+            assert_eq!(shape.reference, mode == "reference");
         }
         assert!(parse_ingestion_tuple("cases-64000-payload-1-fresh").is_ok());
         for tuple in [

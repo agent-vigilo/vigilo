@@ -50,6 +50,7 @@ flowchart TD
         RunContextCache
         EvaluatorLoader
         CaseBatchLoader
+        InputByteCache
         ExecutionProcessor
         AgentClient
         WasmSemaphore
@@ -93,8 +94,10 @@ flowchart TD
 
     MessageHandler -->|"Loads cases with"| CaseBatchLoader
     Objects[("Object storage<br/>Immutable plans and dataset files")]:::component
-    CaseBatchLoader -->|"Verified bounded reads"| Objects
-    RunContextCache -->|"Read and verify frozen configuration"| Objects
+    InputByteCache["<b>Immutable Input Byte Cache</b><br/>Command-owned; shared across shard contexts.<br/>8 MiB charged / 256 entries / files up to 1 MiB.<br/>Binding and full-reference isolation; validation on every use."]:::component
+    CaseBatchLoader -->|"Read complete case and plan files"| InputByteCache
+    RunContextCache -->|"Read frozen configuration"| InputByteCache
+    InputByteCache -->|"Bounded verified reads on miss"| Objects
     MessageHandler -->|"Processes claimed case batch with"| ExecutionProcessor
 
     ExecutionProcessor -->|"Invokes agent for chunk cases with bounded concurrency through"| AgentClient

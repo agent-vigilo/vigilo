@@ -4,13 +4,17 @@
 //! consume complete case files before releasing a requested range. Scheduling
 //! chunks and stored batches have independent boundaries. No case membership or
 //! payload is written to SQL, and storage I/O never holds a database transaction.
+//! Workers share a bounded immutable-byte cache across run/shard readers; every
+//! use retains complete-file validation. Admission reads bypass this cache.
 use std::sync::Arc;
 
+mod cache;
 use anyhow::{
     Context as _,
     Result,
     ensure,
 };
+pub(crate) use cache::ReadCache;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -39,6 +43,7 @@ pub(crate) struct RunReader {
     pub manifest: RunPlanManifest,
     pub dataset: DatasetManifest,
     pub configuration: RunConfiguration,
+    cache: Option<cache::Scope>,
 }
 
 impl std::fmt::Debug for RunReader {
@@ -57,10 +62,34 @@ pub(crate) async fn document<T: StorageDocument>(
     budget: Budget,
     cancel: &CancellationToken,
 ) -> Result<T> {
-    let bytes = crate::dataset_ingestion::read_bytes(store, reference, budget, cancel).await?;
+    document_cached(store, reference, limits, budget, cancel, None).await
+}
+async fn document_cached<T: StorageDocument>(
+    store: &dyn BlobStorage,
+    reference: &ObjectRef,
+    limits: &FormatLimits,
+    budget: Budget,
+    cancel: &CancellationToken,
+    cache: Option<&cache::Scope>,
+) -> Result<T> {
+    let bytes = read_cached(store, reference, limits, budget, cancel, cache).await?;
     let document: T = decode(&reference.verify(&bytes, limits)?)?;
     document.validate(limits)?;
     Ok(document)
+}
+
+async fn read_cached(
+    store: &dyn BlobStorage,
+    reference: &ObjectRef,
+    limits: &FormatLimits,
+    budget: Budget,
+    cancel: &CancellationToken,
+    cache: Option<&cache::Scope>,
+) -> Result<Vec<u8>> {
+    match cache {
+        Some(cache) => cache.read(store, reference, limits, budget, cancel).await,
+        None => crate::dataset_ingestion::read_bytes(store, reference, budget, cancel).await,
+    }
 }
 
 impl RunReader {
@@ -71,24 +100,71 @@ impl RunReader {
         run_id: Uuid,
         cancel: &CancellationToken,
     ) -> Result<Self> {
+        Self::open_inner(store, reference, limits, run_id, cancel, None).await
+    }
+
+    /// Open immutable worker inputs using a command-scoped cache isolated by the
+    /// binding hash resolved by the caller. Publication/admission readers bypass it.
+    pub async fn open_cached(
+        store: Arc<dyn BlobStorage>,
+        reference: &ObjectRef,
+        limits: FormatLimits,
+        run_id: Uuid,
+        cancel: &CancellationToken,
+        cache: Arc<ReadCache>,
+        binding: String,
+    ) -> Result<Self> {
+        Self::open_inner(
+            store,
+            reference,
+            limits,
+            run_id,
+            cancel,
+            Some(cache::Scope { cache, binding }),
+        )
+        .await
+    }
+    async fn open_inner(
+        store: Arc<dyn BlobStorage>,
+        reference: &ObjectRef,
+        limits: FormatLimits,
+        run_id: Uuid,
+        cancel: &CancellationToken,
+        cache: Option<cache::Scope>,
+    ) -> Result<Self> {
         let budget = Budget::standard();
-        let manifest: RunPlanManifest =
-            document(store.as_ref(), reference, &limits, budget, cancel).await?;
+        let manifest: RunPlanManifest = document_cached(
+            store.as_ref(),
+            reference,
+            &limits,
+            budget,
+            cancel,
+            cache.as_ref(),
+        )
+        .await?;
         ensure!(manifest.run_id == run_id, "run-plan identity mismatch");
         ensure!(
             manifest.dataset.storage_alias == reference.storage_alias,
             "dataset owner mismatch"
         );
-        let configuration: RunConfiguration = document(
+        let configuration: RunConfiguration = document_cached(
             store.as_ref(),
             &manifest.configuration,
             &limits,
             budget,
             cancel,
+            cache.as_ref(),
         )
         .await?;
-        let dataset: DatasetManifest =
-            document(store.as_ref(), &manifest.dataset, &limits, budget, cancel).await?;
+        let dataset: DatasetManifest = document_cached(
+            store.as_ref(),
+            &manifest.dataset,
+            &limits,
+            budget,
+            cancel,
+            cache.as_ref(),
+        )
+        .await?;
         let snapshot = &configuration.snapshot;
         ensure!(
             snapshot["chunk_size"] == 100
@@ -137,6 +213,7 @@ impl RunReader {
             manifest,
             dataset,
             configuration,
+            cache,
         })
     }
 
@@ -168,7 +245,13 @@ impl RunReader {
             index + 1,
         )?;
         let (entry, bytes) = chunks
-            .next(self.store.as_ref(), &self.limits, budget, cancel)
+            .next_cached(
+                self.store.as_ref(),
+                &self.limits,
+                budget,
+                cancel,
+                self.cache.as_ref(),
+            )
             .await?
             .context("missing chunk file")?;
         let page: RunChunkPage = decode(&entry.object.verify(&bytes, &self.limits)?)?;
@@ -209,7 +292,13 @@ impl RunReader {
         let mut hash = blake3::Hasher::new();
         hash.update(b"vigilo/run-shard-cases/v1");
         while let Some((entry, bytes)) = batches
-            .next(self.store.as_ref(), &self.limits, budget, cancel)
+            .next_cached(
+                self.store.as_ref(),
+                &self.limits,
+                budget,
+                cancel,
+                self.cache.as_ref(),
+            )
             .await?
         {
             let verified = entry.object.verify(&bytes, &self.limits)?;
@@ -314,11 +403,12 @@ impl PreparedCases<'_> {
         };
         let reader = self.reader;
         let Some((entry, bytes)) = cursor
-            .next(
+            .next_cached(
                 reader.store.as_ref(),
                 &reader.limits,
                 Budget::standard(),
                 cancel,
+                reader.cache.as_ref(),
             )
             .await?
         else {
@@ -402,12 +492,23 @@ impl IndexCursor {
         budget: Budget,
         cancel: &CancellationToken,
     ) -> Result<Option<(IndexEntry, Vec<u8>)>> {
+        self.next_cached(store, limits, budget, cancel, None).await
+    }
+    async fn next_cached(
+        &mut self,
+        store: &dyn BlobStorage,
+        limits: &FormatLimits,
+        budget: Budget,
+        cancel: &CancellationToken,
+        cache: Option<&cache::Scope>,
+    ) -> Result<Option<(IndexEntry, Vec<u8>)>> {
         if let Some(root) = self.root.take() {
             ensure!(
                 root.object.byte_count <= 4 * 1024 * 1024,
                 "index working set exceeds 4 MiB"
             );
-            let page: IndexPage = document(store, &root.object, limits, budget, cancel).await?;
+            let page: IndexPage =
+                document_cached(store, &root.object, limits, budget, cancel, cache).await?;
             root.validate_page(&page, self.kind.clone(), limits)?;
             self.resident = root.object.byte_count;
             self.stack.push((page, 0, root.object.byte_count));
@@ -425,15 +526,15 @@ impl IndexCursor {
             }
             if page.level == 0 {
                 let bytes =
-                    crate::dataset_ingestion::read_bytes(store, &entry.object, budget, cancel)
-                        .await?;
+                    read_cached(store, &entry.object, limits, budget, cancel, cache).await?;
                 return Ok(Some((entry, bytes)));
             }
             ensure!(
                 self.resident + entry.object.byte_count <= 4 * 1024 * 1024,
                 "index working set exceeds 4 MiB"
             );
-            let child: IndexPage = document(store, &entry.object, limits, budget, cancel).await?;
+            let child: IndexPage =
+                document_cached(store, &entry.object, limits, budget, cancel, cache).await?;
             page.validate_child(*index - 1, &child, limits)?;
             self.resident += entry.object.byte_count;
             self.stack.push((child, 0, entry.object.byte_count));

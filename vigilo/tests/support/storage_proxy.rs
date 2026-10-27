@@ -2,8 +2,10 @@
 //! the signed Host header. Each fixture body is capped at 2 MiB and each handler
 //! at ten seconds; dropping the proxy aborts every owned socket task.
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc,
+        Mutex,
         atomic::{
             AtomicU8,
             AtomicUsize,
@@ -26,11 +28,21 @@ use tokio::{
     task::JoinSet,
 };
 
+/// Complete GET attempts and delivered body bytes, grouped by exact object path.
+/// The fixture allows at most 1,024 distinct paths; it never retains bodies.
+#[derive(Default, Clone, serde::Serialize)]
+pub struct Traffic {
+    pub gets: usize,
+    pub bytes: usize,
+    pub objects: BTreeMap<String, (usize, usize)>,
+}
+
 pub struct Proxy {
     pub endpoint: String,
     pub mode: Arc<AtomicU8>,
     pub requests: Arc<AtomicUsize>,
     pub entered: Arc<Notify>,
+    pub traffic: Arc<Mutex<Traffic>>,
     task: tokio::task::JoinHandle<()>,
 }
 impl Drop for Proxy {
@@ -45,12 +57,18 @@ impl Proxy {
         let mode = Arc::new(AtomicU8::new(0));
         let requests = Arc::new(AtomicUsize::new(0));
         let entered = Arc::new(Notify::new());
-        let (m, r, n) = (mode.clone(), requests.clone(), entered.clone());
+        let traffic = Arc::new(Mutex::new(Traffic::default()));
+        let (m, r, n, t) = (
+            mode.clone(),
+            requests.clone(),
+            entered.clone(),
+            traffic.clone(),
+        );
         let task = tokio::spawn(async move {
             let mut tasks = JoinSet::new();
             loop {
                 tokio::select! {
-                    connection=listener.accept()=>{let Ok((socket,_))=connection else{break;};let (m,r,n,u)=(m.clone(),r.clone(),n.clone(),upstream.clone());tasks.spawn(async move {let _=tokio::time::timeout(Duration::from_secs(10),forward(socket,u,m,r,n)).await;});},
+                    connection=listener.accept()=>{let Ok((socket,_))=connection else{break;};let (m,r,n,u,t)=(m.clone(),r.clone(),n.clone(),upstream.clone(),t.clone());tasks.spawn(async move {let _=tokio::time::timeout(Duration::from_secs(10),forward(socket,u,m,r,n,t)).await;});},
                     _=tasks.join_next(),if !tasks.is_empty()=>{},
                 }
             }
@@ -60,10 +78,12 @@ impl Proxy {
             mode,
             requests,
             entered,
+            traffic,
             task,
         })
     }
     pub fn set(&self, mode: u8) {
+        *self.traffic.lock().unwrap() = Traffic::default();
         self.mode.store(mode, Ordering::SeqCst);
         self.requests.store(0, Ordering::SeqCst);
     }
@@ -77,6 +97,7 @@ async fn forward(
     mode: Arc<AtomicU8>,
     requests: Arc<AtomicUsize>,
     entered: Arc<Notify>,
+    traffic: Arc<Mutex<Traffic>>,
 ) -> anyhow::Result<()> {
     let mut received = Vec::new();
     let mut buffer = [0_u8; 1024];
@@ -110,8 +131,27 @@ async fn forward(
         .transpose()?
         .unwrap_or(0);
     anyhow::ensure!(length <= 2 * 1024 * 1024, "fixture body too large");
-    requests.fetch_add(1, Ordering::SeqCst);
+    if method == "GET" {
+        let mut observed = traffic.lock().unwrap();
+        anyhow::ensure!(
+            observed.objects.contains_key(&path) || observed.objects.len() < 1024,
+            "too many fixture objects"
+        );
+        observed.gets += 1;
+        observed.objects.entry(path.clone()).or_default().0 += 1;
+    }
+    let request_index = requests.fetch_add(1, Ordering::SeqCst);
     let selected = mode.load(Ordering::SeqCst);
+    // Delay one terminal read failure to measure serial recovery head-of-line
+    // blocking; subsequent requests use the real store unchanged.
+    if selected == 5 && request_index == 0 && method == "GET" {
+        entered.notify_one();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        socket
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await?;
+        return Ok(());
+    }
     if selected == 4 && method == "PUT" {
         let url = reqwest::Url::parse(&upstream)?;
         let mut remote = TcpStream::connect((
@@ -161,5 +201,10 @@ async fn forward(
         return Ok(());
     }
     socket.write_all(&bytes).await?;
+    if method == "GET" {
+        let mut observed = traffic.lock().unwrap();
+        observed.bytes += bytes.len();
+        observed.objects.get_mut(&path).unwrap().1 += bytes.len();
+    }
     Ok(())
 }

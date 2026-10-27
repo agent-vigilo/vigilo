@@ -117,6 +117,74 @@ impl Reader {
             Ok(())
         })
     }
+    /// Verifies the fixture's per-shard gate files independently of production
+    /// codecs. Traversal has a fixed bound and rejects cycles, extras and gaps.
+    pub fn gate_counts(
+        &self,
+        control: &str,
+        run_id: &str,
+        gates: usize,
+        cases: usize,
+    ) -> Result<()> {
+        let mut db = PgClient::connect(control, NoTls)?;
+        let reference: Value = db
+            .query_one(
+                "SELECT manifest FROM run_plans WHERE run_id=$1::text::uuid AND status='ready'",
+                &[&run_id],
+            )?
+            .get(0);
+        let manifest: Value = serde_json::from_slice(&self.read(&reference)?)?;
+        ensure!(
+            manifest["run_id"] == run_id && manifest["schema"] == "vigilo/run-plan-manifest/v1",
+            "run manifest identity differs"
+        );
+        let shards = manifest["shards"]
+            .as_array()
+            .context("missing plan shards")?;
+        ensure!(
+            shards.len() == cases.div_ceil(100).min(128),
+            "plan shard count differs"
+        );
+        for (index, shard) in shards.iter().enumerate() {
+            ensure!(shard["run_shard"] == index, "shard order differs");
+            let expected = (0..cases).filter(|n| n / 100 % 128 == index).count();
+            ensure!(
+                shard["case_count"] == expected && shard["gate_counts"]["entry_count"] == gates,
+                "shard coverage differs"
+            );
+            let mut next = shard["gate_counts"]["first"].clone();
+            let mut found = std::collections::BTreeMap::new();
+            let mut pages = 0;
+            while !next.is_null() {
+                ensure!(pages < 64, "gate chain exceeds fixture bound");
+                let page: Value = serde_json::from_slice(&self.read(&next)?)?;
+                ensure!(
+                    page["schema"] == "vigilo/gate-counts/v1" && page["run_shard"] == index,
+                    "gate file identity differs"
+                );
+                for entry in page["entries"].as_array().context("missing gate entries")? {
+                    let id = entry["gate_id"].as_str().context("missing gate ID")?;
+                    ensure!(
+                        found
+                            .insert(id.to_owned(), entry["planned_count"].clone())
+                            .is_none(),
+                        "duplicate gate count"
+                    );
+                }
+                pages += 1;
+                next = page["next"].clone();
+            }
+            let wanted = (0..gates)
+                .map(|n| (format!("gate-{n:02}"), json!(expected)))
+                .collect();
+            ensure!(
+                found == wanted && shard["gate_counts"]["page_count"] == pages,
+                "gate membership differs"
+            );
+        }
+        Ok(())
+    }
+
     fn read(&self, reference: &Value) -> Result<Vec<u8>> {
         ensure!(
             reference["storage_alias"] == "cases" && reference["hash_scheme"] == "blake3-256",

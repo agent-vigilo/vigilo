@@ -64,6 +64,7 @@ profiles.
 | `unit` | Denominator used to interpret the result, such as one process start, case, evaluation, chunk, or run. |
 | `oracle` | Stable name of the exact correctness validation required after execution. Timing is invalid if the oracle fails. |
 | `required_metrics` | External observations required for a valid result. Missing required measurements cannot be treated as a pass. |
+| `statement_budgets` | Optional map from registered tuple to positive absolute SQL statement ceiling. Frozen with the registry; checked by `cargo perf check-queries` independently of timing. |
 | `watchdog_ms` | Hard outer deadline for one execution. Exceeding it terminates the process tree. |
 | `planning_duration_ms` | Conservative duration estimate used to prove the campaign fits its profile cap. It is not an execution timeout. |
 | `preconditioning` | `none`, or `one-per-binary` for one unmeasured execution of each binary before sampling. |
@@ -190,6 +191,7 @@ The harness owns these additive machine-readable contracts:
 | `build-manifest/v1` | Immutable executable, source, toolchain, dependency, setup-asset, and capability provenance. |
 | `service-topology/v1` | Run-owned Compose inventory and redacted service endpoint provenance. |
 | `sample/v1` | Raw execution position, process and scoped external measurements, durable counts, and validation state. |
+| `query-budget-check/v1` | Frozen absolute statement ceilings, source digests, per-tuple counts, database-role maxima, and acceptance verdicts. |
 | `comparison/v1` | Balanced estimator inputs, effects, confidence intervals, diagnostics, and verdict. |
 | `report/v1` | Campaign status, failures, comparison summaries, and artifact links. |
 | `calibration/v1` | Canonical no-change noise bounds, approximate power, repeatability, and recommended independent block counts. |
@@ -215,15 +217,31 @@ that differ from the campaign.
 
 ### Process Memory
 
-Linux samples use `linux-proc-hwm-wait4-cpu-v3`: post-exec `/proc` VmHWM for
-RSS and `wait4` for CPU/exit status. Missing RSS is unavailable; Linux does not
+Linux samples use `linux-proc-exec-hwm-wait4-cpu-v4`: RSS comes from `/proc` VmHWM
+after the kernel's `PF_FORKNOEXEC` flag clears; `wait4` supplies CPU/exit status.
+Missing RSS is unavailable; Linux does not
 substitute `wait4` RSS, which can include the harness address space inherited
 before exec. Required-metric validation rejects missing observations.
 
 ### Sample External Measurements
 
+`sample.external.sql_databases` records each distinct database name, its
+`control`/`execution`/`shared` role, complete statement-category counts, and SQL
+execution/planning milliseconds. Categories are `read`, `dml`, `mixed` (WITH),
+`transaction`, and `other`; they classify syntax, not physical mutations. Their
+sum equals `sql_calls`. Shared databases are never attributed to only one plane.
+Missing detailed counters cannot satisfy a normal query-budget check.
+
+`query-budget-check/v1` reports source campaign/sample and registry digests,
+whether budgets were applied retrospectively, and each tuple's repetition count,
+ceiling, observed minimum/maximum, independent per-role maxima and pass/fail result.
+Reports occupy a separate directory; source campaigns remain unchanged. See
+[Creation Statement Budgets](../README.md#creation-statement-budgets).
+
 `sample.external` records PostgreSQL calls/time/rows, WAL bytes, database-size
 delta, per-public-table `table_writes` deltas (`inserted`, `updated`, `deleted`),
+gateway `storage_counters` deltas (`put_obj_ops`, `put_obj_bytes`,
+`get_obj_ops`, `get_obj_bytes`, `del_obj_ops`),
 HTTP request/byte/peak-concurrency counts, RabbitMQ worker-delivery
 ready/unacknowledged counts, peak sampled service memory/CPU observations, and
 an exact `durable_counts` map from the workload oracle. `query_diagnostics`

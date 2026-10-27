@@ -13,9 +13,14 @@ flowchart TD
     Isolation[Fresh database clone, broker scope, owned object storage and HTTP agent]
     Routed[Optional routed database clones]
     Process[Supported release CLI processes]
+    ExecState{Linux child has executed?}
+    Memory[Child memory observation]
+    NoMemory[Skip memory observation]
     Oracle{Exact SQL and immutable-object oracle}
     Sample[Raw timed sample]
     Diagnostics[Post-timing query, buffer, and WAL diagnostics]
+    QueryBudget{Absolute statement budget check}
+    StatementFailure[Statement budget exceeded]
     DataEvidence[Export stream and per-table page evidence]
     Model{Scaling model acceptance}
     Compare[Counterbalanced baseline/candidate comparison]
@@ -40,10 +45,19 @@ flowchart TD
     Registry --> Profile
     Build --> Isolation
     Profile --> Isolation --> Routed --> Process --> Oracle
+    Process --> ExecState
+    ExecState -->|kernel flag cleared| Memory --> Oracle
+    ExecState -->|pre-exec or unknown| NoMemory
+    NoMemory -->|next observation while running| ExecState
     Oracle -->|exact match| Sample
     Oracle -->|product failure| ProductFailure
     Oracle -->|invalid observation| Invalid
     Sample --> Diagnostics
+    Sample --> QueryBudget
+    Registry --> QueryBudget
+    QueryBudget -->|every repetition within ceiling| Pass
+    QueryBudget -->|ceiling exceeded| StatementFailure
+    QueryBudget -->|missing or inconsistent counters| Invalid
     Sample --> DataEvidence
     Sample --> Model
     Sample --> Compare
@@ -71,9 +85,9 @@ flowchart TD
     Compare -->|noisy, incompatible, or incomplete| Invalid
 
     class Registry,Profile,Build,Deployment,Targets component
-    class Isolation,Routed,Process,Sample,Resident system
-    class Oracle,Model,Projection,Reliability decision
+    class Isolation,Routed,Process,Sample,Resident,Memory system
+    class Oracle,Model,Projection,Reliability,QueryBudget,ExecState decision
     class Diagnostics,DataEvidence,Noise,Capacity,Staging,Budget,Compare,Fault,Actions external
     class Pass success
-    class Informative,Inconclusive warning
-    class Regression,ProductFailure,Invalid error
+    class Informative,Inconclusive,NoMemory warning
+    class Regression,ProductFailure,StatementFailure,Invalid error

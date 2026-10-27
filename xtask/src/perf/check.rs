@@ -43,7 +43,7 @@ use super::{
     schedule,
 };
 
-const PROFILES: [&str; 12] = [
+const PROFILES: [&str; 16] = [
     "developer-v1",
     "pr-v1",
     "reference-v1",
@@ -56,6 +56,10 @@ const PROFILES: [&str; 12] = [
     "admin-smoke-v1",
     "recovery-v1",
     "soak-v1",
+    "ingestion-baseline-v1",
+    "ingestion-reference-v1",
+    "creation-query-v1",
+    "creation-query-matrix-v1",
 ];
 
 #[derive(Debug, Deserialize)]

@@ -7,6 +7,12 @@
 
 mod support;
 
+#[path = "multi_database_e2e/recovery.rs"]
+mod recovery;
+
+#[path = "multi_database_e2e/worker_storage.rs"]
+mod worker_storage;
+
 use std::{
     fs,
     io::{
@@ -637,6 +643,99 @@ async fn unpublished_evaluator_is_rejected() -> anyhow::Result<()> {
         String::from_utf8_lossy(&invalid.stderr)
     );
 
+    Ok(())
+}
+
+/// A storage outage must release the chunk without fabricating execution evidence;
+/// restoring the read route lets the same queued assignment finish exactly once.
+#[tokio::test]
+async fn worker_storage_outage_retries_without_execution_and_recovers() -> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "e2e_storage_recovery",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+
+    // Only this child receives the fault. The canonical binding and real stored
+    // objects stay intact; no process-wide environment or shared service is changed.
+    let owner_path = std::env::var("VIGILO_STORAGE_CONFIG")?;
+    let mut owner: toml::Value = toml::from_str(&std::fs::read_to_string(owner_path)?)?;
+    owner
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("storage owner is not a table"))?
+        .insert(
+            "read_endpoint_variable".into(),
+            toml::Value::String("VIGILO_E2E_FAULT_ENDPOINT".into()),
+        );
+    let directory = tempfile::tempdir()?;
+    let owner_path = directory.path().join("storage.toml");
+    std::fs::write(&owner_path, toml::to_string(&owner)?)?;
+    let unavailable = {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        format!("http://{}", listener.local_addr()?)
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_vigilo"))
+        .env(PRIMARY_DATABASE_URL_ENV, &fixture.config.primary_url)
+        .env(SHARD_DATABASE_URL_ENV, &fixture.config.shard_url)
+        .env("MESSAGING_URL", &fixture.config.messaging_url)
+        .env("VIGILO_MQ_NAMESPACE", &fixture.config.mq_namespace)
+        .env("VIGILO_DEFAULT_SHARD_DATABASE_ALIAS", SHARD_ALIAS)
+        .env("VIGILO_SHARD_ASSIGNMENT_POLICY", "single-default")
+        .env("VIGILO_STORAGE_CONFIG", &owner_path)
+        .env("VIGILO_E2E_FAULT_ENDPOINT", unavailable)
+        .args(["-q", "worker", "once"])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "worker failed instead of scheduling storage retry: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(execution_count(&fixture.primary, run).await?, 0);
+    assert_eq!(execution_count(&fixture.shard, run).await?, 0);
+    assert_eq!(
+        run_chunk_status_count(&fixture.shard, run, "pending").await?,
+        1
+    );
+    let attempts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM execution_attempts WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&fixture.shard)
+            .await?;
+    assert_eq!(attempts, 0);
+
+    let status = drive_run_to_status(
+        &fixture,
+        "storage read recovery",
+        SHARD_ALIAS,
+        "single-default",
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(status["data"]["gate_status"], "pass");
+    assert_eq!(status["data"]["expected_execution_count"], 1);
+    assert_eq!(status["data"]["terminal_execution_count"], 1);
+    assert_eq!(execution_count(&fixture.shard, run).await?, 1);
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
+        1
+    );
     Ok(())
 }
 

@@ -16,7 +16,7 @@ flowchart TD
     Claim{Chunk claimable?}
     Context[Load and verify pinned run context]
     Warm[Warm evaluator components]
-    Cases[Fetch assigned blob batches and verify integrity and membership]
+    Cases[Read exact immutable bytes from bounded cache or storage; verify complete files and membership]
     Permit[Acquire Wasm evaluation permits]
     Execute[Dispatch pinned ABI adapters in sandboxed stores]
     Persist[Persist terminal transitions]

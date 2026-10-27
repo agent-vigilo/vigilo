@@ -17,8 +17,10 @@ use crate::blob_storage::{
     Transport,
 };
 
+type GetLog = Arc<Mutex<Vec<(StorageFormat, u64)>>>;
+
 #[derive(Clone, Default)]
-struct Memory(Arc<Mutex<BTreeMap<String, Vec<u8>>>>);
+struct Memory(Arc<Mutex<BTreeMap<String, Vec<u8>>>>, GetLog);
 fn error(kind: ErrorKind) -> StorageError {
     StorageError {
         kind,
@@ -57,6 +59,7 @@ impl Transport for Memory {
             .get(&r.key)
             .cloned()
             .ok_or_else(|| error(ErrorKind::Missing))?;
+        self.1.lock().unwrap().push((r.schema, bytes.len() as u64));
         Ok(Download {
             length: bytes.len() as u64,
             revision: None,
@@ -86,13 +89,20 @@ fn metadata<T: StorageDocument>(memory: &Memory, limits: &FormatLimits, value: &
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_shape(101, 128, 0).await
+    }
+    async fn with_shape(count: usize, batch_cases: usize, padding: usize) -> Self {
         let limits = FormatLimits {
             batch: BatchLimits {
-                max_cases: 128,
+                max_cases: batch_cases,
                 ..Default::default()
             },
             ..Default::default()
         };
+        Self::with_limits(count, padding, limits).await
+    }
+    async fn with_limits(count: usize, padding: usize, limits: FormatLimits) -> Self {
+        let batch_cases = limits.batch.max_cases;
         let memory = Memory::default();
         let cancel = CancellationToken::new();
         let store: Arc<dyn BlobStorage> = Arc::new(
@@ -111,27 +121,38 @@ impl Fixture {
         let run = Uuid::from_u128(1);
         let dataset_id = Uuid::from_u128(2);
         let dataset_version_id = Uuid::from_u128(3);
-        let records=(0..101).map(|n|{
-            let source=json!({"id":Uuid::from_u128(n+10),"task_type":"classification","input":{"text":format!("case {n}")},"expected":null,"context":null,"tags":["zeta","release","alpha","release"],"metadata":{"position":n}});
+        let records=(0..count as u128).map(|n|{
+            let source=json!({"id":Uuid::from_u128(n+10),"task_type":"classification","input":{"text":format!("case {n}{}", "x".repeat(padding))},"expected":null,"context":null,"tags":["zeta","release","alpha","release"],"metadata":{"position":n}});
             let typed=serde_json::from_value(source.clone()).unwrap();
             CaseRecord{case_ordinal:n as i32,case_hash:identity::case_hash(&typed).unwrap(),source}
         }).collect::<Vec<_>>();
-        let batch = put(
-            &memory,
-            &limits,
-            StorageFormat::CaseBatch,
-            encode_batch(
-                &CaseBatchHeader {
-                    schema: StorageFormat::CaseBatch,
-                    dataset_id,
-                    ordinal_start: 0,
-                    ordinal_end: 101,
-                },
-                &records,
+        let mut entries = Vec::new();
+        for records in records.chunks(batch_cases) {
+            let start = records.first().unwrap().case_ordinal;
+            let end = records.last().unwrap().case_ordinal + 1;
+            let object = put(
+                &memory,
                 &limits,
-            )
-            .unwrap(),
-        );
+                StorageFormat::CaseBatch,
+                encode_batch(
+                    &CaseBatchHeader {
+                        schema: StorageFormat::CaseBatch,
+                        dataset_id,
+                        ordinal_start: start,
+                        ordinal_end: end,
+                    },
+                    records,
+                    &limits,
+                )
+                .unwrap(),
+            );
+            entries.push(IndexEntry {
+                range_start: start,
+                range_end: end,
+                object,
+            });
+        }
+        let batch = entries[0].object.clone();
         let batches = metadata(
             &memory,
             &limits,
@@ -140,12 +161,8 @@ impl Fixture {
                 kind: IndexKind::DatasetBatches,
                 level: 0,
                 range_start: 0,
-                range_end: 101,
-                entries: vec![IndexEntry {
-                    range_start: 0,
-                    range_end: 101,
-                    object: batch.clone(),
-                }],
+                range_end: count as i32,
+                entries,
             },
         );
         let fields = metadata(
@@ -164,20 +181,21 @@ impl Fixture {
             dataset_version_id,
             dataset_hash: "0".repeat(64),
             identity_scheme: IdentityScheme::DatasetJson,
-            case_count: 101,
+            case_count: count as i32,
             batch_limits: limits.batch,
             source_fields: fields,
             batches: IndexDescriptor {
                 level: 0,
                 range_start: 0,
-                range_end: 101,
+                range_end: count as i32,
                 object: batches,
             },
         };
         let dataset_ref = metadata(&memory, &limits, &dataset);
         let mut chunks = Vec::new();
         let mut plans = Vec::new();
-        for (index, (start, end)) in [(0, 100), (100, 101)].into_iter().enumerate() {
+        for (index, start) in (0..count as i32).step_by(100).enumerate() {
+            let end = (start + 100).min(count as i32);
             let id = Uuid::from_u128(index as u128 + 1000);
             let shard = index as i16;
             let mut hash = blake3::Hasher::new();
@@ -227,7 +245,7 @@ impl Fixture {
                 schema: StorageFormat::RunChunks,
                 run_id: run,
                 chunk_index_start: 0,
-                chunk_index_end: 2,
+                chunk_index_end: chunks.len() as i32,
                 chunks: plans,
             },
         );
@@ -239,10 +257,10 @@ impl Fixture {
                 kind: IndexKind::RunChunks,
                 level: 0,
                 range_start: 0,
-                range_end: 2,
+                range_end: chunks.len() as i32,
                 entries: vec![IndexEntry {
                     range_start: 0,
-                    range_end: 2,
+                    range_end: chunks.len() as i32,
                     object: chunk_file,
                 }],
             },
@@ -255,7 +273,7 @@ impl Fixture {
             identity::hash_serialized_json(&identity::canonical_json(&profile)).unwrap();
         let configuration = RunConfiguration {
             schema: StorageFormat::RunConfiguration,
-            snapshot: json!({"profile":profile,"agent":profile["agent"],"dataset_ref":{"dataset_id":dataset_id,"dataset_version":null,"dataset_version_id":dataset_version_id,"dataset_hash":dataset.dataset_hash,"case_count":101},"dataset_version_id":dataset_version_id,"profile_version_id":"fixture/1","profile_hash":profile_hash,"dataset_hash":dataset.dataset_hash,"aggregation_policy_hash":execution.aggregation_policy_hash,"execution_plan_hash":execution.hash().unwrap(),"execution_plan":execution,"chunk_size":100,"executability":{"expected_execution_count":101,"expected_evaluator_execution_count":101,"unique_evaluator_ref_count":1,"runnable_evaluator_ref_count":1}}),
+            snapshot: json!({"profile":profile,"agent":profile["agent"],"dataset_ref":{"dataset_id":dataset_id,"dataset_version":null,"dataset_version_id":dataset_version_id,"dataset_hash":dataset.dataset_hash,"case_count":count},"dataset_version_id":dataset_version_id,"profile_version_id":"fixture/1","profile_hash":profile_hash,"dataset_hash":dataset.dataset_hash,"aggregation_policy_hash":execution.aggregation_policy_hash,"execution_plan_hash":execution.hash().unwrap(),"execution_plan":execution,"chunk_size":100,"executability":{"expected_execution_count":count,"expected_evaluator_execution_count":count,"unique_evaluator_ref_count":1,"runnable_evaluator_ref_count":1}}),
         };
         let config = metadata(&memory, &limits, &configuration);
         let manifest = RunPlanManifest {
@@ -266,17 +284,17 @@ impl Fixture {
             aggregation_policy_hash: execution.aggregation_policy_hash.clone(),
             execution_plan_hash: execution.hash().unwrap(),
             configuration: config,
-            chunk_count: 2,
+            chunk_count: chunks.len() as i32,
             chunks: IndexDescriptor {
                 level: 0,
                 range_start: 0,
-                range_end: 2,
+                range_end: chunks.len() as i32,
                 object: index,
             },
-            shards: (0..2)
+            shards: (0..chunks.len() as i16)
                 .map(|n| RunPlanShard {
                     run_shard: n,
-                    case_count: if n == 0 { 100 } else { 1 },
+                    case_count: (count as i32 - i32::from(n) * 100).min(100),
                     chunk_count: 1,
                     planned_chunk_hash: "2".repeat(64),
                     gate_counts: GateCountDescriptor {
@@ -288,9 +306,17 @@ impl Fixture {
                 .collect(),
         };
         let root = metadata(&memory, &limits, &manifest);
-        let reader = RunReader::open(store, &root, limits, run, &cancel)
-            .await
-            .unwrap();
+        let reader = RunReader::open_cached(
+            store,
+            &root,
+            limits,
+            run,
+            &cancel,
+            Arc::new(ReadCache::default()),
+            "fixture-owner".into(),
+        )
+        .await
+        .unwrap();
         Self {
             reader,
             chunks,
@@ -407,14 +433,25 @@ async fn an_unrequested_invalid_tail_rejects_the_whole_case_file() {
         },
     );
     f.reader.dataset.batches.object = index;
-    assert!(
-        f.reader
-            .cases(&f.chunks[0], &CancellationToken::new())
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("ordinal")
-    );
+    let mut first_reads = None;
+    for _ in 0..2 {
+        assert!(
+            f.reader
+                .cases(&f.chunks[0], &CancellationToken::new())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("ordinal")
+        );
+        let reads = f.memory.1.lock().unwrap().len();
+        if let Some(first) = first_reads {
+            assert_eq!(
+                reads, first,
+                "invalid tail must also be rejected on a cache hit"
+            );
+        }
+        first_reads = Some(reads);
+    }
 }
 
 #[tokio::test]
@@ -466,3 +503,114 @@ async fn incorrect_shard_distribution_is_rejected_before_admission() {
     .unwrap_err();
     assert!(error.to_string().contains("shard totals"));
 }
+
+/// Counts every root, index and payload download through the real input reader,
+/// including a retry. Each shard context opens its own reader, as workers do.
+#[tokio::test]
+async fn worker_input_traffic_observations() {
+    for (name, count, batch_cases, padding, batch_bytes) in [
+        ("aligned", 400, 100, 1024, 8 * 1024 * 1024),
+        ("smaller_files", 400, 64, 1024, 8 * 1024 * 1024),
+        ("larger_files", 400, 250, 1024, 8 * 1024 * 1024),
+        ("reread", 200, 4, 4096, 24 * 1024),
+        ("oversize_uncached", 200, 100, 12 * 1024, 8 * 1024 * 1024),
+    ] {
+        let mut limits = FormatLimits::default();
+        limits.batch.max_cases = batch_cases;
+        limits.batch.max_bytes = batch_bytes;
+        limits.resident_batch_bytes = batch_bytes * limits.resident_batches;
+        let f = Fixture::with_limits(count, padding, limits).await;
+        let cache = Arc::new(ReadCache::default());
+        let mut observations = Vec::new();
+        for cached in [false, true] {
+            f.memory.1.lock().unwrap().clear();
+            let mut readers = Vec::new();
+            for chunk in &f.chunks {
+                let reader = if cached {
+                    RunReader::open_cached(
+                        f.reader.store.clone(),
+                        &f.root,
+                        f.reader.limits.clone(),
+                        chunk.run_id,
+                        &CancellationToken::new(),
+                        cache.clone(),
+                        "fixture-owner".into(),
+                    )
+                    .await
+                    .unwrap()
+                } else {
+                    RunReader::open(
+                        f.reader.store.clone(),
+                        &f.root,
+                        f.reader.limits.clone(),
+                        chunk.run_id,
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap()
+                };
+                assert_cases(&reader, chunk).await;
+                readers.push(reader);
+            }
+            assert_cases(&readers[0], &f.chunks[0]).await;
+            let traffic = f.memory.1.lock().unwrap();
+            let payload = traffic
+                .iter()
+                .filter(|(kind, _)| *kind == StorageFormat::CaseBatch)
+                .collect::<Vec<_>>();
+            let bytes = traffic.iter().map(|(_, n)| n).sum::<u64>();
+            observations.push((traffic.len(), bytes));
+            println!(
+                "worker_input_traffic={}",
+                json!({"scenario":name,"cases":count,
+                "retry_chunks":1,"gets":traffic.len(),"get_bytes":bytes,
+                "payload_gets":payload.len(),"payload_bytes":payload.iter().map(|(_,n)|n).sum::<u64>(),
+                "mode":if cached {"cached"} else {"uncached"}})
+            );
+            if cached {
+                let expected_payload = if name == "oversize_uncached" {
+                    3
+                } else {
+                    count.div_ceil(batch_cases)
+                };
+                assert_eq!(payload.len(), expected_payload);
+                assert_eq!(traffic.len(), expected_payload + 6);
+            }
+        }
+        assert!(observations[1].0 < observations[0].0);
+        assert!(observations[1].1 < observations[0].1);
+    }
+}
+async fn assert_cases(reader: &RunReader, chunk: &ClaimedChunk) {
+    let cases = reader
+        .cases(chunk, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        cases.len(),
+        (chunk.ordinal_end - chunk.ordinal_start) as usize
+    );
+    for (offset, case) in cases.iter().enumerate() {
+        let ordinal = chunk.ordinal_start + offset as i32;
+        assert_eq!(case.case_id, Uuid::from_u128(ordinal as u128 + 10));
+        assert_eq!(case.case_ordinal, ordinal);
+        assert_eq!(case.metadata["position"], ordinal);
+        assert_eq!(case.tags, json!(["alpha", "release", "release", "zeta"]));
+        assert!(case.expected_output.is_null() && case.context_payload.is_null());
+    }
+}
+#[tokio::test]
+async fn retry_reuses_complete_verified_files_without_remote_reads() {
+    let f = Fixture::new().await;
+    assert_cases(&f.reader, &f.chunks[0]).await;
+    f.memory.1.lock().unwrap().clear();
+    assert_cases(&f.reader, &f.chunks[0]).await;
+    assert_eq!(
+        f.memory.1.lock().unwrap().len(),
+        0,
+        "retry should reuse verified immutable bytes"
+    );
+}
+
+#[path = "tests/cache.rs"]
+mod cache_tests;

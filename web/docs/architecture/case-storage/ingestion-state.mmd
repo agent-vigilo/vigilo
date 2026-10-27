@@ -1,6 +1,6 @@
 stateDiagram-v2
     [*] --> staging: validated input and admitted upload
-    staging --> staging: verified file acknowledgement / resumable failure
+    staging --> staging: atomic verified-prefix checkpoint / resumable failure
     staging --> finalizing: every case range acknowledged
     finalizing --> finalizing: verify membership and publish bounded metadata
     finalizing --> finalized: live generation / atomic catalog commit

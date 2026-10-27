@@ -3,6 +3,8 @@
 //! Local commits precede control acknowledgements and are exactly replayable.
 //! Only an exact, fully seeded plan can publish routes and dispatch cursors in
 //! the activation transaction. Case payloads and per-case lists never enter SQL.
+pub(crate) mod placement;
+
 use std::collections::BTreeMap;
 
 use anyhow::{

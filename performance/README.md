@@ -76,6 +76,9 @@ environment, and generated-artifact field reference.
 | Profile | Purpose |
 | --- | --- |
 | `developer-v1` | Fast local diagnosis of explicitly selected workloads using two balanced blocks. |
+| `ingestion-reference-v1` | Creation from finalized dataset references, without submitting source files again. |
+| `creation-query-v1` | 50,000-case fresh, reused-source and finalized-reference creation with absolute SQL statement budgets. |
+| `creation-query-matrix-v1` | File/checkpoint/index-page boundaries, gates, separate execution databases and four concurrent creators. |
 | `ingestion-baseline-v1` | Initial run creation across case counts, payload sizes, and reuse of a finalized dataset, with physical row-write counters and independently verified immutable case files. |
 | `pr-v1` | Pull-request correctness checks and short, informative timing canaries. |
 | `reference-v1` | Broader repeatable comparison across the complete MVP workload matrix. |
@@ -248,8 +251,9 @@ comparison, budget, or model verdict.
 single PostgreSQL placement that owns both control and execution data. The
 `ingestion-baseline-v1` profile uses 1,000/10,000/50,000-case points, 1/16 KiB
 per-case padding, and fresh/reused datasets. Reuse preparation creates the first
-run before collector reset; only the second run is measured. Counts stay below
-the default 64,000-case creation handoff so all selected runs reach `pending`.
+run before collector reset; only the second run is measured. All selected runs
+reach `pending`; the oracle verifies exact metadata admission before accepting a
+sample.
 
 ```bash
 cargo perf run --profile ingestion-baseline-v1 \
@@ -259,13 +263,17 @@ cargo perf run --profile ingestion-baseline-v1 \
   --output target/perf/runs/ingestion-measurement
 ```
 
-On Linux, memory is sampled from the child's post-exec `/proc` high-water mark;
-`wait4` provides CPU and exit status. If RSS cannot be observed, it stays
+On Linux, memory is sampled from the child's `/proc` high-water mark only after
+the kernel clears `PF_FORKNOEXEC`. Spawn can return before that transition;
+sampling earlier would count the harness's inherited address space. Missing or
+malformed exec state is not accepted as a memory observation. `wait4` provides
+CPU and exit status. If RSS cannot be observed, it stays
 unavailable and workloads requiring it fail validation.
 
-The exact oracle checks actual case blobs, dataset membership, run-local case
-membership, payload bytes, chunk counts, completed creation, and zero premature
-execution/dispatch. External counters are captured before these oracle reads.
+The exact oracle reads immutable case files and checks their hashes, contiguous
+membership, payload bytes, catalog reuse, chunk counts, completed creation, absence
+of SQL case tables, and zero premature execution/dispatch. External counters are
+captured before these oracle reads.
 `sql_rows` includes reads; `table_writes` reports physical inserted/updated/deleted
 tuples independently of bulk statement grouping. SQL calls include the collector's
 WAL-position query, and WAL includes server background work in the isolated
@@ -274,6 +282,19 @@ make WAL and database growth much smaller than submitted bytes. Retain this
 fixture characteristic when comparing results; it is not an incompressible-data
 capacity test. Reuse is data reuse in a freshly cloned sample database, not a
 promise of warm operating-system caches.
+
+The `reuse` tuples resubmit the source file and reuse its finalized catalog.
+The separate `ingestion-reference-v1` profile selects `reference` tuples of the
+same workload: setup creates a finalized dataset, and the measured command sends
+only its upload ID and the profile. This separates source validation cost from
+reference-based creation. Both variants use the same independent stored-case oracle.
+
+`sample.external.storage_counters` records Ceph gateway object GET/PUT/DELETE
+operations and GET/PUT payload bytes. Counters are captured before and after the
+measured command, before oracle reads. They include capability probes and metadata
+objects; they exclude bucket health checks and HTTP framing. Counter resets,
+missing fields or collector failure invalidate the measurement. They describe the
+campaign-owned Ceph gateway, not cloud billing or physical disk operations.
 
 Local runs provide informative evidence with raw samples and provenance. They do
 not establish fleet throughput or satisfy canonical publication requirements.
@@ -583,6 +604,59 @@ next sample, and followed by exact resource cleanup. It is not part of normal
 unit, PostgreSQL, migration, or end-to-end tiers.
 
 ## Results
+
+### Creation Statement Budgets
+
+Run creation measurements with `creation-query-v1` and
+`creation-query-matrix-v1`, then check their frozen statement budgets:
+
+```bash
+cargo perf check-queries --run-dir target/perf/runs/<campaign>
+```
+
+The checker reads the campaign's frozen registry `statement_budgets` and requires
+every selected tuple and repetition to have passed its correctness oracle. Every
+sample must fit its absolute ceiling. Exit `0` means the statement budgets pass,
+`1` means at least one budget fails, and `2` means evidence is invalid or incomplete.
+The separate report records source digests and the exact budget registry without
+modifying the campaign. A normal `cargo perf run` pass establishes correctness;
+it does not establish statement-budget acceptance.
+
+The 50,000-case / 1 KiB-padding ceilings are 600 statements for fresh creation
+and 300 for reused-source or finalized-reference creation. These are acceptance
+targets, not measured capacity promises. They count transaction commands and
+both database planes, and exclude execution/settlement and blob requests. Other
+tuples have explicit ceilings in the registry. None of these counts estimates
+fleet concurrency by itself. `--retrospective` explicitly applies current registry
+budgets to historical total-only samples; that report cannot establish separate
+control/execution attribution.
+
+`sample.external.sql_databases` contains complete syntactic statement categories
+per distinct database: `read`, `dml`, `mixed` (`WITH`), `transaction`, and `other`.
+Unknown syntax stays in `other`; CTEs may mutate data and stay in `mixed`.
+SELECT functions may also write, so these categories do not replace physical
+`table_writes`. Category totals reconcile exactly with `sql_calls` and are
+independent of the truncated top-query diagnostics. Database roles are `control`,
+`execution`, or `shared`; shared placement counts cannot be assigned to one plane.
+Repeated database URLs are counted once. Database names, not connection URLs,
+appear in these observations.
+
+The collector requires top-level statement and utility-command tracking. Counter
+resets or statement-entry eviction invalidate the measurement. Its historical
+SQL-call filter and one post-process WAL-position read remain unchanged; setup
+validation runs before reset and exact idle-counter tests guard collector overhead.
+
+The matrix keeps default 100-case files and execution chunks. It tests both sides
+of a file boundary, 32/64-file checkpoint group sizes, and a 256-chunk plan-page
+boundary; it also exercises one/eight gates, a control-only database with two
+execution placements, and four simultaneous creators of distinct runs from one
+finalized dataset. Tuple suffixes record gates, execution placements and creator
+count; zero placements denotes the combined default database. Each creator must
+produce a distinct run with exact stored cases, scheduling coverage and frozen
+gate denominators. The concurrent tuple counts all four creations together.
+Its wall time covers the group and CPU is summed; peak RSS is the largest child
+peak, not total concurrent resident memory. Setup and independent verification
+remain outside measurement, and every child is bounded and reaped.
 
 Run output is written only below `target/perf/runs`. Each directory contains:
 

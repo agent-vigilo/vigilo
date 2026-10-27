@@ -47,8 +47,10 @@ use crate::{
 };
 mod accumulator;
 mod dataset;
+mod files;
 use accumulator::Accumulator;
 use dataset::DatasetCursor;
+use files::Writer;
 
 /// One caller's authority and admitted storage policy. Budgets are minted before
 /// renewing the lease so expired callers cannot begin fresh remote operations.
@@ -78,70 +80,6 @@ impl Session<'_> {
             *last = tokio::time::Instant::now();
         }
         Ok(())
-    }
-    #[allow(clippy::too_many_arguments)]
-    async fn put(
-        &self,
-        kind: &str,
-        level: u8,
-        start: i32,
-        end: i32,
-        schema: StorageFormat,
-        bytes: Vec<u8>,
-    ) -> Result<ObjectRef> {
-        let digest = blake3::hash(&bytes).to_hex().to_string();
-        let reference = ObjectRef::for_bytes(
-            self.alias.into(),
-            format!(
-                "runs/{}/{kind}/{level}/{start}-{end}/{digest}",
-                self.lease.run_id
-            ),
-            schema,
-            &bytes,
-            self.limits,
-        )?;
-        let object = Object {
-            object_key: reference.key.clone(),
-            kind: kind.into(),
-            level: i16::from(level),
-            range_start: Some(start),
-            range_end: Some(end),
-            reference: sqlx::types::Json(reference.clone()),
-            acknowledged: false,
-        };
-        let budget = Budget::standard();
-        if ledger::plan(self.db, self.lease, &object).await? {
-            read_bytes(self.store, &reference, budget, self.cancel).await?;
-        } else {
-            self.store
-                .create(
-                    &reference,
-                    Box::new(std::io::Cursor::new(bytes)),
-                    budget,
-                    self.cancel,
-                )
-                .await?;
-            ledger::acknowledge(self.db, self.lease, &object).await?;
-        }
-        Ok(reference)
-    }
-    async fn document<T: StorageDocument>(
-        &self,
-        kind: &str,
-        level: u8,
-        start: i32,
-        end: i32,
-        doc: &T,
-    ) -> Result<ObjectRef> {
-        self.put(
-            kind,
-            level,
-            start,
-            end,
-            T::SCHEMA,
-            encode(doc, self.limits)?,
-        )
-        .await
     }
 }
 
@@ -243,6 +181,7 @@ pub(crate) async fn prepare(session: &Session<'_>, request: Request<'_>) -> Resu
         profile,
         assignments,
     )?;
+    let mut writer = Writer::new(session);
     let mut page = ChunkBuffer {
         chunks: Vec::new(),
         estimated_bytes: 256,
@@ -261,19 +200,19 @@ pub(crate) async fn prepare(session: &Session<'_>, request: Request<'_>) -> Resu
             let record = record?;
             identity.push(&record)?;
             if let Some(chunk) = accumulator.push(&record)? {
-                push_chunk(session, &mut page, chunk).await?;
+                push_chunk(&mut writer, &mut page, chunk).await?;
             }
         }
     }
     if let Some(chunk) = accumulator.finish_chunk()? {
-        push_chunk(session, &mut page, chunk).await?;
+        push_chunk(&mut writer, &mut page, chunk).await?;
     }
     if !page.chunks.is_empty() {
-        write_chunks(session, std::mem::take(&mut page.chunks)).await?;
+        write_chunks(&mut writer, std::mem::take(&mut page.chunks)).await?;
     }
     identity.verify(&manifest, session.limits)?;
     accumulator.validate_complete(manifest.case_count)?;
-    let chunks = build_index(session).await?;
+    let chunks = build_index(&mut writer).await?;
     let mut shards = Vec::new();
     let mut metadata = Vec::new();
     for (shard, state) in &accumulator.shards {
@@ -285,7 +224,7 @@ pub(crate) async fn prepare(session: &Session<'_>, request: Request<'_>) -> Resu
                 planned_count: *count,
             })
             .collect::<Vec<_>>();
-        let gate_counts = write_gates(session, *shard, entries).await?;
+        let gate_counts = write_gates(&mut writer, *shard, entries).await?;
         shards.push(RunPlanShard {
             run_shard: *shard,
             case_count: state.plan.case_count,
@@ -314,7 +253,7 @@ pub(crate) async fn prepare(session: &Session<'_>, request: Request<'_>) -> Resu
         .context("configuration must be an object")?;
     fields.remove("dataset_manifest");
     fields.remove("storage_binding_hash");
-    let configuration = session
+    let configuration = writer
         .document(
             "configuration",
             0,
@@ -340,7 +279,8 @@ pub(crate) async fn prepare(session: &Session<'_>, request: Request<'_>) -> Resu
         chunks,
         shards,
     };
-    let reference = session.document("manifest", 0, 0, 1, &root).await?;
+    let reference = writer.document("manifest", 0, 0, 1, &root).await?;
+    writer.flush().await?;
     ledger::publish(session.db, session.lease, &root, &reference, &metadata).await?;
     Ok(reference)
 }
@@ -349,29 +289,33 @@ struct ChunkBuffer {
     chunks: Vec<RunChunk>,
     estimated_bytes: usize,
 }
-async fn push_chunk(session: &Session<'_>, page: &mut ChunkBuffer, chunk: RunChunk) -> Result<()> {
+async fn push_chunk(
+    writer: &mut Writer<'_, '_>,
+    page: &mut ChunkBuffer,
+    chunk: RunChunk,
+) -> Result<()> {
     let bytes = serde_json::to_vec(&chunk)?.len() + 1;
     ensure!(
-        256 + bytes <= session.limits.page_bytes,
+        256 + bytes <= writer.session.limits.page_bytes,
         "chunk cannot fit admitted page"
     );
     if !page.chunks.is_empty()
-        && (page.chunks.len() == session.limits.page_entries
-            || page.estimated_bytes + bytes > session.limits.page_bytes)
+        && (page.chunks.len() == writer.session.limits.page_entries
+            || page.estimated_bytes + bytes > writer.session.limits.page_bytes)
     {
-        write_chunks(session, std::mem::take(&mut page.chunks)).await?;
+        write_chunks(writer, std::mem::take(&mut page.chunks)).await?;
         page.estimated_bytes = 256;
     }
-    session.keep_alive().await?;
+    writer.session.keep_alive().await?;
     page.estimated_bytes += bytes;
     page.chunks.push(chunk);
     Ok(())
 }
 
-async fn write_chunks(session: &Session<'_>, chunks: Vec<RunChunk>) -> Result<()> {
+async fn write_chunks(writer: &mut Writer<'_, '_>, chunks: Vec<RunChunk>) -> Result<()> {
     let start = chunks.first().context("empty chunk page")?.chunk_index;
     let end = chunks.last().context("empty chunk page")?.chunk_index + 1;
-    session
+    writer
         .document(
             "chunks",
             0,
@@ -379,7 +323,7 @@ async fn write_chunks(session: &Session<'_>, chunks: Vec<RunChunk>) -> Result<()
             end,
             &RunChunkPage {
                 schema: StorageFormat::RunChunks,
-                run_id: session.lease.run_id,
+                run_id: writer.session.lease.run_id,
                 chunk_index_start: start,
                 chunk_index_end: end,
                 chunks,
@@ -389,7 +333,7 @@ async fn write_chunks(session: &Session<'_>, chunks: Vec<RunChunk>) -> Result<()
     Ok(())
 }
 async fn write_gates(
-    session: &Session<'_>,
+    writer: &mut Writer<'_, '_>,
     shard: i16,
     entries: Vec<GateCount>,
 ) -> Result<GateCountDescriptor> {
@@ -399,7 +343,7 @@ async fn write_gates(
     let mut pages = 0i32;
     let mut end = entries.len();
     while end > 0 {
-        let mut start = end.saturating_sub(session.limits.page_entries);
+        let mut start = end.saturating_sub(writer.session.limits.page_entries);
         let (doc, bytes) = loop {
             let doc = GateCountPage {
                 schema: StorageFormat::GateCounts,
@@ -407,7 +351,7 @@ async fn write_gates(
                 entries: entries[start..end].to_vec(),
                 next: next.clone(),
             };
-            match encode(&doc, session.limits) {
+            match encode(&doc, writer.session.limits) {
                 Ok(bytes) => break (doc, bytes),
                 Err(error) if start + 1 < end => {
                     start += 1;
@@ -418,7 +362,7 @@ async fn write_gates(
         };
         let _ = doc;
         next = Some(
-            session
+            writer
                 .put(
                     "gates",
                     0,
@@ -438,8 +382,9 @@ async fn write_gates(
         entry_count: total,
     })
 }
-async fn build_index(session: &Session<'_>) -> Result<IndexDescriptor> {
-    for level in 0..session.limits.index_height {
+async fn build_index(writer: &mut Writer<'_, '_>) -> Result<IndexDescriptor> {
+    for level in 0..writer.session.limits.index_height {
+        writer.flush().await?;
         let kind = if level == 0 { "chunks" } else { "index" };
         let child_level = if level == 0 { 0 } else { i16::from(level) - 1 };
         let mut after = -1;
@@ -448,8 +393,14 @@ async fn build_index(session: &Session<'_>) -> Result<IndexDescriptor> {
         let mut count = 0;
         let mut last = None;
         loop {
-            let rows =
-                ledger::objects(session.db, session.lease.run_id, kind, child_level, after).await?;
+            let rows = ledger::objects(
+                writer.session.db,
+                writer.session.lease.run_id,
+                kind,
+                child_level,
+                after,
+            )
+            .await?;
             if rows.is_empty() {
                 break;
             }
@@ -462,15 +413,15 @@ async fn build_index(session: &Session<'_>) -> Result<IndexDescriptor> {
                 after = entry.range_start;
                 let bytes = serde_json::to_vec(&entry)?.len() + 1;
                 if !entries.is_empty()
-                    && (entries.len() == session.limits.page_entries
-                        || size + bytes > session.limits.page_bytes)
+                    && (entries.len() == writer.session.limits.page_entries
+                        || size + bytes > writer.session.limits.page_bytes)
                 {
-                    last = Some(write_index(session, level, std::mem::take(&mut entries)).await?);
+                    last = Some(write_index(writer, level, std::mem::take(&mut entries)).await?);
                     count += 1;
                     size = 256;
                 }
                 ensure!(
-                    size + bytes <= session.limits.page_bytes,
+                    size + bytes <= writer.session.limits.page_bytes,
                     "index entry cannot fit admitted page"
                 );
                 size += bytes;
@@ -478,18 +429,19 @@ async fn build_index(session: &Session<'_>) -> Result<IndexDescriptor> {
             }
         }
         if !entries.is_empty() {
-            last = Some(write_index(session, level, entries).await?);
+            last = Some(write_index(writer, level, entries).await?);
             count += 1;
         }
         ensure!(count > 0, "empty run chunk index");
         if count == 1 {
+            writer.flush().await?;
             return last.context("missing root");
         }
     }
     anyhow::bail!("run plan exceeds admitted index height")
 }
 async fn write_index(
-    session: &Session<'_>,
+    writer: &mut Writer<'_, '_>,
     level: u8,
     entries: Vec<IndexEntry>,
 ) -> Result<IndexDescriptor> {
@@ -503,7 +455,7 @@ async fn write_index(
         range_end: end,
         entries,
     };
-    let object = session.document("index", level, start, end, &doc).await?;
+    let object = writer.document("index", level, start, end, &doc).await?;
     Ok(IndexDescriptor {
         level,
         range_start: start,

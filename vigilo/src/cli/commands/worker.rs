@@ -336,9 +336,11 @@ fn execution_route_is_temporarily_blocked(error: &anyhow::Error) -> bool {
 ///
 /// This service is intentionally lightweight and command-scoped. It validates
 /// evaluator identifiers and state before compiling WASM bytes into cached
-/// Wasmtime components.
+/// Wasmtime components. All shard contexts share one bounded immutable input
+/// byte cache; mutable placement and lease authority remain independently checked.
 struct EvaluatorLoaderService {
     context: Context,
+    read_cache: Arc<crate::case_reader::ReadCache>,
     run_context_cache: Arc<Cache<WorkerRunContextKey, Arc<OnceCell<Arc<WorkerRunContext>>>>>,
 }
 
@@ -347,6 +349,7 @@ impl EvaluatorLoaderService {
     fn new(context: Context) -> Self {
         Self {
             context,
+            read_cache: Arc::new(crate::case_reader::ReadCache::default()),
             run_context_cache: Arc::new(
                 Cache::builder()
                     .max_capacity(RUN_CONTEXT_CACHE_MAX_ENTRIES)
@@ -464,12 +467,14 @@ impl EvaluatorLoaderService {
                     .ok_or_else(|| anyhow::anyhow!("missing storage binding"))?;
                 let store = self.context.storage(binding, &limits).await?;
                 let reader = Arc::new(
-                    crate::case_reader::RunReader::open(
+                    crate::case_reader::RunReader::open_cached(
                         store,
                         &reference,
                         limits,
                         run_id,
                         cancel,
+                        self.read_cache.clone(),
+                        binding.to_owned(),
                     )
                     .await?,
                 );

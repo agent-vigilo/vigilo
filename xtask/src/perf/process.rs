@@ -3,8 +3,9 @@
 //! The runner drains output concurrently, caps retained bytes, enforces a hard
 //! watchdog, and terminates the complete child tree. Unix process groups and
 //! Windows Job Objects provide platform-specific lifecycle ownership. Linux RSS
-//! uses sampled post-exec VmHWM; wait4 supplies CPU and exit status. Missing RSS
-//! remains unavailable rather than including the harness heap inherited at fork.
+//! uses VmHWM only after the kernel clears its pre-exec flag; wait4 supplies CPU
+//! and exit status. Missing RSS remains unavailable rather than including the
+//! harness heap inherited at fork.
 
 use std::{
     io::{
@@ -59,7 +60,7 @@ pub struct ProcessOutcome {
     pub wall_time: Duration,
     /// Process-tree CPU time when supported by the collector.
     pub cpu_time_ns: Option<u64>,
-    /// Peak process-tree resident memory when supported by the collector.
+    /// Peak resident memory under the named platform collector (Linux child, Windows job).
     pub peak_rss_bytes: Option<u64>,
     /// Stable name of the platform resource collector.
     pub resource_source: &'static str,
@@ -93,7 +94,7 @@ pub struct CapturedOutput {
 pub struct ProcessSnapshot {
     /// Whether the process had not exited when sampled.
     pub running: bool,
-    /// Current resident memory when the platform exposes it.
+    /// Observed peak resident memory, with current RSS as a fallback when available.
     pub rss_bytes: Option<u64>,
     /// Current open file-descriptor count when the platform exposes it.
     pub file_descriptors: Option<u64>,
@@ -171,9 +172,12 @@ impl RunningProcess {
         let resources = self.group.resources();
         Ok(ProcessSnapshot {
             running: self.status.is_none(),
-            rss_bytes: resources
-                .peak_rss_bytes
-                .or_else(|| current_rss_bytes(self.child.id())),
+            rss_bytes: resources.peak_rss_bytes.or_else(|| {
+                self.status
+                    .is_none()
+                    .then(|| current_rss_bytes(self.child.id()))
+                    .flatten()
+            }),
             file_descriptors: open_file_descriptors(self.child.id()),
         })
     }
@@ -220,8 +224,8 @@ impl RunningProcess {
     }
 
     fn observe(&mut self) -> Result<()> {
-        self.group.observe(self.child.id());
         if self.status.is_none() {
+            self.group.observe(self.child.id());
             self.status = self.group.try_wait(&mut self.child).context("poll child")?;
         }
         Ok(())
@@ -284,6 +288,7 @@ impl Drop for RunningProcess {
 
 #[cfg(target_os = "linux")]
 fn current_rss_bytes(process_id: u32) -> Option<u64> {
+    linux_exec_completed(process_id)?;
     std::fs::read_to_string(format!("/proc/{process_id}/status"))
         .ok()?
         .lines()
@@ -404,15 +409,8 @@ impl ProcessGroup {
 
     fn observe(&mut self, process_id: u32) {
         #[cfg(target_os = "linux")]
-        if let Ok(status) = std::fs::read_to_string(format!("/proc/{process_id}/status")) {
-            let peak_kib = status.lines().find_map(|line| {
-                line.strip_prefix("VmHWM:")
-                    .and_then(|value| value.split_whitespace().next())
-                    .and_then(|value| value.parse::<u64>().ok())
-            });
-            if let Some(peak_kib) = peak_kib {
-                self.peak_rss_bytes = self.peak_rss_bytes.max(peak_kib.saturating_mul(1024));
-            }
+        if let Some(peak) = linux_peak_rss_bytes(process_id) {
+            self.peak_rss_bytes = self.peak_rss_bytes.max(peak);
         }
     }
 
@@ -495,12 +493,43 @@ impl ProcessGroup {
             cpu_time_ns,
             peak_rss_bytes: (self.peak_rss_bytes > 0).then_some(self.peak_rss_bytes),
             source: if cfg!(target_os = "linux") {
-                "linux-proc-hwm-wait4-cpu-v3"
+                "linux-proc-exec-hwm-wait4-cpu-v4"
             } else {
                 "unix-wait4-v2"
             },
         }
     }
+}
+
+/// Samples only the executed child's high-water mark, never its inherited harness heap.
+#[cfg(target_os = "linux")]
+fn linux_peak_rss_bytes(process_id: u32) -> Option<u64> {
+    linux_exec_completed(process_id)?;
+    let status = std::fs::read_to_string(format!("/proc/{process_id}/status")).ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("VmHWM:")
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|kib| kib.checked_mul(1024))
+    })
+}
+
+/// A successful spawn can return while Linux still exposes the inherited address space.
+/// Check the kernel's exec flag before reading memory; missing/malformed state fails closed.
+#[cfg(target_os = "linux")]
+fn linux_exec_completed(process_id: u32) -> Option<()> {
+    let stat = std::fs::read_to_string(format!("/proc/{process_id}/stat")).ok()?;
+    linux_stat_exec_completed(&stat)?.then_some(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_stat_exec_completed(stat: &str) -> Option<bool> {
+    // Linux include/linux/sched.h: cleared after replacing the address space in exec.
+    const PF_FORKNOEXEC: u64 = 0x40;
+    // Field 2 (comm) can contain spaces and parentheses. Flags are field 9.
+    let (_, fields) = stat.rsplit_once(')')?;
+    let flags = fields.split_whitespace().nth(6)?.parse::<u64>().ok()?;
+    Some(flags & PF_FORKNOEXEC == 0)
 }
 
 #[cfg(any(
@@ -764,7 +793,18 @@ mod tests {
             .and_then(|value| value.parse().ok())
             .unwrap_or(0);
 
+        let memory_bytes = std::env::var("VIGILO_PERF_TEST_MEMORY_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        assert!(
+            memory_bytes <= 32 * 1024 * 1024,
+            "fixture allocation must remain bounded"
+        );
+        let memory = vec![1_u8; memory_bytes];
+        std::hint::black_box(&memory);
         std::thread::sleep(Duration::from_millis(delay_ms));
+        std::hint::black_box(&memory);
         if output_bytes == 0 {
             println!("Usage: Commands:");
         } else {
@@ -812,6 +852,129 @@ mod tests {
             peak < 128 * 1024 * 1024,
             "child RSS includes the parent heap: {peak}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_memory_is_unavailable_until_exec() {
+        use std::os::{
+            fd::AsRawFd,
+            unix::{
+                net::UnixStream,
+                process::CommandExt,
+            },
+        };
+
+        let (mut parent, child) = UnixStream::pair().unwrap();
+        child
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        child
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        parent
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        parent
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let (program, args) = fixture_command();
+        let spawning = thread::spawn(move || {
+            let mut command = Command::new(program);
+            command
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // Only async-signal-safe syscalls and stack data are used after fork.
+            // The parent releases this child before making any assertions.
+            unsafe {
+                command.pre_exec(move || {
+                    let pid = libc::getpid().to_ne_bytes();
+                    if libc::write(child.as_raw_fd(), pid.as_ptr().cast(), pid.len())
+                        != pid.len() as isize
+                    {
+                        return Err(io::Error::last_os_error());
+                    }
+                    let mut release = 0_u8;
+                    if libc::read(child.as_raw_fd(), (&mut release as *mut u8).cast(), 1) != 1 {
+                        return Err(io::Error::from_raw_os_error(libc::EIO));
+                    }
+                    Ok(())
+                });
+            }
+            command.spawn().and_then(|mut process| process.wait())
+        });
+        let mut pid = [0; size_of::<libc::pid_t>()];
+        let received = parent.read_exact(&mut pid);
+        let observed = received
+            .as_ref()
+            .ok()
+            .map(|()| linux_peak_rss_bytes(libc::pid_t::from_ne_bytes(pid) as u32));
+        let released = parent.write_all(&[1]);
+        drop(parent);
+        let status = spawning.join().unwrap();
+        received.unwrap();
+        released.unwrap();
+        assert!(status.unwrap().success());
+        assert_eq!(
+            observed,
+            Some(None),
+            "pre-exec memory belongs to the harness"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_state_rejects_inherited_or_unknown_memory() {
+        assert_eq!(
+            linux_stat_exec_completed("123 (name with ) parentheses) R 1 2 3 4 5 64 0"),
+            Some(false)
+        );
+        assert_eq!(
+            linux_stat_exec_completed("123 (name with ) parentheses) R 1 2 3 4 5 0 0"),
+            Some(true)
+        );
+        assert_eq!(
+            linux_stat_exec_completed("123 (name) R 1 2 3 4 5 4194368 0"),
+            Some(false)
+        );
+        assert_eq!(
+            linux_stat_exec_completed("123 (name) R 1 2 3 4 5 4194304 0"),
+            Some(true)
+        );
+        for unknown in [
+            "",
+            "123 name R 1 2 3 4 5 0",
+            "123 (name) R 1",
+            "123 (name) R 1 2 3 4 5 -1",
+            "123 (name) R 1 2 3 4 5 invalid",
+        ] {
+            assert_eq!(linux_stat_exec_completed(unknown), None);
+        }
+        assert_eq!(linux_peak_rss_bytes(u32::MAX), None);
+        assert_eq!(current_rss_bytes(u32::MAX), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executed_child_allocation_is_still_measured() {
+        let (program, args) = fixture_command();
+        let bytes = 16 * 1024 * 1024;
+        let outcome = execute(&ProcessSpec {
+            program: &program,
+            args: &args,
+            current_dir: None,
+            env: &[
+                ("VIGILO_PERF_TEST_MEMORY_BYTES".into(), bytes.to_string()),
+                ("VIGILO_PERF_TEST_DELAY_MS".into(), "100".into()),
+            ],
+            timeout: Duration::from_secs(30),
+            stdout_limit: 64,
+            stderr_limit: 64,
+        })
+        .unwrap();
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.peak_rss_bytes.is_some_and(|peak| peak >= bytes));
     }
 
     #[cfg(target_os = "linux")]

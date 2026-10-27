@@ -114,7 +114,8 @@ impl Budget {
             no_progress: Duration::from_secs(15),
         }
     }
-    fn validate(&self) -> Result<()> {
+    /// Validate finite operation limits, including a still-live deadline.
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.requests == 0
             || self.requests > 32
             || self.no_progress.is_zero()

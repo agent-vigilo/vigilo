@@ -120,6 +120,17 @@ pub fn validate_registry(registry: &WorkloadRegistry) -> Result<()> {
         if tuples.len() != workload.tuples.len() {
             bail!("workload {} contains a duplicate tuple", workload.id);
         }
+        for (tuple, ceiling) in &workload.statement_budgets {
+            if *ceiling == 0
+                || !workload.tuples.contains(tuple)
+                || !workload.required_metrics.iter().any(|m| m == "sql")
+            {
+                bail!(
+                    "workload {} has an invalid statement budget for {tuple}",
+                    workload.id
+                );
+            }
+        }
         let Some((unit, oracle)) = driver_contract(&workload.id) else {
             bail!("workload {} has no registered harness driver", workload.id);
         };

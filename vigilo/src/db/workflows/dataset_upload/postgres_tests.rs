@@ -12,6 +12,8 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 use super::*;
+#[path = "postgres_tests/batches.rs"]
+mod batch_tests;
 use crate::{
     blob_storage::{
         Budget,
@@ -194,6 +196,11 @@ struct State {
     stop_after_batch: bool,
     stop_after_index: bool,
     fail_delete: bool,
+    observe_upload: Option<(PgPool, Uuid)>,
+    registrations_at_batch_put: Vec<i64>,
+    stop_at_batch: Option<usize>,
+    delay_batch_once: Option<std::time::Duration>,
+    abort_after_batch: bool,
 }
 #[derive(Clone, Default)]
 struct Memory(Arc<Mutex<State>>);
@@ -217,6 +224,26 @@ impl Transport for Memory {
         _: usize,
         _: std::time::Duration,
     ) -> std::result::Result<(), StorageError> {
+        if r.key.contains("/batch/") {
+            let delay = self.0.lock().unwrap().delay_batch_once.take();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            let observe = self.0.lock().unwrap().observe_upload.clone();
+            if let Some((db, upload)) = observe {
+                let count: i64 = sqlx::query_scalar("SELECT count(*) FROM dataset_upload_objects WHERE upload_id=$1 AND kind='batch'")
+                    .bind(upload).fetch_one(&db).await.unwrap();
+                let abort_now = self.0.lock().unwrap().abort_after_batch;
+                if abort_now {
+                    abort(&db, upload).await.unwrap();
+                }
+                self.0
+                    .lock()
+                    .unwrap()
+                    .registrations_at_batch_put
+                    .push(count);
+            }
+        }
         let bytes = tokio::fs::read(path).await.unwrap();
         let mut s = self.0.lock().unwrap();
         if s.objects.contains_key(&r.key) {
@@ -224,6 +251,11 @@ impl Transport for Memory {
         }
         s.objects.insert(r.key.clone(), bytes);
         *s.creates.entry(r.key.clone()).or_default() += 1;
+        if r.key.contains("/batch/") && s.stop_at_batch == Some(s.registrations_at_batch_put.len())
+        {
+            s.stop_at_batch = None;
+            return Err(error(ErrorKind::Cancelled));
+        }
         if r.key.contains("/batch/") && s.stop_after_batch {
             s.stop_after_batch = false;
             return Err(error(ErrorKind::Cancelled));
@@ -260,6 +292,90 @@ impl Transport for Memory {
         state.objects.remove(key);
         Ok(())
     }
+}
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn batch_group_registers_before_io_and_partial_upload_keeps_atomic_progress(db: PgPool) {
+    let input = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        input.path(),
+        include_bytes!("../../../cli/commands/run/fixtures/dataset-identity.json"),
+    )
+    .unwrap();
+    let mut limits = FormatLimits::default();
+    limits.batch.max_cases = 1;
+    let cancel = CancellationToken::new();
+    let prepared = prepare(
+        input.path().to_owned(),
+        InputFormat::Json,
+        limits.clone(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let row = begin(
+        &db,
+        Uuid::now_v7(),
+        "cases",
+        &"2".repeat(64),
+        &prepared.identity,
+        &limits,
+    )
+    .await
+    .unwrap();
+    let lease = claim(&db, row.id, false).await.unwrap();
+    let memory = Memory::default();
+    let store = Store::connect(
+        memory.clone(),
+        "cases".into(),
+        limits,
+        Resources::standard(),
+        Budget::standard(),
+        &cancel,
+        "capability-probes/fixture".into(),
+    )
+    .await
+    .unwrap();
+    {
+        let mut state = memory.0.lock().unwrap();
+        state.observe_upload = Some((db.clone(), row.id));
+        state.stop_at_batch = Some(2);
+    }
+    assert!(
+        ingestion::ingest(&db, &store, &row, lease, &prepared, &cancel)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        memory.0.lock().unwrap().registrations_at_batch_put,
+        vec![3, 3],
+        "all exact group keys must be durable before any group PUT"
+    );
+    let progress = load(&db, row.id).await.unwrap();
+    assert_eq!(
+        (progress.case_cursor, progress.batch_count),
+        (0, 0),
+        "partial group must not advance progress"
+    );
+    assert!(catalog(&db, row.id).await.unwrap().is_none());
+    release(&db, lease).await.unwrap();
+    let resumed = claim(&db, row.id, false).await.unwrap();
+    ingestion::ingest(&db, &store, &row, resumed, &prepared, &cancel)
+        .await
+        .unwrap();
+    let progress = load(&db, row.id).await.unwrap();
+    assert_eq!((progress.case_cursor, progress.batch_count), (3, 3));
+    assert!(
+        memory
+            .0
+            .lock()
+            .unwrap()
+            .creates
+            .values()
+            .all(|&count| count == 1),
+        "uncertain writes must reconcile, not overwrite"
+    );
 }
 
 #[sqlx::test(migrations = "../migrations")]

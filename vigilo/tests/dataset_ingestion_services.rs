@@ -156,9 +156,16 @@ async fn cli_upload_survives_process_death_reuses_dataset_and_cleans_abandoned_k
         // waiting five minutes or weakening production lease/cancellation rules.
         sqlx::query("UPDATE dataset_uploads SET leased_until=clock_timestamp()-interval '1 second' WHERE id=$1").bind(id).execute(&db).await?;
         let saved:i64=sqlx::query_scalar("SELECT count(*) FROM dataset_upload_objects WHERE upload_id=$1 AND kind='batch' AND acknowledged").bind(id).fetch_one(&db).await?;ensure!(saved>0,"no acknowledged batches before crash");
-        let resumed=success(&args("resume",Some(id),&source,&config)).await?;ensure!(resumed["data"]["id"]==id.to_string(),"resume changed catalog identity");
+        let resumed_at=std::time::Instant::now();
+        let resumed=success(&args("resume",Some(id),&source,&config)).await?;
+        let resume_elapsed_ms=resumed_at.elapsed().as_millis();
+        ensure!(resumed["data"]["id"]==id.to_string(),"resume changed catalog identity");
         let cursor:i32=sqlx::query_scalar("SELECT case_cursor FROM dataset_uploads WHERE id=$1 AND status='finalized'").bind(id).fetch_one(&db).await?;ensure!(cursor==count,"resume lost cases");
-        let reused=success(&args("upload",None,&source,&config)).await?;ensure!(reused["data"]["id"]==id.to_string() && reused["meta"]["reused"]==true,"unchanged dataset was uploaded again");
+        let reused_at=std::time::Instant::now();
+        let reused=success(&args("upload",None,&source,&config)).await?;
+        let reuse_elapsed_ms=reused_at.elapsed().as_millis();
+        eprintln!("recovery_observation={}",json!({"cases":count,"input_bytes":tokio::fs::metadata(&source).await?.len(),"acknowledged_batches_before_crash":saved,"resume_elapsed_ms":resume_elapsed_ms,"reuse_elapsed_ms":reuse_elapsed_ms,"timing":"local diagnostic; includes process startup and input validation; no pre-change resume baseline"}));
+        ensure!(reused["data"]["id"]==id.to_string() && reused["meta"]["reused"]==true,"unchanged dataset was uploaded again");
         ensure!(!output(&["dataset".into(),"abort".into(),id.to_string()]).await?.status.success(),"published dataset was abortable");
         let wrong=root.path().join("wrong.toml");tokio::fs::write(&wrong,tokio::fs::read_to_string(&config).await?.replace(&prefix,"redirected")).await?;
         ensure!(!output(&args("resume",Some(id),&source,&wrong)).await?.status.success(),"changed owner redirected an upload");
