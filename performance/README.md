@@ -9,7 +9,8 @@ named deployment capacity projections with limit provenance, and confirmed
 regression gates. It also owns resident-process soak and controlled-recovery
 checks. Startup remains service-free; run creation,
 coordinator, HTTP agent, worker/Wasm, persistence, and lifecycle measurements
-use a fresh run-owned PostgreSQL database clone, RabbitMQ vhost/namespace, and
+use a fresh run-owned PostgreSQL database clone, RabbitMQ vhost/namespace,
+campaign-owned Ceph bucket, and
 deterministic HTTP agent for every sample.
 Cancellation, terminal reads, exports, shard movement, rebalance, and logical
 placement workloads add routed database clones only when their selected tuple
@@ -53,7 +54,7 @@ requires them. Their setup remains outside the measured process boundary.
   amplification assumptions, boundedness, and independently sourced limits.
 - `performance/suppressions-v1.toml` is the only suppression registry. Entries
   must identify one workload tuple and metric, owner, issue, reason, and expiry.
-- `infra/performance/compose.yml` defines the private PostgreSQL and RabbitMQ
+- `infra/performance/compose.yml` defines the private PostgreSQL, RabbitMQ, and Ceph object-storage
   topology created for one campaign; infrastructure definitions remain under
   `infra`.
 - `infra/performance/aws/template.yaml` provisions the pinned ephemeral EC2 host
@@ -63,7 +64,7 @@ requires them. Their setup remains outside the measured process boundary.
 
 The `performance` directory is for the external process and service harness.
 Criterion targets are added under `vigilo/benches` only when production already
-has a stable library surface worth measuring. Vigilo currently keeps runtime,
+has a stable library surface worth measuring. Vigilo keeps runtime,
 database, and CLI modules binary-private, so there is no Criterion target and no
 API is widened solely for benchmarking.
 
@@ -75,6 +76,10 @@ environment, and generated-artifact field reference.
 | Profile | Purpose |
 | --- | --- |
 | `developer-v1` | Fast local diagnosis of explicitly selected workloads using two balanced blocks. |
+| `ingestion-reference-v1` | Creation from finalized dataset references, without submitting source files again. |
+| `creation-query-v1` | 50,000-case fresh, reused-source and finalized-reference creation with absolute SQL statement budgets. |
+| `creation-query-matrix-v1` | File/checkpoint/index-page boundaries, gates, separate execution databases and four concurrent creators. |
+| `ingestion-baseline-v1` | Initial run creation across case counts, payload sizes, and reuse of a finalized dataset, with physical row-write counters and independently verified immutable case files. |
 | `pr-v1` | Pull-request correctness checks and short, informative timing canaries. |
 | `reference-v1` | Broader repeatable comparison across the complete MVP workload matrix. |
 | `calibration-v1` | Stable no-change campaign used to measure canonical-host and harness noise. |
@@ -240,6 +245,60 @@ cargo perf diagnose --run-dir target/perf/runs/<component-run>
 `diagnostics.md` is investigative output and never changes a correctness,
 comparison, budget, or model verdict.
 
+## Ingestion Measurements
+
+`run.create-ingestion.v1` measures one initial `run create` invocation on a
+single PostgreSQL placement that owns both control and execution data. The
+`ingestion-baseline-v1` profile uses 1,000/10,000/50,000-case points, 1/16 KiB
+per-case padding, and fresh/reused datasets. Reuse preparation creates the first
+run before collector reset; only the second run is measured. All selected runs
+reach `pending`; the oracle verifies exact metadata admission before accepting a
+sample.
+
+```bash
+cargo perf run --profile ingestion-baseline-v1 \
+  --workload run.create-ingestion.v1 \
+  --bin target/perf/builds/current/release/vigilo \
+  --build-manifest target/perf/builds/current/build-manifest.json \
+  --output target/perf/runs/ingestion-measurement
+```
+
+On Linux, memory is sampled from the child's `/proc` high-water mark only after
+the kernel clears `PF_FORKNOEXEC`. Spawn can return before that transition;
+sampling earlier would count the harness's inherited address space. Missing or
+malformed exec state is not accepted as a memory observation. `wait4` provides
+CPU and exit status. If RSS cannot be observed, it stays
+unavailable and workloads requiring it fail validation.
+
+The exact oracle reads immutable case files and checks their hashes, contiguous
+membership, payload bytes, catalog reuse, chunk counts, completed creation, absence
+of SQL case tables, and zero premature execution/dispatch. External counters are
+captured before these oracle reads.
+`sql_rows` includes reads; `table_writes` reports physical inserted/updated/deleted
+tuples independently of bulk statement grouping. SQL calls include the collector's
+WAL-position query, and WAL includes server background work in the isolated
+PostgreSQL instance. Input padding is repeated `x`, so PostgreSQL compression can
+make WAL and database growth much smaller than submitted bytes. Retain this
+fixture characteristic when comparing results; it is not an incompressible-data
+capacity test. Reuse is data reuse in a freshly cloned sample database, not a
+promise of warm operating-system caches.
+
+The `reuse` tuples resubmit the source file and reuse its finalized catalog.
+The separate `ingestion-reference-v1` profile selects `reference` tuples of the
+same workload: setup creates a finalized dataset, and the measured command sends
+only its upload ID and the profile. This separates source validation cost from
+reference-based creation. Both variants use the same independent stored-case oracle.
+
+`sample.external.storage_counters` records Ceph gateway object GET/PUT/DELETE
+operations and GET/PUT payload bytes. Counters are captured before and after the
+measured command, before oracle reads. They include capability probes and metadata
+objects; they exclude bucket health checks and HTTP framing. Counter resets,
+missing fields or collector failure invalidate the measurement. They describe the
+campaign-owned Ceph gateway, not cloud billing or physical disk operations.
+
+Local runs provide informative evidence with raw samples and provenance. They do
+not establish fleet throughput or satisfy canonical publication requirements.
+
 ## Calibration And Baselines
 
 Publishable campaigns require the `aws-m6i-2xlarge-al2023-v1` Linux host contract
@@ -286,57 +345,18 @@ capacity evidence, and an existing output directory. It emits digested evidence,
 `reference-v2`, its budget policy, and the frozen build manifest beneath
 `target/perf/baselines/reference-v2`.
 
-## Regression Testing With MadSim
+## Regression Verification
 
-MadSim and `cargo perf` answer different questions and must remain separate.
-MadSim validates deterministic state, scheduling, timeout, retry, and fault
-outcomes under virtual time. It must not write virtual durations into
-`samples.jsonl`, calibration evidence, or regression budgets. `cargo perf`
-measures the real release executable, operating-system processes, PostgreSQL,
-RabbitMQ, HTTP, and Wasmtime on the canonical host.
+`cargo perf` measures the real release executable and its PostgreSQL, RabbitMQ,
+object-storage, HTTP, and Wasmtime dependencies. Samples contribute timing only
+after their exact correctness oracle passes. Virtual or simulated durations do
+not qualify as performance evidence.
 
-The simulation rollout must not change Tokio, task supervision, shared workflow
-engines, or another measured production path until canonical calibration has
-published and review has accepted a gating profile such as `reference-v2` plus
-an immutable direct-Tokio baseline. Every later production-path change runs the
-affected workload IDs as an immutable same-host comparison under that published
-policy; resident lifecycle changes also run the applicable recovery or soak
-profile.
+For a candidate change:
 
-Recurring simulation has separate fixed-regression and discovery lanes. Fixed
-corpus seeds repeat; scheduled exploration uses persisted deterministic,
-non-overlapping epochs so later runs search new scenario/runtime pairs. A
-bounded longevity family also keeps one simulated system across repeated work,
-expiry, reconnect, fault/heal, and restart epochs to detect logical accumulation
-and starvation. Real RSS, descriptor, socket, dependency, and throughput
-behavior remains the authority of `system.soak.v1`, `system.recovery.v1`, and
-the release-binary comparison suite.
-
-Before calling a result a performance regression test:
-
-1. Establish canonical repeatability, publish and review a gating profile such
-   as `reference-v2`, and commit its profile and budget policy.
-2. Make the MadSim implementation expose a stable test command, named scenarios,
-   fixed seeds, and exact logical outcomes. A failing or flaky simulation is a
-   correctness failure; do not interpret performance measurements until it is
-   resolved.
-3. Record which real workload contracts correspond to each simulated scenario.
-   Use the narrowest affected set:
-
-| Simulated behavior | Real performance contracts to select |
-| --- | --- |
-| Run creation or dispatch scheduling | `run.create.v1`, `coordinator.dispatch.v1` |
-| Worker execution, retry, or evaluator scheduling | `worker.execute-wasm.v1`, `system.lifecycle.v1` |
-| Broker outage or reconnect | `coordinator.recovery.v1`, `system.recovery.v1` |
-| Routed database or administrative behavior | Matching `admin-smoke-v1` or `admin-nightly-v1` workload IDs |
-
-For a candidate change, use this order:
-
-1. Run the documented MadSim command with the checked-in scenarios and fixed
-   seeds. Require exact state and operation counts, not virtual elapsed time.
-2. On the exclusive canonical host, build immutable baseline and candidate
-   snapshots from the merge base and candidate revisions.
-3. Compare the affected workloads with the published gating profile:
+1. Run the affected correctness tiers from the [test-tier guide](../README.md#test-tiers).
+2. Build immutable baseline and candidate snapshots for the exclusive canonical host.
+3. Compare the affected workload contracts under a published gating profile:
 
    ```bash
    cargo perf compare \
@@ -351,18 +371,16 @@ For a candidate change, use this order:
 
 4. If the first over-budget interval exits `2`, repeat the identical campaign
    with an independent schedule using
-   `--confirmation-of target/perf/runs/candidate-comparison`. A matching second
-   interval is the performance regression. Do not rerun arbitrary times or
-   change the budget after seeing the result.
-5. When the MadSim scenario covers outage or sustained operation, also run the
-   real `recovery-v1` or `soak-v1` profile against the candidate. Those profiles
-   enforce operational safety bounds; they are not substitutes for the A/B
-   latency and throughput comparison.
+   `--confirmation-of target/perf/runs/candidate-comparison`. Only the matching
+   second interval establishes a regression. Keep the budget fixed.
+5. For outage or sustained-operation changes, also run `recovery-v1` or `soak-v1`.
+   Their operational safety bounds complement the A/B latency and throughput
+   comparison.
 
-Acceptance requires all applicable layers to pass: MadSim exact outcomes, real
-workload exact oracles, the published A/B regression budget, and relevant
-recovery or soak bounds. Report the conclusion as "no regression detected at
-the published budgets and confidence," not "no performance change."
+Acceptance requires the applicable correctness tiers, exact workload oracles,
+published regression budgets, and recovery or soak bounds to pass. A passing
+comparison means no regression was detected at the published budget and
+confidence; it does not establish unlimited capacity or identical performance.
 
 ## Capacity Projection
 
@@ -402,7 +420,7 @@ Projection confidence is explicit:
 - `calibrated` additionally requires canonical matching evidence and an accepted
   staging observation.
 
-The current coordinator RabbitMQ publish/confirm operation has no encompassing
+The coordinator RabbitMQ publish/confirm operation has no encompassing
 deadline. The checked-in deployment therefore declares that path unbounded and
 cannot receive a supported confidence label. A real staging observation may be
 added as `[staging]`; its projected and observed rate, relative error, and
@@ -546,6 +564,59 @@ unit, PostgreSQL, migration, or end-to-end tiers.
 
 ## Results
 
+### Creation Statement Budgets
+
+Run creation measurements with `creation-query-v1` and
+`creation-query-matrix-v1`, then check their frozen statement budgets:
+
+```bash
+cargo perf check-queries --run-dir target/perf/runs/<campaign>
+```
+
+The checker reads the campaign's frozen registry `statement_budgets` and requires
+every selected tuple and repetition to have passed its correctness oracle. Every
+sample must fit its absolute ceiling. Exit `0` means the statement budgets pass,
+`1` means at least one budget fails, and `2` means evidence is invalid or incomplete.
+The separate report records source digests and the exact budget registry without
+modifying the campaign. A normal `cargo perf run` pass establishes correctness;
+it does not establish statement-budget acceptance.
+
+The 50,000-case / 1 KiB-padding ceilings are 600 statements for fresh creation
+and 300 for reused-source or finalized-reference creation. These are acceptance
+targets, not measured capacity promises. They count transaction commands and
+both database planes, and exclude execution/settlement and blob requests. Other
+tuples have explicit ceilings in the registry. None of these counts estimates
+fleet concurrency by itself. `--retrospective` explicitly applies current registry
+budgets to historical total-only samples; that report cannot establish separate
+control/execution attribution.
+
+`sample.external.sql_databases` contains complete syntactic statement categories
+per distinct database: `read`, `dml`, `mixed` (`WITH`), `transaction`, and `other`.
+Unknown syntax stays in `other`; CTEs may mutate data and stay in `mixed`.
+SELECT functions may also write, so these categories do not replace physical
+`table_writes`. Category totals reconcile exactly with `sql_calls` and are
+independent of the truncated top-query diagnostics. Database roles are `control`,
+`execution`, or `shared`; shared placement counts cannot be assigned to one plane.
+Repeated database URLs are counted once. Database names, not connection URLs,
+appear in these observations.
+
+The collector requires top-level statement and utility-command tracking. Counter
+resets or statement-entry eviction invalidate the measurement. Its historical
+SQL-call filter and one post-process WAL-position read remain unchanged; setup
+validation runs before reset and exact idle-counter tests guard collector overhead.
+
+The matrix keeps default 100-case files and execution chunks. It tests both sides
+of a file boundary, 32/64-file checkpoint group sizes, and a 256-chunk plan-page
+boundary; it also exercises one/eight gates, a control-only database with two
+execution placements, and four simultaneous creators of distinct runs from one
+finalized dataset. Tuple suffixes record gates, execution placements and creator
+count; zero placements denotes the combined default database. Each creator must
+produce a distinct run with exact stored cases, scheduling coverage and frozen
+gate denominators. The concurrent tuple counts all four creations together.
+Its wall time covers the group and CPU is summed; peak RSS is the largest child
+peak, not total concurrent resident memory. Setup and independent verification
+remain outside measurement, and every child is bounded and reaped.
+
 Run output is written only below `target/perf/runs`. Each directory contains:
 
 - `campaign.json` and `environment.json` for execution identity and host provenance
@@ -599,3 +670,13 @@ and component labels. Failed startup permits only a bounded subset of that fixed
 topology before rollback. Both paths verify that no project-owned or run-owned
 resources remain after Compose removal; any unexpected resource refuses
 destructive cleanup.
+
+The service topology owns its Ceph container and volume under the same checked
+campaign inventory as PostgreSQL and RabbitMQ. Child commands receive a generated
+storage-owner configuration. Large dataset fixtures use JSONL admission; small
+YAML fixtures retain the same logical source fields. Ingestion correctness checks
+verify stored byte counts, BLAKE3 digests, normalized case hashes, ordinal order,
+payload sizes, catalog reuse, and absence of per-case SQL tables after timing
+counters are frozen. Synthetic administration fixtures read the same verified
+files before seeding execution evidence. Cleanup removes only the exact recorded
+campaign resources, including its object-storage volume.

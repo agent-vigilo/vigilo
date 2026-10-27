@@ -1,71 +1,18 @@
----
-config:
-  flowchart:
-    nodeSpacing: 150
-    rankSpacing: 80
-  themeVariables:
-    edgeLabelBackground: 'transparent'
----
 flowchart TD
-    Start([vigilo run create])
-
-    Sources{Profile and dataset sources valid?}
-    Parse{Profile and dataset schemas valid?}
-    Cases{Dataset has cases?}
-    Executable{Profile executable for dataset?}
-    Plan[Plan case, dataset, run, chunks, and shard assignments]
-    Persist[Commit creating run, placement ledger, and chunk plan]
-    Placement{Pending placement remains?}
-    Seed[Idempotently seed the placement]
-    SeedResult{Seed result?}
-    Record[Record placement seeded]
-    Activate[Create dispatch cursors, set pending, and remove chunk plan]
-    Payload[Build run creation payload]
-
-    Success([Success response])
-    Creating([Creating response for coordinator recovery])
-    CreationFailed([Failed run response])
-
-    SourceFail([Input source error])
-    ParseFail([Input schema error])
-    EmptyDatasetFail([Empty dataset error])
-    ExecutabilityFail([Executability validation error])
-    PlanningFail([Run planning error])
-    PersistenceFail([Persistence error])
-
-    Start --> Sources
-
-    Sources -- No --> SourceFail
-    Sources -- Yes --> Parse
-
-    Parse -- No --> ParseFail
-    Parse -- Yes --> Cases
-
-    Cases -- No --> EmptyDatasetFail
-    Cases -- Yes --> Executable
-
-    Executable -- No --> ExecutabilityFail
-    Executable -- Yes --> Plan
-
-    Plan --> Persist
-    Plan -. Planning fails .-> PlanningFail
-
-    Persist --> Placement
-    Persist -. Transaction fails .-> PersistenceFail
-
-    Placement -- Yes --> Seed
-    Seed --> SeedResult
-    SeedResult -- Committed --> Record --> Placement
-    SeedResult -- Retryable failure --> Creating
-    SeedResult -- Persisted-data conflict --> CreationFailed
-    Placement -- No --> Activate
-    Activate --> Payload
-    Activate -. Retryable failure .-> Creating
-
-    Payload --> Success
-
-    class Start command
-    class Success success
-    class Sources,Parse,Cases,Executable,Plan,Persist,Placement,Seed,SeedResult,Record,Activate,Payload system
-    class Creating component
-    class SourceFail,ParseFail,EmptyDatasetFail,ExecutabilityFail,PlanningFail,PersistenceFail,CreationFailed error
+    Start([run create]) --> Source{Dataset already finalized?}
+    Source -- No --> Ingest[Bounded ingestion into immutable case files]
+    Source -- Yes --> Catalog[Verify catalog and physical storage binding]
+    Ingest --> Catalog --> Freeze[Freeze profile, evaluator artifacts and initial placements]
+    Freeze --> Prepare[Verify cases and publish immutable configuration and plan]
+    Prepare --> Hold{Prepare only?}
+    Hold -- Yes --> Held([Creating run with held ready plan])
+    Hold -- No --> Seed[Seed bounded execution-local metadata pages]
+    Seed --> Verify{Exact local chunk coverage?}
+    Verify -- Yes --> Activate[Publish routes and cursors with pending state]
+    Activate --> Pending([Pending run])
+    Verify -- Incomplete --> Recover([Creating run for requested admission recovery])
+    Source -. Invalid input .-> Error([Creation error with retained recovery identity])
+    Catalog -. Binding or integrity failure .-> Error
+    Prepare -. Invalid case, identity or lease .-> Error
+    Seed -. Availability failure .-> Recover
+    Seed -. Immutable conflict .-> Failed([Failed run, no dispatch])

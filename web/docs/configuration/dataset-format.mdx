@@ -1,6 +1,6 @@
 ---
 sidebar_label: Dataset Format
-title: Dataset Format Reference
+title: Dataset Format
 description: Reference for dataset YAML/JSON consumed by `vigilo run validate`.
 keywords:
   - Agent Vigilo dataset format
@@ -37,6 +37,11 @@ dataset_id: 018f1111-1111-7111-8111-111111111111
 dataset_version: 1.0.0
 cases: []
 ```
+
+Dataset uploads accept this document through `vigilo dataset upload` with an
+explicit size cap, or use the versioned JSONL representation for large inputs.
+See [Dataset Ingestion](/docs/architecture/case-storage/ingestion#input-formats)
+for framing, limits, identity preservation, and resume behavior.
 
 ## Top-Level Fields
 

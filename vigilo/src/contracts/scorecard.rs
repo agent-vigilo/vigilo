@@ -214,6 +214,29 @@ fn merge_entry(target: &mut ScorecardEntry, source: &ScorecardEntry) -> Result<(
     Ok(())
 }
 
+/// Accumulates one immutable chunk's gate statistics in canonical chunk order.
+/// Both inputs must describe the same shard and exact configured gate set.
+pub(crate) fn accumulate_chunk_scorecard(
+    target: &mut ShardScorecard,
+    chunk: ShardScorecard,
+) -> Result<(), String> {
+    if target.version != chunk.version
+        || target.run_shard != chunk.run_shard
+        || target.policy_hash != chunk.policy_hash
+        || target.entries.len() != chunk.entries.len()
+    {
+        return Err("chunk scorecard identity or gate set mismatch".to_owned());
+    }
+    for (target, source) in target.entries.iter_mut().zip(&chunk.entries) {
+        validate_entry(source)?;
+        if target.id != source.id {
+            return Err("chunk scorecard gate order mismatch".to_owned());
+        }
+        merge_entry(target, source)?;
+    }
+    Ok(())
+}
+
 fn evaluate_entry(entry: ScorecardEntry) -> ScorecardGateResult {
     let mean_score =
         (entry.scored_count > 0).then_some(entry.score_sum / entry.scored_count as f64);
@@ -432,6 +455,41 @@ mod tests {
                 .failures
                 .contains(&"pass rate below minimum".to_string())
         );
+    }
+
+    #[test]
+    fn chunk_accumulation_preserves_counts_and_rejects_changed_gate_identity() {
+        let source = ShardScorecard {
+            version: 1,
+            run_shard: 3,
+            policy_hash: "hash".into(),
+            entries: vec![entry()],
+        };
+        let mut total = source.clone();
+        accumulate_chunk_scorecard(&mut total, source.clone()).unwrap();
+        assert_eq!(
+            total.entries[0].expected_count,
+            source.entries[0].expected_count * 2
+        );
+        assert_eq!(
+            total.entries[0].scored_count,
+            source.entries[0].scored_count * 2
+        );
+        assert_eq!(
+            total.entries[0].score_sum,
+            source.entries[0].score_sum * 2.0
+        );
+        assert_eq!(total.entries[0].min_score, source.entries[0].min_score);
+        assert_eq!(total.entries[0].max_score, source.entries[0].max_score);
+        let mut invalid = source.clone();
+        invalid.entries[0].id = "other".into();
+        assert!(accumulate_chunk_scorecard(&mut total, invalid).is_err());
+        let mut invalid = source.clone();
+        invalid.run_shard = 4;
+        assert!(accumulate_chunk_scorecard(&mut total, invalid).is_err());
+        let mut invalid = source;
+        invalid.entries[0].min_coverage = Some(0.25);
+        assert!(accumulate_chunk_scorecard(&mut total, invalid).is_err());
     }
 
     #[test]

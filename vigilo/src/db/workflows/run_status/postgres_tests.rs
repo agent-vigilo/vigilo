@@ -86,23 +86,6 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query(
-        r#"
-            INSERT INTO run_creation_placements (
-                run_id, database_alias, status, attempt_count,
-                expected_case_count, seeded_case_count,
-                case_projection_hash, last_error
-            )
-            VALUES (
-                $1, 'unseeded', 'failed', 1,
-                1, 0, 'fixture-projection-hash', 'immutable seed mismatch'
-            )
-            "#,
-    )
-    .bind(run_id)
-    .execute(&pool)
-    .await
-    .unwrap();
     let database_router = database_router_with_control_pool(pool);
 
     let status = select_run_status(&database_router, run_id)
@@ -116,6 +99,56 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
             .creation_progress
             .as_ref()
             .map(|progress| progress.failed_placement_count),
-        Some(1)
+        Some(0)
     );
+}
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL for sqlx status tests"]
+async fn status_batches_same_database_shards_and_preserves_partial_progress(pool: sqlx::PgPool) {
+    use crate::db::workflows::run_shard_summary::test_support::*;
+
+    let run = Uuid::now_v7();
+    let dataset_id = Uuid::now_v7();
+    let dataset = Uuid::now_v7();
+    seed_control_run(&pool, run, dataset_id, dataset).await;
+    for shard in 0..128 {
+        seed_run_snapshot(&pool, run, shard, dataset_id, dataset, 1).await;
+    }
+    sqlx::query("INSERT INTO shard_placements(run_id,run_shard,database_alias,status) SELECT $1,shard,'primary','active' FROM generate_series(0,126) shard")
+        .bind(run).execute(&pool).await.unwrap();
+    // One routed summary is still missing; shard127 has data but no route.
+    sqlx::query("INSERT INTO run_shard_summaries(run_id,run_shard,expected_execution_count,execution_count,terminal_execution_count,passed_execution_count,planned_chunk_count,settled_chunk_count,status) SELECT $1,shard,1,1,1,1,2,1,'running' FROM generate_series(0,127) shard WHERE shard<>17")
+        .bind(run).execute(&pool).await.unwrap();
+    let router = database_router_with_control_pool(pool.clone());
+
+    let (result, queries) = record_queries(select_run_status(&router, run)).await;
+    let projection = result.unwrap().unwrap();
+    assert_eq!(projection.execution_route_count, 127);
+    assert_eq!(projection.shard_summary_count, 126);
+    assert!(!projection.live_progress_complete());
+    assert_eq!(projection.progress_source(), "execution_shards");
+    assert_eq!(projection.live_progress.expected_execution_count, 126);
+    assert_eq!(projection.live_progress.passed_execution_count, 126);
+    assert_eq!(projection.live_progress.planned_chunk_count, 252);
+    assert_eq!(projection.live_progress.settled_chunk_count, 126);
+    let summary_reads = queries
+        .iter()
+        .filter(|sql| sql.contains("FROM run_shard_summaries"))
+        .count();
+    assert_eq!(
+        summary_reads, 1,
+        "same-database status summary reads: {summary_reads}"
+    );
+
+    sqlx::query("DELETE FROM run_shard_summaries WHERE run_id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let empty = select_run_status(&router, run).await.unwrap().unwrap();
+    assert_eq!(empty.progress_source(), "control_run");
+    assert_eq!(empty.execution_route_count, 127);
+    assert_eq!(empty.shard_summary_count, 0);
+    assert_eq!(empty.live_progress.expected_execution_count, 2);
 }

@@ -13,6 +13,7 @@
 //!   shapes change
 
 pub(crate) mod aggregation;
+pub(crate) mod case_storage;
 pub(crate) mod evaluator;
 pub(crate) mod evaluator_abi;
 pub(crate) mod evaluator_ref;

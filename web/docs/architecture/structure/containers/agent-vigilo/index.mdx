@@ -18,12 +18,16 @@ This view shows each deployable <GlossaryTerm term="container">container</Glossa
 the CLI, <GlossaryTerm term="coordinator">coordinator</GlossaryTerm>,
 <GlossaryTerm term="worker">workers</GlossaryTerm>, PostgreSQL
 <GlossaryTerm term="database-placement">database placements</GlossaryTerm>, the
-RabbitMQ <GlossaryTerm term="broker">broker</GlossaryTerm>, and the external
+RabbitMQ <GlossaryTerm term="broker">broker</GlossaryTerm>, object storage, and the external
 <GlossaryTerm term="agent-target">agent target</GlossaryTerm> being evaluated.
 
 <Mermaid value={containerDiagram} />
 
 ## Notes
+
+- Object storage holds immutable case batches, run plans, indexes, and manifests. The CLI, coordinator,
+  and worker access them through provider-neutral adapters; PostgreSQL retains
+  coordination metadata and execution evidence.
 
 - The CLI, coordinator, and worker are modes of the same Rust application but
   run as separate processes in distributed deployments.

@@ -15,6 +15,8 @@ This file records Vigilo-specific constraints that are easy to miss. A nearer
 
 ## Working Method
 
+- Leave all changes unstaged. Do not stage changes or create commits; the user
+  handles every commit manually.
 - Inspect the relevant contract, implementation, callers, and tests before editing;
   surface consequential ambiguity that the repository cannot resolve.
 - Define observable success and make the smallest compatible change. Match local
@@ -87,6 +89,13 @@ cargo test --workspace --locked --lib --bins
 
 ## Documentation
 
+- Before v1, public documentation describes one greenfield architecture in present
+  tense. Keep implementation progress and future work in private planning files;
+  do not mix current/target states or promise backward compatibility, upgrades,
+  or migration support unless explicitly requested.
+- Do not reference names, identifiers, or content that exist only in Git-ignored
+  paths from non-ignored files. Documentation-site content must not reference
+  private plans; describe behavior directly and link to non-ignored sources.
 - Give every substantial Rust module `//!` documentation with a high-level
   overview of its system role, responsibilities, boundaries, main flow, and
   important ownership or correctness invariants.

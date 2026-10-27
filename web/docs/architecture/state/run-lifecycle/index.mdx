@@ -1,6 +1,6 @@
 ---
 title: Run Lifecycle
-sidebar_label: Run
+sidebar_label: Run Lifecycle
 sidebar_position: 1
 description: State diagram for Agent Vigilo run lifecycle transitions from creating through pending, running, finalizing, completed, canceled, and failed.
 keywords:
@@ -12,6 +12,7 @@ keywords:
 ---
 
 import Mermaid from '@theme/Mermaid';
+import settlementDiagram from './settlement.mmd';
 import runLifecycleDiagram from './diagram.mmd';
 
 # Run Lifecycle
@@ -22,19 +23,87 @@ How `runs.status` and `runs.gate_status` move through creation, dispatch, finali
 
 ## Notes
 
-- `run create` first inserts a non-dispatchable `creating` run with a durable
-  placement ledger and chunk plan. Once every placement is seeded, one control
-  transaction creates dispatch cursors and changes the run to `pending`.
-- Coordinators claim expired creation leases before dispatch work and resume
-  pending placement seeds with the original `run_id`. Persisted-data conflicts
-  fail creation without opening dispatch cursors.
+- `run create` publishes a verified immutable plan while the run is `creating`.
+  Admission seeds compact execution metadata and checks exact local membership.
+  One control transaction publishes routes/cursors and changes a fully admitted
+  run to `pending`.
+- `--prepare-only` holds a ready plan without execution intent. Repeating the
+  command without that flag requests admission. Coordinators recover requested
+  ready plans after lease release or expiry. See
+  [Run Preparation](/docs/architecture/case-storage/run-preparation).
 - Coordinator dispatch claims an open `run_id + run_shard` cursor, marks a new `pending` run as `running`, selects a bounded shard-local chunk window, and inserts one `run.chunk.ready` outbox event record per selected chunk.
 - Before dispatch and finalization, the coordinator recovers expired worker chunk leases or marks exhausted chunks failed.
-- Finalization only claims runs whose chunks are all terminal and whose finalization lease is open; `pending` or `leased` chunks keep the run out of finalization, including chunks waiting for execution retry windows.
-- Finalization verifies and merges one bounded scorecard per shard, applies the frozen run gates, and stores the scorecard with the final gate status under the same coordinator lease.
-- Cancellation applies to `pending`, `running`, and `finalizing` runs. A
-  `creating` run is owned by the creation recovery workflow until it becomes
-  `pending` or `failed`.
+- Finalization requires drained dispatch cursors and the exact routed set of sealed shard summaries. Evaluation failure leaves a shard `running` while any planned chunk remains unsettled, including retry waits.
+- Finalization verifies run, shard, policy, and planned membership identities; merges the sealed scorecards; and commits the report, gate, and completion event under the current coordinator lease. Missing or invalid candidates are deferred while other candidates continue.
+- Cancellation applies to `creating`, `pending`, `running`, and `finalizing`.
+  Partial creation installs closed local admission tombstones, fencing delayed
+  seed writes. Shared immutable files and committed result evidence remain.
+
+## Settlement and partial results
+
+<Mermaid value={settlementDiagram} />
+
+Evaluation outcome, work settlement, and result completeness are separate facts.
+A failed evaluation does not cancel healthy work. Each terminal chunk transaction
+locks that chunk, retires unfinished attempt authority, and commits an immutable
+`run_chunk_settlements` receipt. Successful committed results remain scored;
+unfinished or superseded attempt artifacts remain available as evidence.
+
+Coordinators publish progress from available receipts, including receipts after a
+slow earlier chunk. `planned_chunk_count` and `settled_chunk_count` describe work;
+`missing_execution_count` counts planned cases without execution rows in settled
+chunks; `unresolved_execution_count` counts existing executions without an
+authoritative terminal aggregate. These missing counts exclude still-open chunks.
+`missing_aggregate_count` retains its execution-status meaning. Progress can lag
+worker commits and is provisional until every shard is sealed.
+
+A page contains at most 256 receipts without configured scorecard gates, or 64
+with gates. Both folds limit each page to 4 MiB of receipt JSON; each receipt is
+limited to 1 MiB. A nonblocking transaction-scoped PostgreSQL advisory claim owns
+one page. Counters and receipt-consumption identities commit together, so a crash
+rolls back both and releases the claim. Workers do not acquire this claim or wait
+for aggregation. Independent coordinator progress work runs before finalization,
+with separate [page, scheduling-time, and concurrency budgets](/docs/architecture/structure/components/coordinator/#receipt-aggregation-controls).
+
+The coordinator selects shards with pending receipts or a canonical fold ready
+to advance. Open shards without pending receipts wait for durable work without
+opening aggregation transactions. Successful checkpoints rotate productive
+shards; busy or invalid candidates also rotate so other ready shards can proceed.
+Shards with remaining pending receipts or canonical work can advance further pages
+in the same cycle through fair rounds, while independent shards and databases use
+bounded concurrency. The progress query reads one extra pending identity to detect
+remaining work without another query: at most 257 identities without gates or 65
+with gates. Receipt JSON still obeys the 256/64-row and 4 MiB page limits. When
+other planned chunks remain open, a page that consumes all available receipts
+waits for another discovery; later receipt commits remain durable pending work.
+Once every planned receipt is accounted for, canonical verification can continue
+within the same pass. Each page obtains its own claim and revalidates local
+ownership. This scheduling includes runs with open dispatch and
+cancelled runs. Finalization reads the published shard summaries in one batch per
+execution database.
+
+Once all receipts are accounted for, another resumable fold reads them in planned
+ordinal/ID order. This makes final floating-point scores independent of arrival
+order and page boundaries. The fold validates exact chunk membership against the
+frozen hash and count before sealing an immutable summary. Scorecard denominators
+come from retained planned case/profile membership, including missing eligible
+cases in dimension, binding, group, and tag gates. Missing work contributes no
+invented numeric score, evaluator error, or abstention.
+
+A run with 900 valid results out of 1,000 planned cases can complete after all
+chunks settle, preserving the 900 results and reporting 100 missing executions.
+Its `coverage_complete` is false and its release gate fails. Completion does not
+require fabricated execution rows.
+
+Every run freezes its settlement plan during creation. Aggregation and
+finalization reject missing or changed plans; terminal status alone never proves
+settlement.
+
+Settlement preserves committed evidence. It cannot recover outcomes that existed
+only in a crashed worker's memory, verify a permanently unavailable placement,
+or guarantee that every retry is eventually awakened. Retry wakeups, heartbeat
+cleanup, draining recovery, and resumable cancellation remain separate recovery
+concerns; unavailable shards keep finalization pending.
 
 ## Related
 

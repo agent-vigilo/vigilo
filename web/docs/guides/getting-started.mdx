@@ -23,7 +23,7 @@ Instead of a one-off script that prints a score, Vigilo gives you a system for p
 - **Evaluators are versioned artifacts.** Publish reusable
   <GlossaryTerm term="evaluator">Wasm evaluators</GlossaryTerm> and refer to them
   by stable identifiers like `vigilo/sentiment-basic-en:0.1.0`.
-- **Runs are durable.** Profiles, datasets, chunks, attempts, evaluator results, summaries, and gate outcomes are stored in Postgres.
+- **Runs are durable.** Immutable datasets and run plans live in object storage; PostgreSQL stores coordination, execution state, results, and gates.
 - **Execution is distributed.** Coordinators create chunk-ready outbox event records that are published through RabbitMQ; workers claim the identified chunks, call the agent target, run evaluators, and persist normalized results.
 - **The CLI is automation-friendly.** Commands return structured output, support quiet mode, and expose watch/status/results/export flows for CI and agentic clients.
 
@@ -65,8 +65,7 @@ evaluator measurement -> host binding policy -> dimension_scores -> execution st
 - `aggregate_score` is one total score for the execution, calculated across scored dimensions.
 - `defaults.min_execution_score` is an overall score gate for `aggregate_score`, not a per-dimension threshold.
 - An <GlossaryTerm term="execution">execution</GlossaryTerm> passes when
-  evaluator completeness is satisfied, `aggregate_score >= defaults.min_execution_score`, and no hard blocking
-  host-derived blocking result fails.
+  evaluator completeness is satisfied, `aggregate_score >= defaults.min_execution_score`, and no host-derived blocking result fails.
 - A run passes when execution coverage is complete, no chunk or execution failed, and every configured run scorecard gate passes.
 
 A result is blocking only when its evaluator binding or dimension policy says
@@ -83,7 +82,9 @@ case attempt -> execution -> run -> gate
 - <GlossaryTerm term="attempt">Attempts</GlossaryTerm> can fail because the
   agent call, evaluator runtime, persistence, or retry budget failed.
 - Executions can fail because evaluator completeness is not satisfied, the total `aggregate_score` is below the overall score gate, or a host-derived blocking result failed.
-- Runs can fail operationally because chunks failed, coverage is incomplete, aggregates are missing, or executions errored.
+- Runs with settled failed chunks or incomplete results complete with a failed
+  gate and explicit missing/unresolved counts. An unavailable shard keeps
+  finalization pending. Invalid immutable admission can fail creation.
 - Gates fail when the run completes but its
   <GlossaryTerm term="gate-status">`gate_status`</GlossaryTerm> is `fail`.
 
@@ -116,7 +117,7 @@ From the repository root:
 ```bash
 docker compose --env-file infra/dev/.env.single \
   -f infra/dev/docker-compose.single.yml \
-  up -d postgres rabbitmq
+  up -d postgres rabbitmq ceph
 ```
 
 Set the local connection strings:
@@ -124,13 +125,20 @@ Set the local connection strings:
 ```bash
 export DATABASE_URL='postgresql://postgres:password@localhost:5432/agent_vigilo'
 export MESSAGING_URL='amqp://guest:guest@localhost:5672'
+export VIGILO_STORAGE_CONFIG="$PWD/infra/dev/storage.toml"
 ```
+
+Use the bundled development owner configuration and export `DEV_S3_ACCESS_KEY_ID`
+and `DEV_S3_SECRET_ACCESS_KEY` from the selected dev env file as described
+in [Case Storage](/docs/architecture/case-storage/ingestion/#storage-owner-configuration).
+Creation, coordinator, and worker processes use the same storage binding.
 
 On PowerShell:
 
 ```powershell
 $env:DATABASE_URL='postgresql://postgres:password@localhost:5432/agent_vigilo'
 $env:MESSAGING_URL='amqp://guest:guest@localhost:5672'
+$env:VIGILO_STORAGE_CONFIG="$PWD/infra/dev/storage.toml"
 ```
 
 For sharding tests, start the overlay instead:
@@ -139,7 +147,7 @@ For sharding tests, start the overlay instead:
 docker compose --env-file infra/dev/.env.sharded \
   -f infra/dev/docker-compose.single.yml \
   -f infra/dev/docker-compose.sharded.yml \
-  up -d postgres postgres-shard-001 rabbitmq
+  up -d postgres postgres-shard-001 rabbitmq ceph
 ```
 
 Host-side tests use the published ports:
@@ -148,10 +156,18 @@ Host-side tests use the published ports:
 export DATABASE_URL='postgresql://postgres:password@localhost:5432/agent_vigilo'
 export VIGILO_TEST_SHARD_001_DATABASE_URL='postgresql://postgres:password@localhost:5433/agent_vigilo'
 export MESSAGING_URL='amqp://guest:guest@localhost:5672'
+export VIGILO_STORAGE_CONFIG="$PWD/infra/dev/storage.toml"
 ```
 
 Inside Compose containers, services use Docker DNS names such as `postgres`,
 `postgres-shard-001`, and `rabbitmq`; see `infra/dev/README.md`.
+
+Both development topologies include Ceph Object Gateway for local object storage. Its host endpoint is `http://localhost:3900`, its container endpoint
+is `http://ceph:3900`, and its default bucket is `vigilo-dev`. Use path-style S3
+addressing with region `us-east-1` and the `DEV_S3_*` credentials in the selected env
+file. Objects persist in a named volume. See
+[Case Storage](/docs/architecture/case-storage/) for batch, manifest, and
+publication behavior.
 
 Apply migrations and publish the bundled evaluator:
 

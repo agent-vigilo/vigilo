@@ -62,16 +62,34 @@ function MermaidRenderResult({
 
 function MermaidRenderer({value}: Props): ReactNode {
   const defaultMermaidConfig = useMermaidConfig();
-  const mermaidConfig = useMemo(
-    () => ({
+  const mermaidConfig = useMemo(() => {
+    const colors = getComputedStyle(document.documentElement);
+    const color = (name: string) => colors.getPropertyValue(name).trim();
+    return {
       ...defaultMermaidConfig,
-      flowchart: {
-        ...defaultMermaidConfig.flowchart,
-        useMaxWidth: false,
+      theme: 'base' as const,
+      themeVariables: {
+        ...defaultMermaidConfig.themeVariables,
+        background: color('--diagram-background'),
+        primaryColor: color('--diagram-component-fill'),
+        primaryTextColor: color('--diagram-component-text'),
+        primaryBorderColor: color('--diagram-component-stroke'),
+        secondaryColor: color('--ifm-color-emphasis-100'),
+        tertiaryColor: color('--diagram-background'),
+        lineColor: color('--ifm-color-emphasis-600'),
+        textColor: color('--ifm-font-color-base'),
+        clusterBkg: color('--diagram-background'),
+        clusterBorder: color('--ifm-color-emphasis-400'),
+        edgeLabelBackground: color('--diagram-background'),
+        noteBkgColor: color('--diagram-background'),
+        noteTextColor: color('--ifm-font-color-base'),
+        actorBkg: color('--diagram-component-fill'),
+        actorTextColor: color('--diagram-component-text'),
+        fontFamily: color('--ifm-font-family-base'),
       },
-    }),
-    [defaultMermaidConfig],
-  );
+      flowchart: {...defaultMermaidConfig.flowchart, useMaxWidth: false},
+    };
+  }, [defaultMermaidConfig]);
 
   const renderResult = useMermaidRenderResult({
     config: mermaidConfig,

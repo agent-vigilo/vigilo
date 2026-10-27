@@ -13,12 +13,12 @@ flowchart TD
     RunId{Run id valid?}
     LoadRun[Load run]
     Found{Run exists?}
-    Summary[Load results summary]
+    Summary[Batch summaries by database; merge progress and scorecard in shard order]
     Format{Export format?}
     JsonBatches[Load all export batches]
-    JsonPayload[Build JSON export payload]
+    JsonPayload[Build JSON with authority labels]
     JsonlHeader[Write run and summary lines]
-    JsonlBatches[Stream export batches]
+    JsonlBatches[Stream batches with authority labels]
 
     Success([Success response])
 

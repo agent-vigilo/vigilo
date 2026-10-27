@@ -19,6 +19,8 @@ homepage = "https://agentvigilo.com"
 [dependencies]
 anyhow = { version = "1.0.102" }
 async-trait = {  version = "0.1.89" }
+aws-config = { version = "1.13.0", default-features = false, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-s3 = { version = "1.155.0", default-features = false, features = ["rt-tokio", "rustls", "default-https-client"] }
 blake3 = "1.8.5"
 cargo_metadata = { version = "0.23.1" }
 cargo_toml = { version = "0.22.3" }
@@ -27,9 +29,11 @@ clap = { version = "4.6.1", features = ["cargo", "derive", "env"] }
 futures-util = "0.3"
 moka = { version = "0.12.15", features = ["future"] }
 lapin = { version = "2.5.5" }
+rand = "0.9.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sqlx = { version = "0.8.6", features = ["chrono", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
+tempfile = "3.23.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["full"] }
 tokio-util = { version = "0.7.18" }
@@ -45,9 +49,19 @@ serde_json = "1.0.149"
 serde_yaml = "0.9"
 
 [dev-dependencies]
-tempfile = "3.23.0"
 url = "2.5.8"
 
 [features]
 default = []
 evaluator-abi-fixtures = []
+blob-storage-services = []
+
+[[test]]
+name = "blob_storage_services"
+path = "tests/blob_storage_services.rs"
+required-features = ["blob-storage-services"]
+
+[[test]]
+name = "dataset_ingestion_services"
+path = "tests/dataset_ingestion_services.rs"
+required-features = ["blob-storage-services"]

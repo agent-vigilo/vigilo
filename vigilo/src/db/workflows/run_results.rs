@@ -3,11 +3,13 @@
 //! Result summaries are assembled from shard-local `run_shard_summaries` so
 //! the control database does not scan execution-owned tables.
 
+use std::collections::BTreeMap;
+
 use uuid::Uuid;
 
 use super::run_shard_summary::{
     RunShardSummary,
-    select_run_shard_summary,
+    select_run_shard_summaries,
 };
 use crate::context::database;
 
@@ -37,6 +39,11 @@ pub(crate) struct RunResultsSummary {
     pub(crate) average_score: Option<f64>,
     pub(crate) min_score: Option<f64>,
     pub(crate) max_score: Option<f64>,
+    pub(crate) planned_chunk_count: i64,
+    pub(crate) settled_chunk_count: i64,
+    pub(crate) sealed_shard_count: usize,
+    pub(crate) missing_execution_count: i64,
+    pub(crate) unresolved_execution_count: i64,
 }
 
 /// Reads and combines shard-local result summaries for a run.
@@ -49,11 +56,20 @@ pub(crate) async fn select_run_results_summary(
         .await?;
     let mut summaries = Vec::with_capacity(routes.len());
 
-    for (run_shard, _, db) in routes {
-        if let Some(summary) = select_run_shard_summary(&db, run_id, run_shard).await? {
-            summaries.push(summary);
-        }
+    let mut by_database = BTreeMap::new();
+    for (run_shard, alias, db) in &routes {
+        by_database
+            .entry(alias)
+            .or_insert_with(|| (db, Vec::new()))
+            .1
+            .push(*run_shard);
     }
+    for (db, shards) in by_database.into_values() {
+        summaries.extend(select_run_shard_summaries(db, run_id, &shards).await?);
+    }
+    // Floating point addition follows ascending shard order independently of
+    // alias grouping so routing does not change the reported average.
+    summaries.sort_unstable_by_key(|summary| summary.run_shard);
 
     Ok(combine_run_shard_summaries(&summaries))
 }
@@ -64,6 +80,11 @@ pub(crate) fn combine_run_shard_summaries(summaries: &[RunShardSummary]) -> RunR
     let mut score_sum = 0.0f64;
 
     for summary in summaries {
+        combined.planned_chunk_count += i64::from(summary.planned_chunk_count);
+        combined.settled_chunk_count += i64::from(summary.settled_chunk_count);
+        combined.missing_execution_count += i64::from(summary.missing_execution_count);
+        combined.unresolved_execution_count += i64::from(summary.unresolved_execution_count);
+        combined.sealed_shard_count += usize::from(summary.is_terminal());
         combined.execution_count += i64::from(summary.execution_count);
         combined.aggregate_count += i64::from(summary.aggregate_count);
         combined.passed_execution_count += i64::from(summary.passed_execution_count);
@@ -99,6 +120,9 @@ pub(crate) fn combine_run_shard_summaries(summaries: &[RunShardSummary]) -> RunR
     combined
 }
 
+#[cfg(test)]
+#[path = "run_results/postgres_tests.rs"]
+mod postgres_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +213,10 @@ mod tests {
             failed_chunk_count: 0,
             cancelled_chunk_count: 0,
             status: "completed".to_owned(),
+            sealed: true,
+            planned_chunk_count: 1,
+            settled_chunk_count: 1,
+            ..Default::default()
         }
     }
 }

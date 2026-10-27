@@ -63,12 +63,13 @@ pub(super) async fn claim_chunk_for_processing_in_transaction(
     Ok(updated)
 }
 
+/// Completes an owned lease and returns its locked, persisted receipt identity.
 pub(super) async fn mark_chunk_completed(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chunk: &RunChunk,
     lease_token: Uuid,
-) -> anyhow::Result<u64> {
-    Ok(sqlx::query(
+) -> anyhow::Result<Option<(i32, i32, String)>> {
+    Ok(sqlx::query_as(
         r#"
         UPDATE run_chunks
         SET status = 'completed',
@@ -89,6 +90,7 @@ pub(super) async fn mark_chunk_completed(
               AND admission.write_epoch = $5
               AND admission.state IN ('open', 'draining')
           )
+        RETURNING ordinal_start, ordinal_end, status
         "#,
     )
     .bind(chunk.run_id)
@@ -96,17 +98,17 @@ pub(super) async fn mark_chunk_completed(
     .bind(chunk.id)
     .bind(lease_token)
     .bind(chunk.write_epoch)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected())
+    .fetch_optional(&mut **tx)
+    .await?)
 }
 
+/// Fails an owned lease and returns its locked, persisted receipt identity.
 pub(super) async fn mark_chunk_failed(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     chunk: &RunChunk,
     lease_token: Uuid,
-) -> anyhow::Result<u64> {
-    Ok(sqlx::query(
+) -> anyhow::Result<Option<(i32, i32, String)>> {
+    Ok(sqlx::query_as(
         r#"
         UPDATE run_chunks
         SET status = 'failed',
@@ -119,15 +121,19 @@ pub(super) async fn mark_chunk_failed(
           AND status = 'leased'
           AND lease_token = $4::uuid
           AND leased_until >= now()
+          AND EXISTS (SELECT 1 FROM local_shard_admissions a
+              WHERE a.run_id = run_chunks.run_id AND a.run_shard = run_chunks.run_shard
+                AND a.write_epoch = $5 AND a.state IN ('open', 'draining'))
+        RETURNING ordinal_start, ordinal_end, status
         "#,
     )
     .bind(chunk.run_id)
     .bind(chunk.run_shard)
     .bind(chunk.id)
     .bind(lease_token)
-    .execute(&mut **tx)
-    .await?
-    .rows_affected())
+    .bind(chunk.write_epoch)
+    .fetch_optional(&mut **tx)
+    .await?)
 }
 
 /// Extends a currently owned chunk lease and returns the updated lease token.
@@ -197,54 +203,6 @@ pub(crate) async fn extend_chunk_lease(
         updated.write_epoch = chunk.write_epoch;
     }
     Ok(updated)
-}
-
-/// Loads the shard-local cases covered by a claimed chunk's ordinal range.
-///
-/// Query behavior: reads only the run-and-shard projection routed to this
-/// execution database, joined to immutable case blobs and ordered by ordinal.
-/// This function does not claim work; callers must already own the chunk lease.
-pub(crate) async fn load_chunk_case_batch(
-    db: &PgPool,
-    chunk: &RunChunk,
-) -> anyhow::Result<Vec<WorkerCaseBatchItem>> {
-    let rows = sqlx::query_as::<_, WorkerCaseBatchItem>(
-        r#"
-		SELECT
-			projected.case_id,
-			projected.case_hash,
-			projected.case_ordinal,
-			cb.task_type,
-			cb.case_group,
-			cb.input_payload,
-			cb.expected_output,
-			cb.context_payload,
-			cb.tags,
-			cb.metadata
-		FROM run_shard_cases projected
-		JOIN case_blobs cb ON projected.case_hash = cb.case_hash
-		WHERE projected.run_id = $1::uuid
-		  AND projected.run_shard = $2
-		  AND projected.dataset_version_id = $3::uuid
-		  AND projected.case_ordinal >= $4
-		  AND projected.case_ordinal < $5
-		ORDER BY projected.case_ordinal
-		"#,
-    )
-    .bind(chunk.run_id)
-    .bind(chunk.run_shard)
-    .bind(chunk.dataset_version_id)
-    .bind(chunk.ordinal_start)
-    .bind(chunk.ordinal_end)
-    .fetch_all(db)
-    .await?;
-
-    validate_chunk_case_ordinals(
-        chunk.ordinal_start,
-        chunk.ordinal_end,
-        rows.iter().map(|row| row.case_ordinal),
-    )?;
-    Ok(rows)
 }
 
 /// Releases a leased chunk back to pending if the caller still owns the lease.

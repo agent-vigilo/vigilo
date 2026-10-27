@@ -38,8 +38,6 @@ pub(crate) struct ProfileExecutabilitySummary {
     pub(crate) expected_evaluator_execution_count: usize,
     pub(crate) unique_evaluator_ref_count: usize,
     pub(crate) runnable_evaluator_ref_count: usize,
-    #[serde(skip_serializing)]
-    pub(crate) resolved_evaluators: Vec<ResolvedEvaluator>,
 }
 
 /// Validates that a profile can execute every dataset case with runnable evaluators.
@@ -61,6 +59,98 @@ pub(crate) async fn validate_profile_executability(
     profile: &RunProfile,
     dataset: &RunDataset,
 ) -> anyhow::Result<ProfileExecutabilitySummary> {
+    let (runnable_by_ref, _, mut issues) = resolve_profile(db, profile).await?;
+
+    let mut expected_evaluator_execution_count = 0usize;
+
+    for case in &dataset.cases {
+        let matching_groups = matching_groups_for_case(profile, case);
+
+        if matching_groups.is_empty() {
+            issues.push(format!(
+                "case '{}' did not match any case_group (task_type='{}')",
+                case.id, case.task_type
+            ));
+            continue;
+        }
+
+        let runnable_for_case = matching_groups
+            .iter()
+            .flat_map(|group| group.evaluators.iter())
+            .filter(|binding| {
+                runnable_by_ref
+                    .get(&binding.evaluator_ref)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .count();
+
+        if runnable_for_case == 0 {
+            let group_ids = matching_groups
+                .iter()
+                .map(|group| group.id.clone())
+                .collect::<Vec<_>>()
+                .join(",");
+            issues.push(format!(
+                "case '{}' matched case_groups [{}] but none had runnable published evaluators",
+                case.id, group_ids
+            ));
+            continue;
+        }
+
+        expected_evaluator_execution_count += runnable_for_case;
+    }
+
+    for gate in &profile.scorecard.gates {
+        let matching_case_count = dataset
+            .cases
+            .iter()
+            .filter(|case| case_matches_gate(profile, case, gate))
+            .count();
+        if matching_case_count == 0 {
+            issues.push(format!(
+                "scorecard gate '{}' does not match any dataset cases",
+                gate.id
+            ));
+        }
+    }
+
+    if !issues.is_empty() {
+        anyhow::bail!(
+            "profile executability validation failed:\n- {}",
+            issues.join("\n- ")
+        );
+    }
+
+    let runnable_evaluator_ref_count = runnable_by_ref.values().filter(|is_ok| **is_ok).count();
+
+    Ok(ProfileExecutabilitySummary {
+        expected_execution_count: dataset.cases.len(),
+        expected_evaluator_execution_count,
+        unique_evaluator_ref_count: runnable_by_ref.len(),
+        runnable_evaluator_ref_count,
+    })
+}
+
+/// Resolves evaluator identities once, independently of dataset size. Case routing
+/// and gate coverage are checked during the subsequent bounded dataset pass.
+pub(crate) async fn resolve_evaluators(
+    db: &PgPool,
+    profile: &RunProfile,
+) -> anyhow::Result<Vec<ResolvedEvaluator>> {
+    let (_, resolved, issues) = resolve_profile(db, profile).await?;
+    anyhow::ensure!(
+        issues.is_empty(),
+        "profile executability validation failed:\n- {}",
+        issues.join("\n- ")
+    );
+    Ok(resolved)
+}
+
+async fn resolve_profile(
+    db: &PgPool,
+    profile: &RunProfile,
+) -> anyhow::Result<(HashMap<String, bool>, Vec<ResolvedEvaluator>, Vec<String>)> {
     let mut runnable_by_ref: HashMap<String, bool> = HashMap::new();
     let mut resolved_evaluators = Vec::new();
     let mut parsed_refs: Vec<(String, String, EvaluatorIdentity)> = Vec::new();
@@ -176,97 +266,53 @@ pub(crate) async fn validate_profile_executability(
         });
     }
 
-    let mut expected_evaluator_execution_count = 0usize;
+    Ok((runnable_by_ref, resolved_evaluators, issues))
+}
 
-    for case in &dataset.cases {
-        let matching_groups = matching_groups_for_case(profile, case);
+/// Checks one case against the already resolved profile, without database I/O.
+/// Returns the number of evaluator invocations planned for this case.
+pub(crate) fn validate_resolved_case(
+    profile: &RunProfile,
+    case: &DatasetCase,
+) -> anyhow::Result<usize> {
+    let groups = matching_groups_for_case(profile, case);
+    anyhow::ensure!(
+        !groups.is_empty(),
+        "case '{}' did not match any case_group (task_type='{}')",
+        case.id,
+        case.task_type
+    );
+    let count = groups
+        .iter()
+        .map(|group| group.evaluators.len())
+        .sum::<usize>();
+    anyhow::ensure!(
+        count > 0,
+        "case '{}' matched case_groups but none had runnable published evaluators",
+        case.id
+    );
+    Ok(count)
+}
 
-        if matching_groups.is_empty() {
-            issues.push(format!(
-                "case '{}' did not match any case_group (task_type='{}')",
-                case.id, case.task_type
-            ));
-            continue;
-        }
-
-        let runnable_for_case = matching_groups
-            .iter()
-            .flat_map(|group| group.evaluators.iter())
-            .filter(|binding| {
-                runnable_by_ref
-                    .get(&binding.evaluator_ref)
-                    .copied()
-                    .unwrap_or(false)
+/// Matches the same required-evaluator, group and tag selectors used by profile
+/// validation and scorecard denominators. A matching case counts once per gate.
+pub(crate) fn case_matches_gate(
+    profile: &RunProfile,
+    case: &DatasetCase,
+    gate: &crate::contracts::run::ScorecardGate,
+) -> bool {
+    let groups = matching_groups_for_case(profile, case);
+    gate.case_group
+        .as_ref()
+        .is_none_or(|id| groups.iter().any(|group| &group.id == id))
+        && gate.tags_all.iter().all(|tag| case.tags.contains(tag))
+        && groups.iter().any(|group| {
+            group.evaluators.iter().any(|binding| {
+                binding.required
+                    && binding.dimension == gate.dimension
+                    && gate.binding_id.as_ref().is_none_or(|id| &binding.id == id)
             })
-            .count();
-
-        if runnable_for_case == 0 {
-            let group_ids = matching_groups
-                .iter()
-                .map(|group| group.id.clone())
-                .collect::<Vec<_>>()
-                .join(",");
-            issues.push(format!(
-                "case '{}' matched case_groups [{}] but none had runnable published evaluators",
-                case.id, group_ids
-            ));
-            continue;
-        }
-
-        expected_evaluator_execution_count += runnable_for_case;
-    }
-
-    for gate in &profile.scorecard.gates {
-        let matching_case_count = dataset
-            .cases
-            .iter()
-            .filter(|case| {
-                let groups = matching_groups_for_case(profile, case);
-                let case_group_matches = gate
-                    .case_group
-                    .as_ref()
-                    .is_none_or(|case_group| groups.iter().any(|group| &group.id == case_group));
-                let tags_match = gate
-                    .tags_all
-                    .iter()
-                    .all(|required| case.tags.iter().any(|tag| tag == required));
-                let target_matches = groups.iter().any(|group| {
-                    group.evaluators.iter().any(|binding| {
-                        binding.required
-                            && binding.dimension == gate.dimension
-                            && gate
-                                .binding_id
-                                .as_ref()
-                                .is_none_or(|binding_id| &binding.id == binding_id)
-                    })
-                });
-                case_group_matches && tags_match && target_matches
-            })
-            .count();
-        if matching_case_count == 0 {
-            issues.push(format!(
-                "scorecard gate '{}' does not match any dataset cases",
-                gate.id
-            ));
-        }
-    }
-
-    if !issues.is_empty() {
-        anyhow::bail!(
-            "profile executability validation failed:\n- {}",
-            issues.join("\n- ")
-        );
-    }
-
-    let runnable_evaluator_ref_count = runnable_by_ref.values().filter(|is_ok| **is_ok).count();
-
-    Ok(ProfileExecutabilitySummary {
-        expected_execution_count: dataset.cases.len(),
-        expected_evaluator_execution_count,
-        unique_evaluator_ref_count: runnable_by_ref.len(),
-        runnable_evaluator_ref_count,
-        resolved_evaluators,
-    })
+        })
 }
 
 fn collect_static_profile_config_issues(profile: &RunProfile) -> Vec<String> {

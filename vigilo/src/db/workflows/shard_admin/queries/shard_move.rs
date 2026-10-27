@@ -402,14 +402,6 @@ pub(in crate::db::workflows::shard_admin) async fn select_move_source_page(
 ) -> anyhow::Result<Vec<MoveSourceRow>> {
     let key_expression = move_key_expression("source_row", move_table_key_columns(table)?);
     let filter = match table {
-        "case_blobs" => {
-            "EXISTS (
-                SELECT 1 FROM run_shard_cases projected
-                WHERE projected.run_id = $1::uuid
-                  AND projected.run_shard = $2
-                  AND projected.case_hash = source_row.case_hash
-            )"
-        }
         "dataset_versions" => {
             "EXISTS (
                 SELECT 1 FROM runs run
@@ -810,12 +802,6 @@ pub(in crate::db::workflows::shard_admin) async fn copy_json_rows(
         return Ok(0);
     }
 
-    if table == "case_blobs" {
-        let copied = copy_case_blob_rows(tx, rows.clone()).await?;
-        verify_prerequisite_rows(tx, table, &rows).await?;
-        return Ok(copied);
-    }
-
     let sql = format!(
         r#"
         INSERT INTO {table}
@@ -840,7 +826,6 @@ pub(in crate::db::workflows::shard_admin) async fn verify_prerequisite_rows(
     source_rows: &[Value],
 ) -> anyhow::Result<()> {
     let (key_column, key_cast) = match table {
-        "case_blobs" => ("case_hash", "text"),
         "dataset_versions" => ("dataset_version_id", "uuid"),
         "runs" => ("id", "uuid"),
         _ => anyhow::bail!("unsupported prerequisite table {}", table),
@@ -944,44 +929,6 @@ pub(in crate::db::workflows::shard_admin) async fn upsert_json_rows(
     Ok(result.rows_affected())
 }
 
-pub(in crate::db::workflows::shard_admin) async fn copy_case_blob_rows(
-    tx: &mut Transaction<'_, Postgres>,
-    rows: Vec<Value>,
-) -> anyhow::Result<u64> {
-    let result = sqlx::query(
-        r#"
-        INSERT INTO case_blobs (
-            case_hash,
-            task_type,
-            case_group,
-            input_payload,
-            expected_output,
-            context_payload,
-            tags,
-            metadata,
-            created_at
-        )
-        SELECT
-            row->>'case_hash',
-            row->>'task_type',
-            row->>'case_group',
-            COALESCE(row->'input_payload', 'null'::jsonb),
-            COALESCE(row->'expected_output', 'null'::jsonb),
-            COALESCE(row->'context_payload', 'null'::jsonb),
-            COALESCE(row->'tags', '[]'::jsonb),
-            COALESCE(row->'metadata', '{}'::jsonb),
-            COALESCE((row->>'created_at')::timestamptz, now())
-        FROM jsonb_array_elements($1::jsonb) AS source(row)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(Json(Value::Array(rows)))
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(result.rows_affected())
-}
-
 pub(in crate::db::workflows::shard_admin) async fn prerequisite_table_fingerprint_with<'e, E>(
     executor: E,
     table: &str,
@@ -992,20 +939,6 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let sql = match table {
-        "case_blobs" => {
-            r#"
-            SELECT (to_jsonb(cb) - 'created_at')::text AS row_json
-            FROM case_blobs cb
-            WHERE EXISTS (
-                SELECT 1
-                FROM run_shard_cases projected
-                WHERE projected.run_id = $1::uuid
-                  AND projected.run_shard = $2
-                  AND projected.case_hash = cb.case_hash
-            )
-            ORDER BY row_json
-            "#
-        }
         "dataset_versions" => {
             r#"
             SELECT (to_jsonb(dv) - 'created_at' - 'updated_at')::text AS row_json

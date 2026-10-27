@@ -11,7 +11,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use blake3::Hasher;
 use clap::{
     Args,
     Subcommand,
@@ -40,9 +39,25 @@ use super::{
     },
     shard,
 };
+#[cfg(test)]
+use crate::contracts::case_storage::identity::normalized_case_payload;
+#[cfg(test)]
+use crate::models::{
+    case_blob::CaseBlobDraft,
+    dataset_version_case::DatasetVersionCaseDraft,
+    run_chunk::{
+        RunChunkDraft,
+        run_shard_for_chunk_index,
+    },
+};
 use crate::{
     context::Context,
     contracts::{
+        case_storage::identity::{
+            canonical_json,
+            hash_serialized_json,
+            uuid_from_json,
+        },
         evaluator_abi::EvaluatorExecutionPlan,
         run::{
             RunDataset,
@@ -54,7 +69,6 @@ use crate::{
         workflows::{
             run_cancel,
             run_create,
-            run_creation,
             run_export as run_export_workflow,
             run_profile_validation,
             run_results::{
@@ -65,8 +79,6 @@ use crate::{
         },
     },
     models::{
-        case_blob::CaseBlobDraft,
-        dataset_version_case::DatasetVersionCaseDraft,
         evaluator_result::{
             EvaluatorDiagnostic,
             EvaluatorResult,
@@ -78,15 +90,14 @@ use crate::{
             Run,
             RunDraft,
         },
-        run_chunk::{
-            RunChunkDraft,
-            run_shard_for_chunk_index,
-        },
     },
 };
+#[cfg(test)]
+mod identity_tests;
 
 mod cancel;
 mod create;
+mod create_blob;
 mod export;
 mod results;
 mod status;
@@ -137,64 +148,12 @@ fn parse_structured_payload(raw: &str, field: &str) -> anyhow::Result<Value> {
         .map_err(|err| anyhow::anyhow!("invalid {} payload (yaml/json expected): {}", field, err))
 }
 
-/// Converts JSON objects into deterministic key order recursively.
-///
-/// This ensures stable hashing and snapshot serialization.
-fn canonical_json(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut sorted = BTreeMap::new();
-            for (key, val) in map {
-                sorted.insert(key.clone(), canonical_json(val));
-            }
-
-            let mut out = serde_json::Map::new();
-            for (key, val) in sorted {
-                out.insert(key, val);
-            }
-
-            Value::Object(out)
-        }
-        Value::Array(items) => Value::Array(items.iter().map(canonical_json).collect()),
-        _ => value.clone(),
-    }
-}
-
-/// Hashes a JSON value after serialization using BLAKE3.
-fn hash_json(value: &Value) -> anyhow::Result<String> {
-    let bytes = serde_json::to_vec(value)?;
-    let mut hasher = Hasher::new();
-    hasher.update(&bytes);
-    Ok(hasher.finalize().to_hex().to_string())
-}
-
-/// Builds a deterministic UUID from canonical JSON bytes.
-fn uuid_from_json(value: &Value) -> anyhow::Result<Uuid> {
-    let bytes = serde_json::to_vec(value)?;
-    let mut hasher = Hasher::new();
-    hasher.update(&bytes);
-    let hash = hasher.finalize();
-
-    let mut uuid_bytes = [0u8; 16];
-    uuid_bytes.copy_from_slice(&hash.as_bytes()[..16]);
-    uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x80;
-    uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
-
-    Ok(Uuid::from_bytes(uuid_bytes))
-}
-
-/// Sorts tags lexicographically for deterministic storage and hashing.
-fn canonical_tags(tags: &[String]) -> Value {
-    let mut ordered = tags.to_vec();
-    ordered.sort();
-    Value::Array(ordered.into_iter().map(Value::String).collect())
-}
-
 /// Builds case blob and dataset membership drafts from a parsed run dataset.
 ///
 /// Returns:
 /// - case blob rows keyed by `case_hash`
 /// - dataset-version membership rows preserving case order
+#[cfg(test)]
 fn build_case_plans(
     dataset: &RunDataset,
 ) -> anyhow::Result<(Vec<CaseBlobDraft>, Vec<DatasetVersionCaseDraft>)> {
@@ -202,23 +161,9 @@ fn build_case_plans(
     let mut dataset_cases = Vec::with_capacity(dataset.cases.len());
 
     for (idx, case) in dataset.cases.iter().enumerate() {
-        let expected_output = canonical_json(case.expected.as_ref().unwrap_or(&Value::Null));
-        let metadata = canonical_json(&serde_json::to_value(&case.metadata)?);
-        let input_payload = canonical_json(&case.input);
-        let context_payload = canonical_json(case.context.as_ref().unwrap_or(&Value::Null));
-        let tags = canonical_tags(&case.tags);
+        let blob_payload = normalized_case_payload(case)?;
 
-        let blob_payload = json!({
-            "task_type": case.task_type.clone(),
-            "case_group": case.case_group.clone(),
-            "input": input_payload,
-            "expected_output": expected_output,
-            "context": context_payload,
-            "tags": tags,
-            "metadata": metadata,
-        });
-
-        let case_hash = hash_json(&blob_payload)?;
+        let case_hash = hash_serialized_json(&blob_payload)?;
 
         case_blobs.push(CaseBlobDraft {
             case_hash: case_hash.clone(),
@@ -242,6 +187,7 @@ fn build_case_plans(
 }
 
 /// Computes a deterministic dataset version id from logical membership.
+#[cfg(test)]
 fn compute_dataset_version_id(
     dataset: &RunDataset,
     dataset_cases: &[DatasetVersionCaseDraft],
@@ -279,7 +225,7 @@ fn compute_aggregation_policy_hash(profile: &RunProfile) -> anyhow::Result<Strin
         })
         .collect::<Vec<_>>();
 
-    hash_json(&json!({
+    hash_serialized_json(&json!({
         "defaults": {
             "fail_on_any_blocking_failure": profile.defaults.fail_on_any_blocking_failure,
             "min_execution_score": profile.defaults.min_execution_score,
@@ -293,6 +239,7 @@ fn compute_aggregation_policy_hash(profile: &RunProfile) -> anyhow::Result<Strin
 ///
 /// Chunks are ordinal scheduling ranges and may contain mixed case groups.
 /// Per-case profile routing is resolved later by workers from stored case data.
+#[cfg(test)]
 fn build_chunks(total_cases: usize, chunk_size: usize) -> Vec<RunChunkDraft> {
     let mut chunks = Vec::new();
     let mut start = 0usize;
@@ -363,6 +310,8 @@ struct RunWatchSnapshotKey {
     creation_placements_failed: i64,
     creation_seed_attempt_count: i64,
     creation_last_error: Option<String>,
+    plan_status: Option<String>,
+    plan_chunk_cursor: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -418,6 +367,14 @@ impl From<&run_status_workflow::RunStatusProjection> for RunWatchSnapshotKey {
                 .creation_progress
                 .as_ref()
                 .map_or(0, |progress| progress.attempt_count),
+            plan_status: status
+                .creation_progress
+                .as_ref()
+                .and_then(|p| p.plan_status.clone()),
+            plan_chunk_cursor: status
+                .creation_progress
+                .as_ref()
+                .and_then(|p| p.plan_chunk_cursor),
             creation_last_error: status
                 .creation_progress
                 .as_ref()
@@ -499,6 +456,11 @@ fn run_watch_payload_from_status(
                 "errored_execution_count": status.live_progress.errored_execution_count,
                 "skipped_execution_count": status.live_progress.skipped_execution_count,
                 "missing_aggregate_count": status.live_progress.missing_aggregate_count,
+                "missing_execution_count": status.live_progress.missing_execution_count,
+                "unresolved_execution_count": status.live_progress.unresolved_execution_count,
+                "planned_chunk_count": status.live_progress.planned_chunk_count,
+                "settled_chunk_count": status.live_progress.settled_chunk_count,
+                "sealed_shard_count": status.live_progress.sealed_shard_count,
                 "failed_chunk_count": status.live_progress.failed_chunk_count,
                 "cancelled_chunk_count": status.live_progress.cancelled_chunk_count,
             },
@@ -509,6 +471,8 @@ fn run_watch_payload_from_status(
                 "failed_placement_count": progress.failed_placement_count,
                 "attempt_count": progress.attempt_count,
                 "last_error": progress.last_error,
+                "plan_status": progress.plan_status,
+                "plan_chunk_cursor": progress.plan_chunk_cursor,
             })),
         },
         "meta": {
@@ -571,8 +535,8 @@ pub(crate) enum SubCommand {
         #[arg(
             long,
             value_name = "YAML_OR_JSON",
-            conflicts_with = "dataset_file",
-            required_unless_present = "dataset_file"
+            conflicts_with_all = ["dataset_file", "dataset_upload_id"],
+            required_unless_present_any = ["dataset_file", "dataset_upload_id"]
         )]
         dataset: Option<String>,
 
@@ -581,10 +545,25 @@ pub(crate) enum SubCommand {
             long,
             value_name = "FILE",
             value_parser = parse_filepath,
-            conflicts_with = "dataset",
-            required_unless_present = "dataset"
+            conflicts_with_all = ["dataset", "dataset_upload_id"],
+            required_unless_present_any = ["dataset", "dataset_upload_id"]
         )]
         dataset_file: Option<PathBuf>,
+        /// Finalized dataset catalog/upload ID; stores a non-dispatchable run plan
+        #[arg(long, conflicts_with_all=["dataset","dataset_file"], requires="storage_config")]
+        dataset_upload_id: Option<Uuid>,
+
+        /// Storage owner TOML used to resolve the finalized dataset and plan files
+        #[arg(long, env = "VIGILO_STORAGE_CONFIG")]
+        storage_config: PathBuf,
+
+        /// Retain this ID when retrying interrupted plan preparation
+        #[arg(long)]
+        run_id: Option<Uuid>,
+
+        /// Prepare and verify the immutable plan without admitting execution work
+        #[arg(long)]
+        prepare_only: bool,
     },
 
     /// Parse and validate run profile and dataset inputs
@@ -705,7 +684,24 @@ impl Executable for Command {
                 profile_file,
                 dataset,
                 dataset_file,
+                dataset_upload_id,
+                storage_config,
+                run_id,
+                prepare_only,
             }) => {
+                if let Some(upload_id) = dataset_upload_id {
+                    return create_blob::exec(
+                        context,
+                        run_creation.config(),
+                        profile,
+                        profile_file,
+                        upload_id,
+                        storage_config,
+                        run_id,
+                        prepare_only,
+                    )
+                    .await;
+                }
                 info!("creating run from profile and dataset inputs");
                 create::exec(
                     context,
@@ -714,6 +710,9 @@ impl Executable for Command {
                     profile_file,
                     dataset,
                     dataset_file,
+                    storage_config,
+                    run_id,
+                    prepare_only,
                 )
                 .await
             }
@@ -1046,6 +1045,7 @@ mod tests {
             average_score: Some(0.72),
             min_score: Some(0.2),
             max_score: Some(1.0),
+            ..Default::default()
         };
         let payload = results::run_results_payload(&run, &summary, None);
 
@@ -1132,6 +1132,7 @@ mod tests {
                 missing_aggregate_count: 0,
                 failed_chunk_count: 0,
                 cancelled_chunk_count: 1,
+                ..Default::default()
             },
             execution_route_count: 2,
             shard_summary_count: 1,
@@ -1180,6 +1181,7 @@ mod tests {
             average_score: Some(1.0),
             min_score: Some(1.0),
             max_score: Some(1.0),
+            ..Default::default()
         };
 
         let executions = vec![Execution {
@@ -1315,6 +1317,60 @@ mod tests {
                 scorecard: None,
             },
         );
+
+        assert_eq!(
+            payload["data"]["executions"][0]["aggregate_authoritative"],
+            true
+        );
+        assert_eq!(
+            payload["data"]["executions"][0]["attempts"][0]["evidence_state"],
+            "authoritative"
+        );
+        // Preserve all artifact rows, but label unfinished and superseded evidence.
+        for (execution_status, attempt_status, current, has_aggregate, expected) in [
+            ("running", "completed", true, true, "partial"),
+            ("failed", "running", true, true, "partial"),
+            ("failed", "cancelled", true, true, "partial"),
+            ("failed", "completed", true, false, "partial"),
+            ("failed", "stale", true, true, "stale"),
+            ("completed", "completed", false, true, "stale"),
+            ("failed", "failed_evaluation", true, true, "authoritative"),
+        ] {
+            let mut execution = executions[0].clone();
+            execution.status = execution_status.into();
+            if !current {
+                execution.current_attempt_id = Some(Uuid::now_v7());
+            }
+            let mut attempt = attempts[0].clone();
+            attempt.status = attempt_status.into();
+            let payload = export::run_export_payload(
+                &run,
+                &summary,
+                &export::RunExportRows {
+                    executions: &[execution],
+                    attempts: &[attempt],
+                    aggregates: if has_aggregate { &aggregates } else { &[] },
+                    evaluator_results: &evaluator_results,
+                    evaluator_diagnostics: &[],
+                    scorecard: None,
+                },
+            );
+            assert_eq!(
+                payload["data"]["executions"][0]["attempts"][0]["evidence_state"],
+                expected
+            );
+            assert_eq!(
+                payload["data"]["executions"][0]["aggregate_authoritative"],
+                expected == "authoritative"
+            );
+            assert_eq!(
+                payload["data"]["executions"][0]["attempts"][0]["evaluator_results"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                3
+            );
+        }
 
         assert_eq!(payload["meta"]["summary_only"], json!(false));
         assert_eq!(payload["meta"]["execution_count"], json!(1));

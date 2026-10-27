@@ -170,7 +170,6 @@ impl ShardAssignmentPolicy {
             ),
         }
     }
-
     pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::SingleDefault => "single-default",

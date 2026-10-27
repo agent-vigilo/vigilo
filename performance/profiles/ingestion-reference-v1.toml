@@ -1,0 +1,27 @@
+schema_id = "profile/v1"
+id = "ingestion-reference-v1"
+description = "Finalized dataset-reference creation without resubmitting source files."
+requires_workload_selection = true
+campaign_cap_secs = 3600
+schedule_seed = 20261025
+max_artifact_bytes = 1073741824
+max_stdout_bytes = 262144
+max_stderr_bytes = 262144
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-10000-payload-1024-reference"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-50000-payload-1024-reference"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-10000-payload-16384-reference"
+blocks = 2
+timing = "informative"

@@ -11,6 +11,7 @@ sequenceDiagram
     participant Vigilo
     participant ControlDB as Control DB
     participant ExecutionDB as Execution DBs
+    participant Objects as Object Storage
     participant Queue as RabbitMQ
 
     User->>Vigilo: vigilo coordinator start
@@ -25,11 +26,13 @@ sequenceDiagram
             Vigilo-->>User: Success response
         else Tick elapsed
             Vigilo->>Vigilo: Run coordinator cycle
-            Vigilo->>ControlDB: Claim bounded expired creating runs
-            Vigilo->>ExecutionDB: Idempotently seed remaining placements
-            Vigilo->>ControlDB: Persist creation progress or activate seeded runs
-            Vigilo->>ControlDB: List active execution placements
-            loop Active execution placements
+            Vigilo->>ControlDB: Claim bounded ready plans with execution requested and available lease
+            Vigilo->>Objects: Verify roots, configuration, gate counts and bounded chunk pages
+            Vigilo->>ExecutionDB: Replay compact admission and verify exact local coverage
+            Vigilo->>ControlDB: Checkpoint progress or publish routes and activate
+            Note over Vigilo,ControlDB: Failed candidates release ownership, preparation-only runs stay held
+            Vigilo->>ControlDB: List serviceable execution placements
+            loop Serviceable execution placements
                 Vigilo->>Vigilo: Acquire alias circuit permission
                 alt Circuit is open
                     Note over Vigilo,ExecutionDB: Leave durable work pending
@@ -55,18 +58,29 @@ sequenceDiagram
                     Vigilo->>Vigilo: Count failure and exclude alias for this pass
                 end
             end
+            loop Serviceable databases with bounded concurrency
+                Vigilo->>ExecutionDB: Discover bounded ready candidates
+                loop Fair page admission within database page and time budgets
+                    Note over Vigilo,ExecutionDB: Bounded shard concurrency with one in-flight page per shard
+                    Vigilo->>ExecutionDB: Try page claim, fence ownership, and commit progress or canonical checkpoint
+                    ExecutionDB-->>Vigilo: Ready again, caught up, sealed, busy, or deferred
+                    Vigilo->>Vigilo: Visit unchecked candidates before revisiting remaining ready work
+                end
+                Vigilo->>Vigilo: Await admitted page operations under the database deadline
+            end
+
             Vigilo->>ControlDB: Log finalization candidate backlog
             Vigilo->>ControlDB: Select finalization candidate
-            Vigilo->>ExecutionDB: Read routed shard summaries
-            alt Summary reads succeed and all shards are terminal
+            Vigilo->>ExecutionDB: Read routed shard summaries in one batch per database
+            alt Summary reads succeed and all shard summaries are sealed and valid
                 Vigilo->>ControlDB: Claim and write global finalization result
                 ControlDB-->>Vigilo: Finalization count
-            else Placement read fails or summary is incomplete
-                Vigilo->>Vigilo: Defer run and continue cycle
+            else Placement read fails or summary is unsealed or invalid
+                Vigilo->>Vigilo: Defer candidate and continue other runs
             end
             Vigilo->>Vigilo: Load messaging context
-            Vigilo->>ControlDB: List active outbox placements
-            loop Active outbox placements
+            Vigilo->>ControlDB: List serviceable outbox placements
+            loop Serviceable outbox placements
                 Vigilo->>ExecutionDB: Count and claim publishable rows for alias
                 alt Placement succeeds
                     ExecutionDB-->>Vigilo: Joined event payload batch

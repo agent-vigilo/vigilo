@@ -15,7 +15,7 @@ flowchart TD
     Status{Run status?}
     Drain[Mark control dispatch cursors drained]
     Routes[Resolve execution routes]
-    CancelWork[Cancel execution-local work by placement]
+    CancelWork[Cancel local work and commit chunk receipts by placement]
     Summary[Refresh routed cancellation summary]
     Event[Enqueue control cancellation event]
     Payload[Build cancellation payload]
@@ -42,7 +42,7 @@ flowchart TD
 
     Status -- Completed or failed --> TerminalFail
     Status -- Already cancelled --> Drain
-    Status -- Pending, running, or finalizing --> Drain
+    Status -- Pending, running, finalizing or blob preparation --> Drain
     Status -- Other --> UnsupportedFail
 
     Drain --> Routes

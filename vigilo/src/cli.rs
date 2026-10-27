@@ -27,6 +27,7 @@ use super::context::{
 
 #[async_trait]
 pub(super) trait Executable {
+    #[must_use = "the command executes only when this future is awaited"]
     async fn exec(self, context: Context) -> anyhow::Result<()>;
 }
 

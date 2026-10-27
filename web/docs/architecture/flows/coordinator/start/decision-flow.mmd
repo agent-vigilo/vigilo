@@ -13,15 +13,23 @@ flowchart TD
     Runner[Start coordinator service runner]
     Event{Next service event?}
     Database{Database context available?}
-    RecoverCreation[Resume expired creating runs]
+    RecoverCreation[Claim ready plans with execution requested]
+    ReadPlan[Verify immutable roots, configuration and gate counts]
+    AdmitPlan[Replay compact admission and verify coverage]
+    CreationDeferred[Release ownership and continue bounded candidates]
     Circuit{Alias circuit admits operation?}
     CircuitSkip[Leave durable work pending and continue]
     Recover[Recover expired chunk leases]
     RecoveryIsolated[Count placement failure and continue aliases]
     Dispatch[Dispatch ready run-shard windows]
     DispatchIsolated[Leave cursor open and exclude failed alias]
-    Finalize[Finalize ready runs]
-    FinalizeIsolated[Defer run and continue cycle]
+    Finalize[Read summaries by database and finalize exact valid seals]
+    FinalizeIsolated[Defer candidate; inspect next run]
+    Aggregate[Discover ready shards with bounded database and shard concurrency]
+    AggregationBudget{Ready page and database scheduling budgets available?}
+    AggregationPage[Try claim and atomically commit one bounded receipt or canonical page]
+    AggregationNext[Visit unchecked candidates before revisiting shards with ready work]
+    AggregationDrain[Await all admitted page operations under database deadlines]
     Messaging{Messaging context available?}
     Outbox[Claim delivery queue batch and publish with bounded concurrency]
     BrokerCircuit{Messaging circuit admits publish?}
@@ -46,25 +54,33 @@ flowchart TD
     Database -- No --> ContextFail
     Database -- Yes --> RecoverCreation
 
-    RecoverCreation --> Circuit
+    RecoverCreation --> ReadPlan --> AdmitPlan --> RecoveryPlacement{Serviceable placements remain?}
+    ReadPlan -. Unavailable or invalid object .-> CreationDeferred
+    AdmitPlan -. Candidate fails .-> CreationDeferred
+    CreationDeferred --> RecoveryPlacement
+    RecoveryPlacement -- Yes --> Circuit
+    RecoveryPlacement -- No --> Dispatch
     Circuit -- Open --> CircuitSkip
     Circuit -- Closed or probe --> Recover
-    CircuitSkip --> Recover
+    CircuitSkip --> RecoveryPlacement
     RecoverCreation -. Control recovery fails .-> CycleFail
 
-    Recover --> Dispatch
+    Recover --> RecoveryPlacement
     Recover -. Placement operation fails .-> RecoveryIsolated
-    RecoveryIsolated --> Recover
+    RecoveryIsolated --> RecoveryPlacement
 
-    Dispatch --> Finalize
+    Dispatch --> Aggregate
+    Aggregate --> AggregationBudget
+    AggregationBudget -- Yes --> AggregationPage --> AggregationNext --> AggregationBudget
+    AggregationBudget -- No --> AggregationDrain --> Finalize
     Dispatch -. Execution placement fails .-> DispatchIsolated
     Dispatch -. Control dispatch fails .-> CycleFail
     DispatchIsolated --> Dispatch
 
     Finalize --> Messaging
-    Finalize -. Placement summary read fails .-> FinalizeIsolated
+    Finalize -. Summary unavailable, open, or invalid .-> FinalizeIsolated
     Finalize -. Control finalization fails .-> CycleFail
-    FinalizeIsolated --> Messaging
+    FinalizeIsolated --> Finalize
 
     Messaging -- No --> ContextFail
     Messaging -- Yes --> Outbox
@@ -86,5 +102,5 @@ flowchart TD
 
     class Start command
     class Success success
-    class CoordinatorId,Runner,Event,Database,RecoverCreation,Circuit,CircuitSkip,Recover,RecoveryIsolated,Dispatch,DispatchIsolated,Finalize,FinalizeIsolated,Messaging,Outbox,BrokerCircuit,OutboxIsolated,Wait,Shutdown,Stop system
+    class CoordinatorId,Runner,Event,Database,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryPlacement,Circuit,CircuitSkip,Recover,RecoveryIsolated,Dispatch,DispatchIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Finalize,FinalizeIsolated,Messaging,Outbox,BrokerCircuit,OutboxIsolated,Wait,Shutdown,Stop system
     class ContextFail,CycleFail,ShutdownFail error

@@ -4,7 +4,9 @@
 //! placement before chunk-ready events become visible.
 
 use serde::Deserialize;
+#[cfg(test)]
 use sqlx::PgPool;
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::contracts::{
@@ -25,6 +27,7 @@ pub(crate) struct WorkerRunSnapshot {
 ///
 /// Worker hot paths use this instead of reading the authoritative control
 /// `runs` row.
+#[cfg(test)]
 pub(crate) async fn select_worker_run_snapshot(
     db: &PgPool,
     run_id: Uuid,
@@ -46,6 +49,13 @@ pub(crate) async fn select_worker_run_snapshot(
     let Some(snapshot) = snapshot else {
         return Ok(None);
     };
+    Ok(Some(decode_worker_snapshot(snapshot)?))
+}
+
+/// Validates frozen evaluator identity after loading a stored configuration.
+pub(crate) fn decode_worker_snapshot(
+    snapshot: serde_json::Value,
+) -> anyhow::Result<WorkerRunSnapshot> {
     let snapshot: WorkerRunSnapshot = serde_json::from_value(snapshot)?;
     if snapshot.execution_plan.version != 1 {
         anyhow::bail!(
@@ -59,12 +69,13 @@ pub(crate) async fn select_worker_run_snapshot(
     if snapshot.execution_plan.aggregation_policy_hash != snapshot.aggregation_policy_hash {
         anyhow::bail!("run snapshot scoring policy and evaluator execution plan disagree");
     }
-    Ok(Some(snapshot))
+    Ok(snapshot)
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    #[cfg(test)]
     use sqlx::PgPool;
     use uuid::Uuid;
 

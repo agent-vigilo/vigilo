@@ -1,0 +1,4 @@
+{"dataset_id":"018f1111-1111-7111-8111-111111111111","ordinal_end":3,"ordinal_start":0,"schema":"vigilo/case-batch/v1"}
+{"case_hash":"89b23b7788ffbd1a687e4a4336400c5a18d35a946a83a1717ad0902ef925ba1d","case_ordinal":0,"source":{"case_group":"quality","context":{"a":1,"z":2},"expected":{"a":"ok","z":true},"id":"018f1111-1111-7111-8111-111111111101","input":{"a":{"nil":null,"number":1.5},"z":[3,{"a":"café 🌍","z":false}]},"metadata":{"a":"trace","z":{"a":null,"z":0}},"tags":["zeta","alpha","alpha"],"task_type":"classification"}}
+{"case_hash":"cec1a957b5542f0dee497fe52a81e233b873a5143411a9c5a7f51899bb0651f5","case_ordinal":1,"source":{"id":"018f1111-1111-7111-8111-111111111102","input":{"prompt":"line\nbreak"},"task_type":"generation"}}
+{"case_hash":"cec1a957b5542f0dee497fe52a81e233b873a5143411a9c5a7f51899bb0651f5","case_ordinal":2,"source":{"id":"018f1111-1111-7111-8111-111111111103","input":{"prompt":"line\nbreak"},"task_type":"generation"}}

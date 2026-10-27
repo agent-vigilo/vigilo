@@ -1,25 +1,26 @@
-//! Validation and persistence helpers for shard-local case projections.
+//! Canonical case-assignment hashing shared by planning and worker verification.
+//!
+//! Production folds one transient case identity at a time. Test-only projection
+//! fixtures independently check exact coverage, order and stable hash encoding;
+//! no per-case assignment is persisted in SQL.
 
+#[cfg(test)]
 use std::collections::{
     BTreeMap,
     BTreeSet,
 };
 
+#[cfg(test)]
 use uuid::Uuid;
 
+use crate::models::run_shard_case::RunShardCaseDraft;
+#[cfg(test)]
 use crate::models::{
     dataset_version_case::DatasetVersionCaseDraft,
     run_chunk::RunChunkDraft,
-    run_shard_case::RunShardCaseDraft,
 };
 
-mod queries;
-
-pub(crate) use queries::{
-    insert_projection_page,
-    projection_fingerprint,
-};
-
+#[cfg(test)]
 pub(crate) fn project_cases_for_chunks(
     run_id: Uuid,
     dataset_version_id: Uuid,
@@ -70,6 +71,7 @@ pub(crate) fn project_cases_for_chunks(
 }
 
 /// Hashes immutable projection identity using a versioned binary encoding.
+#[cfg(test)]
 pub(crate) fn projection_hash(rows: &[RunShardCaseDraft]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"vigilo/run-shard-cases/v1");
@@ -79,7 +81,7 @@ pub(crate) fn projection_hash(rows: &[RunShardCaseDraft]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-pub(super) fn update_projection_hash(hasher: &mut blake3::Hasher, row: &RunShardCaseDraft) {
+pub(crate) fn update_projection_hash(hasher: &mut blake3::Hasher, row: &RunShardCaseDraft) {
     hasher.update(&row.run_shard.to_be_bytes());
     hasher.update(&row.case_ordinal.to_be_bytes());
     hasher.update(row.case_id.as_bytes());
@@ -88,9 +90,6 @@ pub(super) fn update_projection_hash(hasher: &mut blake3::Hasher, row: &RunShard
     hasher.update(hash_bytes);
 }
 
-#[cfg(test)]
-#[path = "case_projection/postgres_tests.rs"]
-mod postgres_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

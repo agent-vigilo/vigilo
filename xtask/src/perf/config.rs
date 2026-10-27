@@ -120,6 +120,17 @@ pub fn validate_registry(registry: &WorkloadRegistry) -> Result<()> {
         if tuples.len() != workload.tuples.len() {
             bail!("workload {} contains a duplicate tuple", workload.id);
         }
+        for (tuple, ceiling) in &workload.statement_budgets {
+            if *ceiling == 0
+                || !workload.tuples.contains(tuple)
+                || !workload.required_metrics.iter().any(|m| m == "sql")
+            {
+                bail!(
+                    "workload {} has an invalid statement budget for {tuple}",
+                    workload.id
+                );
+            }
+        }
         let Some((unit, oracle)) = driver_contract(&workload.id) else {
             bail!("workload {} has no registered harness driver", workload.id);
         };
@@ -512,7 +523,7 @@ fn estimate_millis(
 fn driver_contract(workload_id: &str) -> Option<(&'static str, &'static str)> {
     Some(match workload_id {
         "startup.cli-help.v1" => ("process_start", "exit_0_and_help_signature"),
-        "run.create.v1" | "run.create-scaling.v1" => {
+        "run.create.v1" | "run.create-scaling.v1" | "run.create-ingestion.v1" => {
             ("case_and_run", "exact_control_and_execution_rows")
         }
         "coordinator.dispatch.v1" => ("cycle_and_chunk", "exact_dispatch_and_queue_state"),

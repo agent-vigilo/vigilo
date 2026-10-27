@@ -216,7 +216,14 @@ pub(super) async fn mark_control_cancellation_requested(
         }));
     }
 
-    if !is_cancelable_status(&status) {
+    // Blob preparation has no admitted execution work. Cancelling its control
+    // row fences publication immediately, even before any plan file is ready.
+    let preparing_plan = status == "creating"
+        && sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM run_plans WHERE run_id=$1)")
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if !is_cancelable_status(&status) && !preparing_plan {
         anyhow::bail!(
             "run '{}' has unsupported status '{}' and cannot be cancelled",
             run_id,
@@ -468,6 +475,10 @@ pub(super) async fn select_run_execution_progress(
              AND ea.run_shard = e.run_shard
              AND ea.execution_id = e.id
              AND ea.attempt_id = e.current_attempt_id
+             AND EXISTS (SELECT 1 FROM execution_attempts a
+                 WHERE a.run_id=e.run_id AND a.run_shard=e.run_shard
+                   AND a.execution_id=e.id AND a.id=e.current_attempt_id
+                   AND a.status IN ('completed','failed_agent_call','failed_evaluation','timed_out'))
             WHERE e.run_id = $1::uuid
         ),
         chunk_counts AS (

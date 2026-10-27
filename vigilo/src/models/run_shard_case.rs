@@ -1,7 +1,7 @@
-//! Run-scoped case projection models.
+//! Logical case assignment identity used by canonical membership hashing.
 //!
-//! Each row assigns one immutable dataset case to the logical run shard that
-//! may read it from an execution database.
+//! Planning and workers fold the same fields to prove exact chunk membership.
+//! These values are transient and are never persisted as per-case SQL rows.
 
 use serde::{
     Deserialize,
@@ -9,8 +9,8 @@ use serde::{
 };
 use uuid::Uuid;
 
-/// Insert payload for one shard-local case projection row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+/// One transient case assignment in a canonical membership fold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RunShardCaseDraft {
     pub(crate) run_id: Uuid,
     pub(crate) run_shard: i16,

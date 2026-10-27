@@ -7,6 +7,12 @@
 
 mod support;
 
+#[path = "multi_database_e2e/recovery.rs"]
+mod recovery;
+
+#[path = "multi_database_e2e/worker_storage.rs"]
+mod worker_storage;
+
 use std::{
     fs,
     io::{
@@ -128,11 +134,7 @@ async fn run_creation_recovers_after_cross_database_seed_status_failure() -> any
     );
     assert_eq!(
         run_creation_placement_state(&fixture.primary, recoverable_run_id, SHARD_ALIAS).await?,
-        ("seeded".to_string(), 2)
-    );
-    assert_eq!(
-        run_creation_chunk_plan_count(&fixture.primary, recoverable_run_id).await?,
-        0
+        ("seeded".to_string(), 3)
     );
 
     Ok(())
@@ -476,6 +478,144 @@ async fn run_cancellation_updates_routed_storage() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn exhausted_shard_preserves_healthy_results_and_finalizes_partial_report()
+-> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: PRIMARY_ALIAS,
+            shard_assignment_policy: "spread-active",
+            agent_url: &fixture.agent.url,
+            profile_id: "e2e_partial_settlement",
+            case_count: 101,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    run_vigilo_ok(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "spread-active",
+        ["coordinator", "once"],
+    )?;
+    // Exhaust the remote one-case chunk before it creates an execution. The
+    // primary chunk still runs through the real broker, agent, Wasm, and worker.
+    sqlx::query("UPDATE run_chunks SET status='leased',lease_token=gen_random_uuid(),leased_until=now()-interval '1 second',recovery_count=3 WHERE run_id=$1")
+        .bind(run).execute(&fixture.shard).await?;
+    let status = drive_run_to_status(
+        &fixture,
+        "settled partial report",
+        PRIMARY_ALIAS,
+        "spread-active",
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(status["data"]["gate_status"], "fail");
+    assert_eq!(
+        status["data"]["live_progress"]["missing_execution_count"],
+        1
+    );
+    assert_eq!(status["data"]["live_progress"]["sealed_shard_count"], 2);
+    assert_eq!(execution_count(&fixture.primary, run).await?, 100);
+    assert_eq!(execution_count(&fixture.shard, run).await?, 0);
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
+        1
+    );
+    let results = run_vigilo_json(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "spread-active",
+        ["run", "results", &run.to_string()],
+    )?;
+    assert_eq!(results["data"]["results"]["aggregate_count"], 100);
+    assert_eq!(results["data"]["results"]["missing_execution_count"], 1);
+    assert_eq!(results["data"]["results"]["score"]["average"], 1.0);
+    let scorecard: Value =
+        sqlx::query_scalar("SELECT scorecard FROM run_scorecards WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&fixture.primary)
+            .await?;
+    assert_eq!(scorecard["gates"][0]["expected_count"], 101);
+    assert_eq!(scorecard["gates"][0]["scored_count"], 100);
+    let export = run_vigilo_ok(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "spread-active",
+        [
+            "run",
+            "export",
+            &run.to_string(),
+            "--format",
+            "jsonl",
+            "--batch-size",
+            "17",
+        ],
+    )?;
+    let lines = String::from_utf8(export.stdout)?;
+    let records = lines
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let aggregates = records
+        .iter()
+        .filter(|r| r["type"] == "execution_aggregate")
+        .collect::<Vec<_>>();
+    assert_eq!(aggregates.len(), 100);
+    assert!(aggregates.iter().all(|r| r["authoritative"] == true));
+    assert!(
+        records
+            .iter()
+            .filter(|r| r["type"] == "execution_attempt")
+            .all(|r| r["evidence_state"] == "authoritative")
+    );
+    let source_receipt: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(s) FROM run_chunk_settlements s WHERE run_id=$1 AND run_shard=1",
+    )
+    .bind(run)
+    .fetch_one(&fixture.shard)
+    .await?;
+    run_vigilo_ok(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "spread-active",
+        [
+            "shard",
+            "move",
+            &run.to_string(),
+            "1",
+            "--alias",
+            PRIMARY_ALIAS,
+        ],
+    )?;
+    let target_receipt: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(s) FROM run_chunk_settlements s WHERE run_id=$1 AND run_shard=1",
+    )
+    .bind(run)
+    .fetch_one(&fixture.primary)
+    .await?;
+    assert_eq!(target_receipt, source_receipt);
+    let (consumed,sealed):(bool,bool)=sqlx::query_as("SELECT c.consumed,s.sealed FROM run_chunk_settlement_consumptions c JOIN run_shard_summaries s USING (run_id,run_shard) WHERE c.run_id=$1 AND c.run_shard=1")
+        .bind(run).fetch_one(&fixture.primary).await?;
+    assert!(consumed && sealed);
+    run_vigilo_ok(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "spread-active",
+        ["coordinator", "once"],
+    )?;
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn unpublished_evaluator_is_rejected() -> anyhow::Result<()> {
     let Some(fixture) = E2eFixture::setup().await? else {
         return Ok(());
@@ -503,6 +643,99 @@ async fn unpublished_evaluator_is_rejected() -> anyhow::Result<()> {
         String::from_utf8_lossy(&invalid.stderr)
     );
 
+    Ok(())
+}
+
+/// A storage outage must release the chunk without fabricating execution evidence;
+/// restoring the read route lets the same queued assignment finish exactly once.
+#[tokio::test]
+async fn worker_storage_outage_retries_without_execution_and_recovers() -> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "e2e_storage_recovery",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+
+    // Only this child receives the fault. The canonical binding and real stored
+    // objects stay intact; no process-wide environment or shared service is changed.
+    let owner_path = std::env::var("VIGILO_STORAGE_CONFIG")?;
+    let mut owner: toml::Value = toml::from_str(&std::fs::read_to_string(owner_path)?)?;
+    owner
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("storage owner is not a table"))?
+        .insert(
+            "read_endpoint_variable".into(),
+            toml::Value::String("VIGILO_E2E_FAULT_ENDPOINT".into()),
+        );
+    let directory = tempfile::tempdir()?;
+    let owner_path = directory.path().join("storage.toml");
+    std::fs::write(&owner_path, toml::to_string(&owner)?)?;
+    let unavailable = {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        format!("http://{}", listener.local_addr()?)
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_vigilo"))
+        .env(PRIMARY_DATABASE_URL_ENV, &fixture.config.primary_url)
+        .env(SHARD_DATABASE_URL_ENV, &fixture.config.shard_url)
+        .env("MESSAGING_URL", &fixture.config.messaging_url)
+        .env("VIGILO_MQ_NAMESPACE", &fixture.config.mq_namespace)
+        .env("VIGILO_DEFAULT_SHARD_DATABASE_ALIAS", SHARD_ALIAS)
+        .env("VIGILO_SHARD_ASSIGNMENT_POLICY", "single-default")
+        .env("VIGILO_STORAGE_CONFIG", &owner_path)
+        .env("VIGILO_E2E_FAULT_ENDPOINT", unavailable)
+        .args(["-q", "worker", "once"])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "worker failed instead of scheduling storage retry: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(execution_count(&fixture.primary, run).await?, 0);
+    assert_eq!(execution_count(&fixture.shard, run).await?, 0);
+    assert_eq!(
+        run_chunk_status_count(&fixture.shard, run, "pending").await?,
+        1
+    );
+    let attempts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM execution_attempts WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&fixture.shard)
+            .await?;
+    assert_eq!(attempts, 0);
+
+    let status = drive_run_to_status(
+        &fixture,
+        "storage read recovery",
+        SHARD_ALIAS,
+        "single-default",
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(status["data"]["gate_status"], "pass");
+    assert_eq!(status["data"]["expected_execution_count"], 1);
+    assert_eq!(status["data"]["terminal_execution_count"], 1);
+    assert_eq!(execution_count(&fixture.shard, run).await?, 1);
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
+        1
+    );
     Ok(())
 }
 
@@ -786,9 +1019,7 @@ async fn install_seed_status_failure(primary: &PgPool) -> anyhow::Result<()> {
         LANGUAGE plpgsql
         AS $$
         BEGIN
-            IF OLD.status = 'pending'
-               AND NEW.status = 'seeded'
-               AND NEW.database_alias = 'shard_001'
+            IF NEW.admission_cursor > OLD.admission_cursor
             THEN
                 RAISE EXCEPTION 'injected failure after execution seed commit';
             END IF;
@@ -802,7 +1033,7 @@ async fn install_seed_status_failure(primary: &PgPool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
         CREATE TRIGGER fail_run_creation_seed_status
-        BEFORE UPDATE ON run_creation_placements
+        BEFORE UPDATE ON run_plans
         FOR EACH ROW
         EXECUTE FUNCTION fail_run_creation_seed_status()
         "#,
@@ -813,7 +1044,7 @@ async fn install_seed_status_failure(primary: &PgPool) -> anyhow::Result<()> {
 }
 
 async fn remove_seed_status_failure(primary: &PgPool) -> anyhow::Result<()> {
-    sqlx::query("DROP TRIGGER IF EXISTS fail_run_creation_seed_status ON run_creation_placements")
+    sqlx::query("DROP TRIGGER IF EXISTS fail_run_creation_seed_status ON run_plans")
         .execute(primary)
         .await?;
     sqlx::query("DROP FUNCTION IF EXISTS fail_run_creation_seed_status()")
@@ -1012,45 +1243,25 @@ async fn drive_run_to_status(
 }
 
 fn run_has_terminal_live_progress(status: &Value) -> bool {
-    let progress = &status["data"]["live_progress"];
-    let expected = progress["expected_execution_count"]
-        .as_i64()
-        .unwrap_or_default();
-    let terminal = progress["terminal_execution_count"]
-        .as_i64()
-        .unwrap_or_default();
-    let failed_chunks = progress["failed_chunk_count"].as_i64().unwrap_or_default();
-    let cancelled_chunks = progress["cancelled_chunk_count"]
-        .as_i64()
-        .unwrap_or_default();
-
-    (expected > 0 && terminal >= expected) || failed_chunks > 0 || cancelled_chunks > 0
+    let sealed = status["data"]["live_progress"]["sealed_shard_count"]
+        .as_u64()
+        .unwrap_or(0);
+    let routes = status["meta"]["execution_route_count"]
+        .as_u64()
+        .unwrap_or(0);
+    routes > 0 && sealed == routes
 }
 
 #[test]
-fn terminal_live_progress_requires_execution_coverage_or_terminal_chunk_failure() {
-    let mut status = json!({
-        "data": {
-            "live_progress": {
-                "expected_execution_count": 1,
-                "terminal_execution_count": 0,
-                "failed_chunk_count": 0,
-                "cancelled_chunk_count": 0
-            }
-        },
-        "meta": {
-            "live_progress_complete": true
-        }
-    });
-
+fn terminal_live_progress_requires_every_shard_seal() {
+    let mut status = json!({"data":{"live_progress":{"failed_chunk_count":1,
+        "expected_execution_count":2,"terminal_execution_count":2,"sealed_shard_count":1}},
+        "meta":{"execution_route_count":2}});
     assert!(!run_has_terminal_live_progress(&status));
-
-    status["data"]["live_progress"]["terminal_execution_count"] = json!(1);
+    status["data"]["live_progress"]["sealed_shard_count"] = json!(2);
     assert!(run_has_terminal_live_progress(&status));
-
-    status["data"]["live_progress"]["terminal_execution_count"] = json!(0);
-    status["data"]["live_progress"]["failed_chunk_count"] = json!(1);
-    assert!(run_has_terminal_live_progress(&status));
+    status["meta"]["execution_route_count"] = json!(0);
+    assert!(!run_has_terminal_live_progress(&status));
 }
 
 async fn collect_runtime_diagnostics(fixture: &E2eFixture, run_id: Uuid) -> anyhow::Result<Value> {
@@ -1424,6 +1635,12 @@ defaults:
   request_timeout_secs: 10
   fail_on_any_blocking_failure: true
   min_execution_score: 0.5
+scorecard:
+  gates:
+    - id: quality_release
+      dimension: quality
+      min_mean_score: 0.5
+      min_coverage: 1.0
 persistence:
   mode: full
   persist_raw_outputs: all
@@ -1569,23 +1786,14 @@ async fn run_creation_placement_state(
 ) -> anyhow::Result<(String, i32)> {
     Ok(sqlx::query_as::<_, (String, i32)>(
         r#"
-        SELECT status, attempt_count
-        FROM run_creation_placements
+        SELECT CASE WHEN admission_cursor=chunk_cursor THEN 'seeded' ELSE 'pending' END, generation::int
+        FROM run_plans
         WHERE run_id = $1::uuid
-          AND database_alias = $2
+          AND EXISTS(SELECT 1 FROM run_plan_shards WHERE run_id=$1 AND database_alias=$2)
         "#,
     )
     .bind(run_id)
     .bind(database_alias)
-    .fetch_one(db)
-    .await?)
-}
-
-async fn run_creation_chunk_plan_count(db: &PgPool, run_id: Uuid) -> anyhow::Result<i64> {
-    Ok(sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM run_creation_chunks WHERE run_id = $1::uuid",
-    )
-    .bind(run_id)
     .fetch_one(db)
     .await?)
 }

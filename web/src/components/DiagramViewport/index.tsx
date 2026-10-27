@@ -11,10 +11,11 @@ import React, {
 
 import styles from './styles.module.css';
 
-const MIN_SCALE = 0.35;
+const MIN_SCALE = 0.01;
+const READABLE_SCALE = 0.75;
 const MAX_SCALE = 3;
 const ZOOM_STEP = 0.25;
-const VIEWPORT_PADDING = 48;
+const VIEWPORT_PADDING = 24;
 const DEFAULT_SVG_WIDTH = 1200;
 const DEFAULT_SVG_HEIGHT = 700;
 
@@ -82,6 +83,10 @@ export default function DiagramViewport({
   initialPlacement = 'center-top',
   viewportPadding = VIEWPORT_PADDING,
 }: DiagramViewportProps): ReactNode {
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const viewModeRef = useRef<'read' | 'fit' | 'custom'>('read');
+  const fitTransformRef = useRef<ViewportTransform | null>(null);
+  const [scale, setScale] = useState(1);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const panzoomRef = useRef<PanzoomObject | null>(null);
@@ -104,6 +109,7 @@ export default function DiagramViewport({
         return;
       }
 
+      viewModeRef.current = 'custom';
       const rect = viewport.getBoundingClientRect();
       const focalX = point.clientX - rect.left;
       const focalY = point.clientY - rect.top;
@@ -152,6 +158,7 @@ export default function DiagramViewport({
 
     let disposed = false;
     let PanzoomCtor: typeof Panzoom | null = null;
+    let preparedSvg: SVGSVGElement | null = null;
 
     const getSvgSize = (svg: SVGSVGElement) => {
       const viewBox = svg.viewBox.baseVal;
@@ -199,21 +206,20 @@ export default function DiagramViewport({
         viewportRect.height - viewportPadding * 2,
         1,
       );
-      const fitScale = Math.min(
-        1,
-        Math.max(
-          MIN_SCALE,
-          Math.min(availableWidth / width, availableHeight / height),
-        ),
-      );
-
-      return {
+      const fitScale = clampScale(Math.min(1, availableWidth / width, availableHeight / height));
+      fitTransformRef.current = {
         scale: fitScale,
         x: (viewportRect.width - width * fitScale) / 2,
-        y:
-          initialPlacement === 'center-top'
-            ? viewportPadding
-            : (viewportRect.height - height * fitScale) / 2,
+        y: (viewportRect.height - height * fitScale) / 2,
+      };
+      // Tall diagrams keep readable labels; Fit is the separate layout overview.
+      const readScale = Math.min(1, Math.max(READABLE_SCALE, availableWidth / width));
+      return {
+        scale: readScale,
+        x: Math.max(viewportPadding, (viewportRect.width - width * readScale) / 2),
+        y: initialPlacement === 'center-top'
+          ? viewportPadding
+          : Math.max(viewportPadding, (viewportRect.height - height * readScale) / 2),
       };
     };
 
@@ -249,6 +255,7 @@ export default function DiagramViewport({
         return;
       }
 
+      preparedSvg = svg;
       const {height, width} = prepareSvg(svg);
       contentSizeRef.current = {height, width};
       const initial = getInitialTransform(width, height);
@@ -376,6 +383,7 @@ export default function DiagramViewport({
         return;
       }
 
+      viewModeRef.current = 'custom';
       event.preventDefault();
       activePointers.set(event.pointerId, {
         clientX: event.clientX,
@@ -474,6 +482,11 @@ export default function DiagramViewport({
       }
     };
 
+    const handleTransform = (event: Event) => {
+      setScale((event as CustomEvent<{scale: number}>).detail.scale);
+    };
+    content.addEventListener('panzoomchange', handleTransform);
+
     viewport.addEventListener('wheel', handleWheel, {passive: false});
     viewport.addEventListener('pointerdown', handlePointerDown, {
       passive: false,
@@ -494,7 +507,7 @@ export default function DiagramViewport({
     });
 
     const observer = new MutationObserver(() => {
-      if (panzoomRef.current && !content.querySelector('svg')) {
+      if (panzoomRef.current && content.querySelector('svg') !== preparedSvg) {
         destroyPanzoom();
         contentSizeRef.current = null;
         initialTransformRef.current = null;
@@ -513,7 +526,9 @@ export default function DiagramViewport({
 
       const initial = getInitialTransform(size.width, size.height);
       initialTransformRef.current = initial;
-      applyInitialTransform(initial);
+      if (viewModeRef.current !== 'custom') {
+        applyInitialTransform(viewModeRef.current === 'fit' ? fitTransformRef.current! : initial);
+      }
     });
 
     resizeObserver.observe(viewport);
@@ -521,6 +536,7 @@ export default function DiagramViewport({
 
     return () => {
       disposed = true;
+      content.removeEventListener('panzoomchange', handleTransform);
       viewport.removeEventListener('wheel', handleWheel);
       viewport.removeEventListener('pointerdown', handlePointerDown);
       viewport.removeEventListener('pointermove', handlePointerMove);
@@ -532,8 +548,9 @@ export default function DiagramViewport({
     };
   }, [initialPlacement, viewportPadding, zoomToViewportPoint]);
 
-  const reset = useCallback(() => {
-    const initialTransform = initialTransformRef.current;
+  const reset = useCallback((mode: 'read' | 'fit' = 'read') => {
+    viewModeRef.current = mode;
+    const initialTransform = mode === 'fit' ? fitTransformRef.current : initialTransformRef.current;
     if (!initialTransform || !panzoomRef.current) {
       return;
     }
@@ -580,7 +597,7 @@ export default function DiagramViewport({
   }, [zoomAtViewportCenter]);
 
   const toggleFullscreen = useCallback(() => {
-    const viewport = viewportRef.current;
+    const viewport = frameRef.current;
     if (!viewport || typeof document === 'undefined') {
       return;
     }
@@ -593,7 +610,7 @@ export default function DiagramViewport({
   }, []);
 
   return (
-    <div className={styles.frame}>
+    <div ref={frameRef} className={styles.frame}>
       <div className={styles.toolbar} aria-label="Diagram controls">
         <button
           type="button"
@@ -607,11 +624,11 @@ export default function DiagramViewport({
         <button
           type="button"
           className={styles.control}
-          onClick={reset}
+          onClick={() => reset('read')}
           disabled={!isReady}
-          aria-label="Reset zoom"
-          title="Reset zoom">
-          Reset
+          aria-label="Read diagram"
+          title="Readable scale">
+          Read
         </button>
         <button
           type="button"
@@ -622,6 +639,10 @@ export default function DiagramViewport({
           title="Zoom in">
           +
         </button>
+        <button type="button" className={styles.control}
+          onClick={() => reset('fit')} disabled={!isReady}
+          aria-label="Fit entire diagram" title="Show entire layout">Fit</button>
+        <span className={styles.scale} aria-label="Zoom level">{Math.round(scale * 100)}%</span>
         {canFullscreen && (
           <button
             type="button"
@@ -633,6 +654,7 @@ export default function DiagramViewport({
           </button>
         )}
       </div>
+      <p className={styles.hint}>Drag to explore · Read for labels · Fit for the full layout</p>
       <div ref={viewportRef} className={styles.viewport}>
         <div ref={contentRef} className={styles.content}>
           {children}

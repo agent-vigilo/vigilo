@@ -45,12 +45,14 @@ mod model;
 mod process;
 mod projection;
 mod provenance;
+mod query_budget;
 mod reliability;
 mod report;
 mod scaling;
 mod schedule;
 mod service;
 mod stats;
+mod storage;
 mod workload;
 
 use std::{
@@ -99,6 +101,8 @@ enum PerfCommand {
     Project(projection::ProjectArgs),
     /// Investigate captured PostgreSQL behavior without changing the run verdict.
     Diagnose(diagnostics::DiagnoseArgs),
+    /// Check absolute statement budgets against complete, correctness-verified samples.
+    CheckQueries(query_budget::QueryBudgetArgs),
 }
 
 /// Arguments for the hidden subprocess fixture used by lifecycle tests.
@@ -124,6 +128,7 @@ pub fn run(args: PerfArgs) -> Result<u8> {
         PerfCommand::Model(args) => scaling::execute(args),
         PerfCommand::Project(args) => projection::execute(args),
         PerfCommand::Diagnose(args) => diagnostics::execute(args),
+        PerfCommand::CheckQueries(args) => query_budget::execute(args),
     }
 }
 

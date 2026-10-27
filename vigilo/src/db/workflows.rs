@@ -7,12 +7,14 @@
 //! outbox writes.
 //!
 //! Reading guide:
+//! - `run_plan` journals immutable dataset-reference plan preparation without
+//!   granting execution admission.
 //! - `run_create` plans shard assignments and provides idempotent seed writes.
 //! - `run_creation` persists and recovers the cross-database creation state
 //!   machine before dispatch cursors make a run visible.
 //! - `run_dispatch` starts dispatchable runs, prepares execution-local run
 //!   snapshots, and owns chunk visibility plus expired chunk lease recovery.
-//! - `run_shard_summary` refreshes shard-local progress rollups used by later
+//! - `run_shard_summary` settles chunks and seals resumable rollups used by later
 //!   global finalization.
 //! - `run_status` combines the control run row with routed shard-summary
 //!   progress for status/watch reads.
@@ -30,6 +32,7 @@
 
 pub(crate) mod case_projection;
 pub(crate) mod chunk_processing;
+pub(crate) mod dataset_upload;
 pub(crate) mod execution_processing;
 pub(crate) mod local_shard_admission;
 pub(crate) mod run_cancel;
@@ -38,6 +41,7 @@ pub(crate) mod run_creation;
 pub(crate) mod run_dispatch;
 pub(crate) mod run_export;
 pub(crate) mod run_finalize;
+pub(crate) mod run_plan;
 pub(crate) mod run_profile_validation;
 pub(crate) mod run_results;
 pub(crate) mod run_shard_summary;

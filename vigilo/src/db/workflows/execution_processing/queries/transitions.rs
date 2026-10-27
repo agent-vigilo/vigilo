@@ -107,6 +107,17 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     // failed_aggregate_upsert
     //                       - creates final error aggregate only after retries end.
     // execution_update      - moves executions to completed/retry_scheduled/failed.
+    let mut tx = db.begin().await?;
+    crate::db::shard_write_fence::lock_shared(&mut tx, run_id, run_shard).await?;
+    // Take the chunk lock before any attempt mutation, just like persistence
+    // and settlement. A separate statement refreshes the snapshot after waiting.
+    let chunks = sqlx::query_as::<_, (Uuid, bool)>(
+        "SELECT c.id, c.status = 'leased' AND c.leased_until >= now() AS live FROM run_chunks c WHERE c.run_id = $1 AND c.run_shard = $2 AND EXISTS (SELECT 1 FROM executions e WHERE e.run_id = c.run_id AND e.run_shard = c.run_shard AND e.chunk_id = c.id AND e.id = ANY($3::uuid[])) ORDER BY c.id FOR UPDATE OF c",
+    ).bind(run_id).bind(run_shard).bind(&execution_ids).fetch_all(&mut *tx).await?;
+    anyhow::ensure!(
+        !chunks.is_empty() && chunks.iter().all(|(_, live)| *live),
+        "terminal transitions lost chunk settlement authority"
+    );
     let applied = sqlx::query_scalar::<_, i64>(
         r#"
         WITH transition_input AS (
@@ -372,9 +383,12 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     .bind(max_attempts)
     .bind(EXECUTION_RETRY_BASE_SECONDS)
     .bind(EXECUTION_RETRY_MAX_SECONDS)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
 
+    // Preserve the existing stale-attempt retirement even when the batch loses
+    // authority. The SQL authority guard prevents execution completion in that case.
+    tx.commit().await?;
     let expected = u64::try_from(transitions.len())?;
     if u64::try_from(applied)? != expected {
         anyhow::bail!(
@@ -397,9 +411,9 @@ pub(crate) async fn summarize_chunk_execution_state(
     db: &PgPool,
     run_id: Uuid,
     run_shard: i16,
-    cases: &[chunk_processing::WorkerCaseBatchItem],
+    case_ids: &[Uuid],
 ) -> anyhow::Result<ChunkExecutionState> {
-    if cases.is_empty() {
+    if case_ids.is_empty() {
         return Ok(ChunkExecutionState {
             open_execution_count: 0,
             retry_scheduled_count: 0,
@@ -407,7 +421,6 @@ pub(crate) async fn summarize_chunk_execution_state(
         });
     }
 
-    let case_ids = cases.iter().map(|case| case.case_id).collect::<Vec<_>>();
     let state = sqlx::query_as::<_, ChunkExecutionState>(
         r#"
         SELECT
@@ -433,7 +446,7 @@ pub(crate) async fn summarize_chunk_execution_state(
     )
     .bind(run_id)
     .bind(run_shard)
-    .bind(&case_ids)
+    .bind(case_ids)
     .fetch_one(db)
     .await?;
 

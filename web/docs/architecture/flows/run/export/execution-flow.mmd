@@ -20,8 +20,9 @@ sequenceDiagram
     ControlDB-->>Vigilo: Run record
     Vigilo->>ControlDB: Resolve readable execution routes
     ControlDB-->>Vigilo: Run-shard database aliases
-    Vigilo->>ExecutionDB: Load routed shard summaries
-    ExecutionDB-->>Vigilo: Summary counts and scores
+    Vigilo->>ExecutionDB: Load published summaries in one batch per database
+    ExecutionDB-->>Vigilo: Settlement counts, missing/unresolved counts, and retained scores
+    Vigilo->>Vigilo: Merge routed summaries in shard order
 
     alt JSON export
         loop Routed shard batches
@@ -29,7 +30,7 @@ sequenceDiagram
             ExecutionDB-->>Vigilo: Batch data
             Vigilo->>Vigilo: Accumulate export data
         end
-        Vigilo->>Vigilo: Build export payload
+        Vigilo->>Vigilo: Build export payload with evidence authority labels
         Vigilo-->>User: Success response
     else JSONL export
         Vigilo-->>User: Run line
@@ -37,7 +38,7 @@ sequenceDiagram
         loop Routed shard batches
             Vigilo->>ExecutionDB: Load executions and related records
             ExecutionDB-->>Vigilo: Batch data
-            Vigilo-->>User: Execution, aggregate, attempt, and result lines
+            Vigilo-->>User: Execution, aggregate, attempt, result, and diagnostic lines with authority labels
         end
         Vigilo-->>User: Success response
     else Validation or lookup fails

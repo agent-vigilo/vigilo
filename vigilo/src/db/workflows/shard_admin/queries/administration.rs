@@ -45,7 +45,7 @@ pub(in crate::db::workflows::shard_admin) async fn select_database_placement_ref
              FROM shard_placements
              WHERE database_alias = $1) AS route_count,
             (SELECT COUNT(*)::bigint
-             FROM run_creation_placements creation
+             FROM run_plan_shards creation
              JOIN runs run ON run.id = creation.run_id
              WHERE creation.database_alias = $1
                AND run.status = 'creating'::run_status) AS creation_count,
@@ -104,13 +104,15 @@ where
         r#"
         SELECT COALESCE(SUM(row_count), 0)::bigint
         FROM (
-            SELECT COUNT(*)::bigint AS row_count FROM run_shard_cases WHERE run_id = $1::uuid AND run_shard = $2
-            UNION ALL
-            SELECT COUNT(*)::bigint FROM run_chunks WHERE run_id = $1::uuid AND run_shard = $2
+            SELECT COUNT(*)::bigint AS row_count FROM run_chunks WHERE run_id = $1::uuid AND run_shard = $2
             UNION ALL
             SELECT COUNT(*)::bigint FROM run_snapshots WHERE run_id = $1::uuid AND run_shard = $2
             UNION ALL
             SELECT COUNT(*)::bigint FROM run_shard_summaries WHERE run_id = $1::uuid AND run_shard = $2
+            UNION ALL
+            SELECT COUNT(*)::bigint FROM run_chunk_settlements WHERE run_id = $1::uuid AND run_shard = $2
+            UNION ALL
+            SELECT COUNT(*)::bigint FROM run_chunk_settlement_consumptions WHERE run_id = $1::uuid AND run_shard = $2
             UNION ALL
             SELECT COUNT(*)::bigint FROM executions WHERE run_id = $1::uuid AND run_shard = $2
             UNION ALL

@@ -61,6 +61,13 @@ PostgreSQL normalized statements, planning time/counts, shared/temp buffers,
 and WAL counters are captured after the timed process exits. The
 `cargo perf diagnose` command renders them as
 <GlossaryTerm term="performance-diagnostics">non-gating diagnostics</GlossaryTerm>.
+Complete statement counters also separate control, execution, and shared
+databases into read, DML, mixed, transaction, and other categories. These counters
+include statements outside the diagnostic query ranking. `cargo perf check-queries`
+checks every measured repetition against the campaign's frozen absolute statement
+ceilings; missing or inconsistent evidence fails validation. Shared databases
+retain combined attribution, and statement counts remain distinct from physical
+row writes.
 The model command writes the owned component-model artifact and fails closed on
 incomplete or nonlinear evidence.
 
@@ -90,7 +97,7 @@ migrations, route registration, terminal fixture generation, and rebalance
 planning occur before collector reset.
 
 Criterion remains conditional on a legitimate production library surface.
-Runtime and database modules are currently binary-private, so the release
+Runtime and database modules are binary-private, so the release
 executable remains the sole component measurement authority.
 
 ## Calibration Boundaries
@@ -140,6 +147,26 @@ requiring maximum scale. The current coordinator broker publish/confirm path is
 declared unbounded, so the checked-in planning example remains invalid until a
 separately tested production deadline and settlement contract exists.
 
+## Ingestion Measurements
+
+The `ingestion-baseline-v1` profile measures initial run creation with bounded
+case-count and payload-size sweeps plus dataset reuse. A reused-dataset sample
+prepares its first run before measurement, then measures only the second run.
+The exact oracle verifies stored payloads, membership, chunks, and zero premature
+execution or dispatch.
+
+Linux peak-memory samples use the child's high-water mark after the kernel
+confirms it has executed. Spawn can return before that transition, while the
+child still has the harness's inherited memory. Missing or malformed execution
+state and missed memory samples remain unavailable rather than being accepted.
+
+Samples separate SQL calls and returned rows from physical table-row insert,
+update, and delete counts. Their external counters are captured before oracle
+reads. The single PostgreSQL placement owns both control and execution metadata;
+WAL is counted once for that server. Repeated-text input padding is compressible,
+so database growth and WAL are interpreted alongside submitted bytes. Local
+results are informative evidence rather than production capacity ratings.
+
 ## Stability And Recovery
 
 Each long-running <GlossaryTerm term="reliability-run">reliability run</GlossaryTerm>
@@ -181,37 +208,26 @@ Run `cargo perf check`, create one
 <GlossaryTerm term="performance-test-subject">immutable release snapshot</GlossaryTerm>,
 and begin with the service-free `developer-v1` startup workload. When that
 passes, run `pr-v1` against the same snapshot with Docker available. This
-exercises the small real PostgreSQL, RabbitMQ, HTTP-agent, Wasm, and lifecycle
+exercises the small real PostgreSQL, RabbitMQ, Ceph object-storage, HTTP-agent, Wasm, and lifecycle
 paths before committing to a reference, capacity, recovery, or soak campaign.
 Exact-oracle failures take priority over timing; `pr-v1` produces
 <GlossaryTerm term="informative-timing">informative timing</GlossaryTerm> rather
 than a regression verdict.
 
-## MadSim Boundary
+## Regression Verification
 
-A future MadSim suite should run first with named scenarios, fixed seeds, and
-exact logical outcomes. It can prove deterministic scheduling, retry, timeout,
-and fault behavior, but its virtual durations must never enter performance
-samples, calibration, or budgets. Each simulated scenario should identify the
-narrow real workload contracts it affects. Those workloads are then compared
-as immutable baseline and candidate release binaries on the exclusive canonical
-host using a published gating profile.
+Performance measurements come from real release binaries and services after
+exact correctness checks pass. Compare immutable baseline and candidate builds
+on the exclusive canonical host under a published gating profile. An initial
+over-budget interval is inconclusive until its fixed independent confirmation
+also exceeds the budget. Outage and sustained-operation changes additionally
+run the recovery or soak profile.
 
-The first MadSim-driven production runtime change is blocked until canonical
-calibration publishes an accepted gating profile and immutable direct-Tokio
-baseline. Scheduled discovery then combines fixed corpus regressions with
-deterministic advancing seed epochs and bounded longevity scenarios that retain
-one logical system across repeated work, expiry, reconnect, fault/heal, and
-restart cycles. Simulation detects logical accumulation and starvation; the
-real soak, recovery, and A/B tiers remain authoritative for resource use and
-performance.
+A passing comparison means no regression was detected at the published budget
+and confidence. The command sequence is documented in the repository's
+[`performance/README.md`](https://github.com/gregl83/agent-vigilo/blob/main/performance/README.md#regression-verification).
 
-An initial over-budget comparison remains inconclusive until the fixed
-independent confirmation also exceeds the budget. Fault and sustained-operation
-changes additionally run the real recovery or soak profile. A valid conclusion
-is that no regression was detected at the published budget and confidence, not
-that simulation proved performance unchanged. The complete command sequence is
-documented in the repository's `performance/README.md`.
+## Continuous Integration
 
 Shared hosted CI runs service-free contracts and exact correctness checks, not
 wall-clock gates. Canonical, nightly, and soak jobs are defined for an exclusive

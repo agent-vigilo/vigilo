@@ -1,0 +1,56 @@
+erDiagram
+    runs ||--o| run_plans : owns
+    dataset_catalog ||--o{ run_plans : supplies
+    run_plans ||--o{ run_plan_objects : records
+    run_plans ||--o{ run_plan_shards : seals
+    database_placements ||--o{ run_plan_shards : selects
+    run_plans {
+        uuid run_id PK,FK
+        uuid dataset_upload_id FK
+        text status
+        text storage_binding_hash
+        jsonb limits
+        jsonb execution_plan
+        jsonb assignments
+        bigint generation
+        boolean execution_requested
+        int admission_cursor
+        jsonb admission_state
+        int chunk_cursor
+        jsonb manifest
+    }
+    run_plan_objects {
+        uuid run_id PK,FK
+        text object_key PK
+        text kind
+        smallint level
+        int range_start
+        int range_end
+        jsonb reference
+        boolean acknowledged
+    }
+    run_plan_shards {
+        uuid run_id PK,FK
+        smallint run_shard PK
+        text database_alias FK
+        int case_count
+        int chunk_count
+        text planned_chunk_hash
+        text case_projection_hash
+    }
+    run_snapshots {
+        uuid run_id PK
+        smallint run_shard PK
+        jsonb config_snapshot
+        int expected_execution_count
+    }
+    run_chunks {
+        uuid run_id PK
+        smallint run_shard PK
+        uuid id PK
+        int ordinal_start
+        int ordinal_end
+        text status
+    }
+    runs ||--o{ run_chunks : schedules
+    runs ||..o{ run_snapshots : "copied context (logical)"

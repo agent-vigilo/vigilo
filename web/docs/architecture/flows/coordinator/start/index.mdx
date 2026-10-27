@@ -15,7 +15,7 @@ import Mermaid from '@theme/Mermaid';
 import executionFlowDiagram from './execution-flow.mmd';
 import decisionFlowDiagram from './decision-flow.mmd';
 
-# Coordinator Start Command
+# Start
 
 How `vigilo coordinator start` runs configurable coordinator cycles continuously
 until shutdown or service failure. Each cycle resumes a bounded number of
@@ -34,6 +34,18 @@ chunk-local work without an extra control-database routing lookup.
 ## Decision Flow
 
 <Mermaid value={decisionFlowDiagram} />
+
+Receipt aggregation visits ready shards in fair rounds, revisiting shards with
+remaining ready work within separate per-database page and scheduling-time budgets. Independent
+shards and databases advance with bounded concurrency. Each page has its own
+transaction and ownership claim; expiry of the scheduling budget stops additional
+page admission while in-flight work remains subject to the database deadline.
+See the [aggregation controls](/docs/architecture/structure/components/coordinator/#receipt-aggregation-controls).
+
+Finalization has its own candidate limit and reads summaries in one batch per
+execution database without advancing receipt aggregation. Unavailable, open, or
+invalid shard summaries defer only their candidate; other runs continue. See the
+[settlement contract](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
 ## Related
 

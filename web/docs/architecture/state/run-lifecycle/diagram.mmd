@@ -9,9 +9,9 @@ config:
 flowchart TD
     Create([run create])
     Creating[Run creating]
-    Seed[Seed pending database placements]
+    Seed[Seed compact execution metadata]
     SeedGuard{Every placement seeded?}
-    Activate[Create cursors and delete temporary plan]
+    Activate[Publish routes and cursors after exact coverage verification]
     Pending[Run pending]
     DispatchGuard{Pending or running with open shard cursor?}
     DispatchLock[Claim one run-shard dispatch cursor]
@@ -19,10 +19,10 @@ flowchart TD
     DispatchEvents[Insert run.started once and one chunk-ready outbox record per selected chunk]
     DispatchCursor[Mark selected chunks dispatched and release or mark cursor drained]
 
-    FinalizeGuard{Running or finalizing with no open chunks?}
+    FinalizeGuard{Drained cursors and every planned shard sealed?}
     Finalizing[Run finalizing]
-    Scorecard[Merge shard scorecards and apply run gates]
-    FinalizeCheck{Still finalizing and no open chunks?}
+    Scorecard[Merge retained results and planned gate denominators]
+    FinalizeCheck{Current lease and exact sealed membership?}
     Gate{Gate outcome}
     CompletedPass[Run completed + gate pass]
     CompletedFail[Run completed + gate fail]
@@ -38,10 +38,16 @@ flowchart TD
     Reject([Cancellation error])
 
     Create --> Creating
-    Creating --> Seed --> SeedGuard
-    SeedGuard -- Yes --> Activate --> Pending
-    SeedGuard -- Retryable failure --> Creating
-    SeedGuard -- Persisted-data conflict --> Failed
+    Creating --> Prepare[Verify cases and publish immutable run plan]
+    Prepare --> Prepared[Plan ready, run creating]
+    Prepared -->|Execution requested| Seed --> SeedGuard
+    Prepared -->|Prepare only| Prepared
+    Prepare --> CancelGuard
+    Prepared --> CancelGuard
+    Seed --> CancelGuard
+    SeedGuard -- Exact local coverage --> Activate --> Pending
+    SeedGuard -- Deferred --> Creating
+    SeedGuard -- Immutable conflict --> Failed
 
     Pending --> DispatchGuard
     DispatchGuard -- Yes --> DispatchLock --> Running --> DispatchEvents --> DispatchCursor
@@ -56,16 +62,15 @@ flowchart TD
     FinalizeCheck -- No --> Noop
 
     Gate -- Criteria met --> CompletedPass --> CompletedEvent
-    Gate -- Failure or missing aggregate --> CompletedFail --> CompletedEvent
+    Gate -- Evaluation failure or incomplete results --> CompletedFail --> CompletedEvent
 
     Pending --> CancelGuard
     Running --> CancelGuard
     Finalizing --> CancelGuard
-    CancelGuard -- Pending running or finalizing --> CancelCascade --> Cancelled --> CancelEvent
+    CancelGuard -- Open run, including creation --> CancelCascade --> Cancelled --> CancelEvent
     CancelGuard -- Completed or failed --> Reject
     Cancelled -->|Repeated cancel| Noop
 
-    Running -. Unrecoverable system error .-> Failed
 
     class Create command
     class Creating,Seed,SeedGuard,Activate,Pending,Running,Finalizing,DispatchGuard,DispatchLock,DispatchEvents,DispatchCursor,FinalizeGuard,FinalizeCheck,Scorecard,Gate,CompletedEvent,CancelGuard,CancelCascade,CancelEvent system

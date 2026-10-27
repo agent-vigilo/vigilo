@@ -2,7 +2,7 @@
 
 Core Generative AI evaluators.
 
-Guide: `web/docs/guides/creating-evaluators.mdx`
+Guide: [Creating Evaluators](https://agentvigilo.com/docs/guides/creating-evaluators)
 
 Scoped guidance: `evaluators/AGENTS.md`
 
@@ -26,7 +26,7 @@ cargo build --manifest-path "evaluators/<evaluator-name>/Cargo.toml" --target wa
 
 Output:
 
-- `target/wasm32-wasip2/debug/<evaluator-name>.wasm`
+- `target/wasm32-wasip2/debug/<crate_name>.wasm`
 
 ### Build (Release)
 
@@ -36,11 +36,13 @@ cargo build --manifest-path "evaluators/<evaluator-name>/Cargo.toml" --target wa
 
 Output:
 
-- `target/wasm32-wasip2/release/<evaluator-name>.wasm`
+- `target/wasm32-wasip2/release/<crate_name>.wasm`
 
 ### Build Any Evaluator
 
-Replace `<evaluator-name>` with the evaluator crate directory/name.
+Replace `<evaluator-name>` with the evaluator crate directory/name. Artifact
+filenames use underscores in place of hyphens, for example
+`sentiment_basic_en.wasm`.
 
 Example:
 

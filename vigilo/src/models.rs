@@ -6,8 +6,10 @@
 
 #![allow(dead_code)]
 
+#[cfg(test)]
 pub(crate) mod case_blob;
 pub(crate) mod database_placement;
+#[cfg(test)]
 pub(crate) mod dataset_version_case;
 pub(crate) mod evaluator;
 pub(crate) mod evaluator_result;

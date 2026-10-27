@@ -30,6 +30,13 @@ vigilo
 |   |-- search [query]
 |   |-- test <evaluator>
 |   `-- set-state <evaluator> <state>
+|-- dataset
+|   |-- upload
+|   |-- resume <upload_id>
+|   |-- status <upload_id>
+|   |-- abort <upload_id>
+|   |-- expire
+|   `-- cleanup <upload_id>
 |-- run
 |   |-- create
 |   |-- validate
@@ -72,8 +79,21 @@ existing shards; use `rebalance` to evacuate them before disabling it.
 The former plural evaluator command, `run test`, and `shard ...` hierarchy
 remain accepted as compatibility paths but are omitted from canonical help.
 
-## Related
+## Dataset Uploads
 
-- [Getting started](./getting-started)
-- [Scale-out and shard migration](/docs/architecture/scaling/)
-- [Publishing evaluators](./publishing)
+`dataset` commands own immutable dataset upload, explicit recovery, progress, and
+exact abandoned-file cleanup. See [Dataset Ingestion](/docs/architecture/case-storage/ingestion)
+for input formats, storage configuration, batching, leases, and scheduler ownership.
+
+## Run Storage
+
+`run create` accepts inline/file YAML/JSON datasets or `--dataset-upload-id <id>`
+for finalized uploads. Both paths publish immutable plans and admit compact
+execution metadata before returning `pending`. Supply `--storage-config
+storage.toml` or set `VIGILO_STORAGE_CONFIG`; coordinators and workers use the
+same environment setting to resolve stored references.
+
+`--prepare-only` holds a ready run in `creating`. Repeat the same inputs and
+`--run-id`, omitting that flag, to request execution. See
+[Run Preparation](/docs/architecture/case-storage/run-preparation) for formats,
+limits, recovery, progress, and cancellation.

@@ -1,0 +1,33 @@
+flowchart TD
+    Plan[Retain planned chunk hashes and frozen gate counts]
+    Open[Shard running: evaluation outcomes may already fail]
+    Receipt[Chunk transaction: fence writers and commit immutable receipt]
+    Work{Pending receipts or canonical fold ready?}
+    Budget{Ready page and database scheduling budgets available?}
+    Claim{Coordinator page claim available?}
+    Next[Visit unchecked shards; revisit only remaining ready work; bounded concurrency]
+    Drain[Await admitted pages under database deadlines]
+    Wait[Wait for remaining shard settlement]
+    Progress[Consume bounded receipt page; commit counters and identities]
+    All{Every planned receipt accounted for?}
+    Fold[Resume canonical fold and validate exact membership]
+    Folded{Canonical fold complete and valid?}
+    Seal[Seal immutable shard summary with missing and unresolved counts]
+    Read[Finalization reads published summaries by database]
+    Ready{Exact set of valid seals and drained dispatch?}
+    Final[Claim run; commit partial or complete report, gate, and one event]
+    Plan --> Open --> Receipt --> Work
+    Work -- No --> Drain
+    Work -- Yes --> Budget
+    Budget -- Yes --> Claim
+    Budget -- No --> Drain
+    Claim -- No --> Next
+    Claim -- Yes --> All
+    All -- No --> Progress --> Next
+    All -- Yes --> Fold --> Folded
+    Folded -- No --> Next
+    Folded -- Yes --> Seal --> Next
+    Next --> Budget
+    Drain --> Read --> Ready
+    Ready -- No --> Wait
+    Ready -- Yes --> Final

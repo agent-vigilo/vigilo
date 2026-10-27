@@ -330,14 +330,12 @@ async fn draining_database_placement_rejects_new_routes_but_keeps_existing_route
 }
 #[sqlx::test(migrations = "../migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
-async fn projection_rows_prevent_direct_empty_shard_reassignment(pool: PgPool) {
+async fn snapshot_rows_prevent_direct_empty_shard_reassignment(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
     let dataset_version_id = Uuid::now_v7();
     seed_run(&pool, run_id, Uuid::now_v7(), dataset_version_id).await;
-    let case_id = Uuid::now_v7();
-    sqlx::query(             "INSERT INTO case_blobs (case_hash, task_type, input_payload, expected_output) VALUES ('projection-only', 'test', '{}'::jsonb, 'null'::jsonb)",         )         .execute(&pool)         .await         .unwrap();
-    sqlx::query(         r#"             INSERT INTO run_shard_cases (                 run_id, run_shard, dataset_version_id,                 case_id, case_ordinal, case_hash             )             VALUES ($1, 3, $2, $3, 0, 'projection-only')             "#,     )     .bind(run_id)     .bind(dataset_version_id)     .bind(case_id)     .execute(&pool)     .await     .unwrap();
+    seed_run_snapshot(&pool, run_id, 3, Uuid::now_v7(), dataset_version_id).await;
     sqlx::query(             "INSERT INTO shard_placements (run_id, run_shard, database_alias, status) VALUES ($1, 3, 'primary', 'active')",         )         .bind(run_id)         .execute(&pool)         .await         .unwrap();
     let database_router = database_router_with_isolated_control_pool(pool).await;
     let error = set_shard_placement(&database_router, run_id, 3, "shard_001")

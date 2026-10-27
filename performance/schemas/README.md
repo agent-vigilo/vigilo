@@ -57,17 +57,18 @@ profiles.
 | --- | --- |
 | `id` | Stable semantic workload ID recorded in profiles and result artifacts. |
 | `owner` | Repository component responsible for the protected production boundary. |
-| `status` | `implemented` when the runner can execute the workload; `planned` reserves the contract but fails if selected. |
-| `capability` | Exact capability required in every selected build manifest. This is separate from `id` so future adapters can map one workload to version-specific binary capabilities. |
+| `status` | Only `implemented` workloads can execute; selecting an unsupported entry fails validation. |
+| `capability` | Exact binary capability required in every selected build manifest, checked independently from the workload `id`. |
 | `fixture` | Versioned fixture catalog used to generate deterministic setup and expected counts. |
 | `tuples` | Allowed fixture shapes. Profiles must select one exact value from this list. |
 | `unit` | Denominator used to interpret the result, such as one process start, case, evaluation, chunk, or run. |
 | `oracle` | Stable name of the exact correctness validation required after execution. Timing is invalid if the oracle fails. |
 | `required_metrics` | External observations required for a valid result. Missing required measurements cannot be treated as a pass. |
+| `statement_budgets` | Optional map from registered tuple to positive absolute SQL statement ceiling. Frozen with the registry; checked by `cargo perf check-queries` independently of timing. |
 | `watchdog_ms` | Hard outer deadline for one execution. Exceeding it terminates the process tree. |
 | `planning_duration_ms` | Conservative duration estimate used to prove the campaign fits its profile cap. It is not an execution timeout. |
 | `preconditioning` | `none`, or `one-per-binary` for one unmeasured execution of each binary before sampling. |
-| `command` | Arguments passed directly to the measured Vigilo executable without shell interpretation. Currently used by the startup workload. |
+| `command` | Arguments passed directly to the measured Vigilo executable without shell interpretation. Used by the startup workload. |
 | `help_signatures` | Required substrings in startup stdout. A missing signature is a fixture/capability mismatch. |
 | `scaling_model` | Optional fixed-plus-slope or explicit stepped model contract for a scalable component. |
 | `reliability` | Optional bounded duration, observation interval, recovery deadline, RSS/descriptor ceilings, throughput retention, and attempt/delivery amplification policy. Required by soak and recovery timing modes. |
@@ -152,7 +153,7 @@ service credentials or provisioning scripts.
 
 | Field | Meaning |
 | --- | --- |
-| `schema_id` | Environment document shape, currently `environment/v1`. |
+| `schema_id` | Environment document shape: `environment/v1`. |
 | `id` | Stable host contract identity. Results from different IDs are not canonical blocking comparisons. |
 | `canonical` | Whether results may support calibrated blocking verdicts. |
 | `provider`, `region`, `availability_zone_id`, `instance_type`, `market` | Infrastructure provider, stable placement, on-demand market, and host shape. |
@@ -190,6 +191,7 @@ The harness owns these additive machine-readable contracts:
 | `build-manifest/v1` | Immutable executable, source, toolchain, dependency, setup-asset, and capability provenance. |
 | `service-topology/v1` | Run-owned Compose inventory and redacted service endpoint provenance. |
 | `sample/v1` | Raw execution position, process and scoped external measurements, durable counts, and validation state. |
+| `query-budget-check/v1` | Frozen absolute statement ceilings, source digests, per-tuple counts, database-role maxima, and acceptance verdicts. |
 | `comparison/v1` | Balanced estimator inputs, effects, confidence intervals, diagnostics, and verdict. |
 | `report/v1` | Campaign status, failures, comparison summaries, and artifact links. |
 | `calibration/v1` | Canonical no-change noise bounds, approximate power, repeatability, and recommended independent block counts. |
@@ -202,9 +204,8 @@ The harness owns these additive machine-readable contracts:
 | `performance-suppressions/v1` | Metric-specific temporary suppression ownership, issue, reason, and expiry. Empty by default. |
 
 Every persisted document carries its schema ID. Readers reject an unknown
-schema ID and preserve unknown additive fields. Retained version fixtures are
-required before a schema is revised; format migrations are deferred until a
-second version exists.
+schema ID and preserve unknown additive fields. Retained fixtures verify the
+accepted document shapes; readers do not transform unsupported schema versions.
 
 `campaign.json` links only to run-relative files. Before measurement, the
 harness freezes the validated workload registry, exact resolved profile,
@@ -213,10 +214,34 @@ optional reviewed budget policy, and verified build-manifest metadata beneath
 those frozen inputs and refuse escaped paths, incomplete links, or identities
 that differ from the campaign.
 
+### Process Memory
+
+Linux samples use `linux-proc-exec-hwm-wait4-cpu-v4`: RSS comes from `/proc` VmHWM
+after the kernel's `PF_FORKNOEXEC` flag clears; `wait4` supplies CPU/exit status.
+Missing RSS is unavailable; Linux does not
+substitute `wait4` RSS, which can include the harness address space inherited
+before exec. Required-metric validation rejects missing observations.
+
 ### Sample External Measurements
 
+`sample.external.sql_databases` records each distinct database name, its
+`control`/`execution`/`shared` role, complete statement-category counts, and SQL
+execution/planning milliseconds. Categories are `read`, `dml`, `mixed` (WITH),
+`transaction`, and `other`; they classify syntax, not physical mutations. Their
+sum equals `sql_calls`. Shared databases are never attributed to only one plane.
+Missing detailed counters cannot satisfy a normal query-budget check.
+
+`query-budget-check/v1` reports source campaign/sample and registry digests,
+whether budgets were applied retrospectively, and each tuple's repetition count,
+ceiling, observed minimum/maximum, independent per-role maxima and pass/fail result.
+Reports occupy a separate directory; source campaigns remain unchanged. See
+[Creation Statement Budgets](../README.md#creation-statement-budgets).
+
 `sample.external` records PostgreSQL calls/time/rows, WAL bytes, database-size
-delta, HTTP request/byte/peak-concurrency counts, RabbitMQ worker-delivery
+delta, per-public-table `table_writes` deltas (`inserted`, `updated`, `deleted`),
+gateway `storage_counters` deltas (`put_obj_ops`, `put_obj_bytes`,
+`get_obj_ops`, `get_obj_bytes`, `del_obj_ops`),
+HTTP request/byte/peak-concurrency counts, RabbitMQ worker-delivery
 ready/unacknowledged counts, peak sampled service memory/CPU observations, and
 an exact `durable_counts` map from the workload oracle. `query_diagnostics`
 retains normalized statement fingerprints, plan count/time, execution time,

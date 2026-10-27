@@ -1,7 +1,7 @@
 //! Chunk leasing and case loading workflow helpers.
 //!
 //! Workers use this module to claim a run chunk, load the corresponding dataset
-//! case rows, and then either complete or release the chunk. Lease fields are
+//! case rows, and then either complete or release the chunk. Lease fields
 //! and local write epochs are checked on completion/release so stale workers
 //! cannot overwrite a newer lease holder or shard owner.
 
@@ -26,7 +26,6 @@ use queries::{
 };
 pub(crate) use queries::{
     extend_chunk_lease,
-    load_chunk_case_batch,
     release_chunk_as_pending,
 };
 
@@ -95,62 +94,27 @@ pub(crate) struct WorkerCaseBatchItem {
     pub(crate) metadata: serde_json::Value,
 }
 
-fn validate_chunk_case_ordinals(
-    ordinal_start: i32,
-    ordinal_end: i32,
-    ordinals: impl IntoIterator<Item = i32>,
-) -> anyhow::Result<()> {
-    if ordinal_end < ordinal_start {
-        anyhow::bail!(
-            "chunk projection range is invalid: ordinal end {} is before start {}",
-            ordinal_end,
-            ordinal_start
-        );
-    }
-    let mut expected = ordinal_start;
-    for actual in ordinals {
-        if expected == ordinal_end {
-            anyhow::bail!(
-                "chunk projection contains case ordinal {} after exclusive end {}",
-                actual,
-                ordinal_end
-            );
-        }
-        if actual != expected {
-            anyhow::bail!(
-                "chunk projection is incomplete: expected case ordinal {}, found {}",
-                expected,
-                actual
-            );
-        }
-        expected += 1;
-    }
-    if expected != ordinal_end {
-        anyhow::bail!(
-            "chunk projection is incomplete: expected case ordinal {}, found end of projection",
-            expected
-        );
-    }
-    Ok(())
-}
-
 /// Marks a leased chunk complete if the caller still owns the same lease.
 ///
-/// Query behavior: clears an unexpired token-owned lease and refreshes the
-/// shard summary in the same transaction. A zero row count means the worker is
+/// Query behavior: clears an unexpired token-owned lease and writes its immutable
+/// settlement receipt in the same transaction. A zero row count means the worker is
 /// stale.
-pub(crate) async fn mark_chunk_completed_and_refresh_summary(
+pub(crate) async fn mark_chunk_completed_and_settle(
     db: &PgPool,
     chunk: &RunChunk,
 ) -> anyhow::Result<u64> {
     let lease_token = require_chunk_lease_token(chunk)?;
     let mut tx = db.begin().await?;
-    let rows_affected = mark_chunk_completed(&mut tx, chunk, lease_token).await?;
-    if rows_affected > 0 {
-        super::run_shard_summary::refresh_run_shard_summary_with(
-            &mut *tx,
+    crate::db::shard_write_fence::lock_shared(&mut tx, chunk.run_id, chunk.run_shard).await?;
+    let terminal_identity = mark_chunk_completed(&mut tx, chunk, lease_token).await?;
+    let rows_affected = u64::from(terminal_identity.is_some());
+    if let Some(identity) = terminal_identity {
+        super::run_shard_summary::settle_locked_chunk_with(
+            &mut tx,
             chunk.run_id,
             chunk.run_shard,
+            chunk.id,
+            identity,
         )
         .await?;
     }
@@ -162,20 +126,24 @@ pub(crate) async fn mark_chunk_completed_and_refresh_summary(
 /// Marks a leased chunk failed if the caller still owns the lease.
 ///
 /// Query behavior: clears the lease, makes the chunk terminal `failed`, and
-/// refreshes the shard summary in one transaction. Workers use this when
+/// writes a settlement receipt in one transaction. Workers use this when
 /// bounded message retries are exhausted.
-pub(crate) async fn mark_chunk_failed_and_refresh_summary(
+pub(crate) async fn mark_chunk_failed_and_settle(
     db: &PgPool,
     chunk: &RunChunk,
 ) -> anyhow::Result<u64> {
     let lease_token = require_chunk_lease_token(chunk)?;
     let mut tx = db.begin().await?;
-    let rows_affected = mark_chunk_failed(&mut tx, chunk, lease_token).await?;
-    if rows_affected > 0 {
-        super::run_shard_summary::refresh_run_shard_summary_with(
-            &mut *tx,
+    crate::db::shard_write_fence::lock_shared(&mut tx, chunk.run_id, chunk.run_shard).await?;
+    let terminal_identity = mark_chunk_failed(&mut tx, chunk, lease_token).await?;
+    let rows_affected = u64::from(terminal_identity.is_some());
+    if let Some(identity) = terminal_identity {
+        super::run_shard_summary::settle_locked_chunk_with(
+            &mut tx,
             chunk.run_id,
             chunk.run_shard,
+            chunk.id,
+            identity,
         )
         .await?;
     }
@@ -196,9 +164,6 @@ fn require_chunk_lease_token(chunk: &RunChunk) -> anyhow::Result<Uuid> {
 }
 
 #[cfg(test)]
-#[path = "chunk_processing/postgres_tests.rs"]
-mod postgres_tests;
-#[cfg(test)]
 mod tests {
     use chrono::{
         DateTime,
@@ -207,47 +172,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-
-    #[test]
-    fn chunk_projection_accepts_exact_contiguous_range() {
-        validate_chunk_case_ordinals(4, 7, [4, 5, 6]).unwrap();
-        validate_chunk_case_ordinals(4, 4, []).unwrap();
-    }
-
-    #[test]
-    fn chunk_projection_rejects_missing_first_case() {
-        let error = validate_chunk_case_ordinals(4, 7, [5, 6]).unwrap_err();
-        assert!(error.to_string().contains("expected case ordinal 4"));
-    }
-
-    #[test]
-    fn chunk_projection_rejects_internal_gap() {
-        let error = validate_chunk_case_ordinals(4, 7, [4, 6]).unwrap_err();
-        assert!(error.to_string().contains("expected case ordinal 5"));
-    }
-
-    #[test]
-    fn chunk_projection_rejects_early_end() {
-        let error = validate_chunk_case_ordinals(4, 7, [4, 5]).unwrap_err();
-        assert!(error.to_string().contains("expected case ordinal 6"));
-    }
-
-    #[test]
-    fn chunk_projection_rejects_invalid_or_excess_ranges() {
-        let reversed = validate_chunk_case_ordinals(7, 4, []).unwrap_err();
-        assert!(reversed.to_string().contains("end 4 is before start 7"));
-
-        for ordinals in [vec![4, 4, 5], vec![4, 5, 6, 7]] {
-            assert!(validate_chunk_case_ordinals(4, 7, ordinals).is_err());
-        }
-    }
-
-    #[test]
-    fn chunk_projection_rejects_max_ordinal_without_overflowing() {
-        let error = validate_chunk_case_ordinals(i32::MAX, i32::MAX, [i32::MAX]).unwrap_err();
-
-        assert!(error.to_string().contains("after exclusive end"));
-    }
 
     #[test]
     fn chunk_operations_require_an_ownership_token() {

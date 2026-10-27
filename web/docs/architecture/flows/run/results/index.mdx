@@ -15,11 +15,15 @@ import Mermaid from '@theme/Mermaid';
 import executionFlowDiagram from './execution-flow.mmd';
 import decisionFlowDiagram from './decision-flow.mmd';
 
-# Run Results Command
+# Results
 
 How `vigilo run results` loads a run and returns a summary-only results response.
 
 Results include execution aggregate counts and the authoritative run scorecard. The scorecard reports each configured dimension or evaluator gate with coverage, mean score, pass rate, error rate, abstention rate, and failure reasons. A completed run can still have `gate_status: fail`.
+
+Summary reads batch routed shards by execution database and merge them in shard
+order, keeping floating-point scores independent of database grouping. Exports
+use the same summary projection.
 
 ## Execution Flow
 
@@ -28,6 +32,8 @@ Results include execution aggregate counts and the authoritative run scorecard. 
 ## Decision Flow
 
 <Mermaid value={decisionFlowDiagram} />
+
+Progress reports include planned and settled chunk counts, sealed shard count, and missing/unresolved execution counts. Progress may lag committed receipts; final scorecards require every planned shard to be sealed. Missing counts describe settled work only. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
 ## Related
 

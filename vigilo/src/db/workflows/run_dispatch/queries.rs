@@ -270,7 +270,9 @@ pub(super) async fn recover_expired_chunks(
     tx: &mut Transaction<'_, Postgres>,
     max_recoveries: i32,
     batch_size: i64,
-) -> anyhow::Result<(i64, Vec<(Uuid, i16)>)> {
+    admitted_runs: &[Uuid],
+    admitted_shards: &[i16],
+) -> anyhow::Result<(i64, Vec<(Uuid, i16, Uuid)>)> {
     // Query outline:
     //
     // expired         - recoverable leased chunks whose lease is past due.
@@ -294,6 +296,8 @@ pub(super) async fn recover_expired_chunks(
               ON admission.run_id = rc.run_id
              AND admission.run_shard = rc.run_shard
              AND admission.state = 'open'
+            JOIN UNNEST($3::uuid[], $4::smallint[]) AS admitted(run_id,run_shard)
+              ON admitted.run_id = rc.run_id AND admitted.run_shard = rc.run_shard
             WHERE rc.status = 'leased'
               AND rc.leased_until < now()
               AND rc.recovery_count < $1
@@ -371,6 +375,8 @@ pub(super) async fn recover_expired_chunks(
     )
     .bind(max_recoveries)
     .bind(batch_size)
+    .bind(admitted_runs)
+    .bind(admitted_shards)
     .fetch_one(&mut **tx)
     .await?;
 
@@ -380,7 +386,7 @@ pub(super) async fn recover_expired_chunks(
     // failed  - clear the dead lease and make the chunk terminal.
     // stale_failed_attempts
     //         - mark current running attempts stale with the failed chunk.
-    let failed_rows = sqlx::query_as::<_, (Uuid, i16)>(
+    let failed_rows = sqlx::query_as::<_, (Uuid, i16, Uuid)>(
         r#"
         WITH expired AS (
             SELECT rc.run_id, rc.run_shard, rc.id
@@ -388,9 +394,13 @@ pub(super) async fn recover_expired_chunks(
             JOIN run_snapshots rs
               ON rs.run_id = rc.run_id
              AND rs.run_shard = rc.run_shard
+            JOIN UNNEST($3::uuid[], $4::smallint[]) AS admitted(run_id,run_shard)
+              ON admitted.run_id = rc.run_id AND admitted.run_shard = rc.run_shard
             WHERE rc.status = 'leased'
               AND rc.leased_until < now()
               AND rc.recovery_count >= $1
+              AND EXISTS (SELECT 1 FROM local_shard_admissions a WHERE a.run_id = rc.run_id
+                  AND a.run_shard = rc.run_shard AND a.state IN ('open','draining'))
             ORDER BY rc.leased_until ASC, rc.run_id ASC, rc.id ASC
             FOR UPDATE OF rc SKIP LOCKED
             LIMIT $2
@@ -405,7 +415,7 @@ pub(super) async fn recover_expired_chunks(
             WHERE rc.run_id = expired.run_id
               AND rc.run_shard = expired.run_shard
               AND rc.id = expired.id
-            RETURNING rc.run_id, rc.run_shard
+            RETURNING rc.run_id, rc.run_shard, rc.id
         ),
         stale_failed_attempts AS (
             UPDATE execution_attempts ea
@@ -429,12 +439,14 @@ pub(super) async fn recover_expired_chunks(
               AND ea.status = 'running'::attempt_status
             RETURNING ea.id
         )
-        SELECT run_id, run_shard
+        SELECT run_id, run_shard, id
         FROM failed
         "#,
     )
     .bind(max_recoveries)
     .bind(batch_size)
+    .bind(admitted_runs)
+    .bind(admitted_shards)
     .fetch_all(&mut **tx)
     .await?;
 
@@ -549,7 +561,8 @@ pub(super) async fn dispatch_run_window(
                 agent_version = EXCLUDED.agent_version,
                 prompt_config_id = EXCLUDED.prompt_config_id,
                 prompt_config_version = EXCLUDED.prompt_config_version,
-                config_snapshot = EXCLUDED.config_snapshot,
+                config_snapshot = CASE WHEN run_snapshots.config_snapshot ? 'run_plan'
+                    THEN run_snapshots.config_snapshot ELSE EXCLUDED.config_snapshot END,
                 expected_execution_count = EXCLUDED.expected_execution_count,
                 updated_at = now()
             RETURNING run_id, run_shard, run_key

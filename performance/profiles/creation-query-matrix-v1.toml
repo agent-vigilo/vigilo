@@ -1,0 +1,81 @@
+schema_id = "profile/v1"
+id = "creation-query-matrix-v1"
+description = "Creation statement budgets with exact storage and scheduling oracles."
+requires_workload_selection = true
+campaign_cap_secs = 10800
+schedule_seed = 20261026
+max_artifact_bytes = 1073741824
+max_stdout_bytes = 262144
+max_stderr_bytes = 262144
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-99-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-101-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-3100-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-3300-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-6300-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-6500-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-25500-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-25700-payload-1024-fresh"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-50000-payload-1024-fresh-gates-1-placements-0-creators-1"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-50000-payload-1024-fresh-gates-8-placements-0-creators-1"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-50000-payload-1024-fresh-gates-0-placements-2-creators-1"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+tuple = "cases-50000-payload-1024-reference-gates-0-placements-0-creators-4"
+blocks = 2
+timing = "informative"

@@ -7,19 +7,6 @@ use super::{
     *,
 };
 
-fn case_blob(label: &str) -> CaseBlobDraft {
-    CaseBlobDraft {
-        case_hash: format!("case-{label}-{}", Uuid::now_v7()),
-        task_type: "classification".to_string(),
-        case_group: None,
-        input_payload: serde_json::json!({"text": label}),
-        expected_output: serde_json::Value::Null,
-        context_payload: serde_json::Value::Null,
-        tags: serde_json::json!([]),
-        metadata: serde_json::json!({}),
-    }
-}
-
 async fn insert_minimal_run(pool: &PgPool, run_id: Uuid) {
     let dataset_id = Uuid::now_v7();
     let dataset_version_id = Uuid::now_v7();
@@ -114,111 +101,6 @@ async fn bulk_insert_run_shard_dispatch_cursors_inserts_distinct_open_shards(poo
     .unwrap();
 
     assert_eq!(rows, vec![(0, "open".to_string()), (1, "open".to_string())]);
-}
-
-#[sqlx::test(migrations = "../migrations")]
-#[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
-async fn bulk_insert_case_blobs_preserves_json_null_context(pool: PgPool) {
-    let case_blob = CaseBlobDraft {
-        case_hash: format!("case-{}", Uuid::now_v7()),
-        task_type: "classification".to_string(),
-        case_group: None,
-        input_payload: serde_json::json!({"text": "hello"}),
-        expected_output: serde_json::Value::Null,
-        context_payload: serde_json::Value::Null,
-        tags: serde_json::json!([]),
-        metadata: serde_json::json!({}),
-    };
-
-    let mut tx = pool.begin().await.unwrap();
-    bulk_insert_case_blobs(&mut tx, std::slice::from_ref(&case_blob))
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-
-    let context_payload = sqlx::query_scalar::<_, serde_json::Value>(
-        r#"
-            SELECT context_payload
-            FROM case_blobs
-            WHERE case_hash = $1
-            "#,
-    )
-    .bind(&case_blob.case_hash)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert_eq!(context_payload, serde_json::Value::Null);
-}
-
-#[sqlx::test(migrations = "../migrations")]
-#[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
-async fn bulk_insert_case_blobs_rejects_hash_content_mismatch(pool: PgPool) {
-    let mut case_blob = CaseBlobDraft {
-        case_hash: format!("case-{}", Uuid::now_v7()),
-        task_type: "classification".to_string(),
-        case_group: None,
-        input_payload: serde_json::json!({"text": "original"}),
-        expected_output: serde_json::Value::Null,
-        context_payload: serde_json::Value::Null,
-        tags: serde_json::json!([]),
-        metadata: serde_json::json!({}),
-    };
-    let mut tx = pool.begin().await.unwrap();
-    bulk_insert_case_blobs(&mut tx, std::slice::from_ref(&case_blob))
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-
-    case_blob.input_payload = serde_json::json!({"text": "different"});
-    let mut tx = pool.begin().await.unwrap();
-    let error = bulk_insert_case_blobs(&mut tx, &[case_blob])
-        .await
-        .unwrap_err();
-
-    assert!(is_seed_invariant_error(&error));
-    assert!(error.to_string().contains("different immutable content"));
-}
-
-#[sqlx::test(migrations = "../migrations")]
-#[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
-async fn bulk_insert_dataset_membership_rejects_incomplete_seed(pool: PgPool) {
-    let dataset_id = Uuid::now_v7();
-    let dataset_version_id = Uuid::now_v7();
-    let blobs = [case_blob("first"), case_blob("second")];
-    let memberships = [
-        DatasetVersionCaseDraft {
-            case_id: Uuid::now_v7(),
-            case_ordinal: 0,
-            case_hash: blobs[0].case_hash.clone(),
-        },
-        DatasetVersionCaseDraft {
-            case_id: Uuid::now_v7(),
-            case_ordinal: 1,
-            case_hash: blobs[1].case_hash.clone(),
-        },
-    ];
-    let mut tx = pool.begin().await.unwrap();
-    bulk_insert_case_blobs(&mut tx, &blobs).await.unwrap();
-    upsert_dataset_version(&mut tx, dataset_version_id, dataset_id, "test")
-        .await
-        .unwrap();
-    bulk_insert_dataset_membership(&mut tx, dataset_version_id, &memberships)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-
-    let mut tx = pool.begin().await.unwrap();
-    let error = bulk_insert_dataset_membership(
-        &mut tx,
-        dataset_version_id,
-        std::slice::from_ref(&memberships[0]),
-    )
-    .await
-    .unwrap_err();
-
-    assert!(is_seed_invariant_error(&error));
-    assert!(error.to_string().contains("persisted memberships"));
 }
 
 #[sqlx::test(migrations = "../migrations")]
@@ -323,4 +205,27 @@ async fn bulk_insert_shard_placements_rejects_control_only_alias(pool: PgPool) {
         .unwrap_err();
 
     assert!(error.to_string().contains("not shard-capable"));
+}
+
+#[sqlx::test(migrations = "../migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn execution_seed_reuses_dataset_identity_without_a_write_lock(pool: PgPool) {
+    let version = Uuid::now_v7();
+    let dataset = Uuid::now_v7();
+    sqlx::query("INSERT INTO dataset_versions(dataset_version_id,dataset_id,dataset_version) VALUES($1,$2,'fixture')").bind(version).bind(dataset).execute(&pool).await.unwrap();
+    let mut lock = pool.begin().await.unwrap();
+    sqlx::query("SELECT dataset_version_id FROM dataset_versions WHERE dataset_version_id=$1 FOR NO KEY UPDATE").bind(version).fetch_one(&mut *lock).await.unwrap();
+    let reused = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let mut tx = pool.begin().await?;
+        upsert_dataset_version(&mut tx, version, dataset, "fixture").await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    lock.rollback().await.unwrap();
+    assert!(
+        reused.is_ok(),
+        "execution seeding serialized on an immutable dataset write lock"
+    );
+    reused.unwrap().unwrap();
 }

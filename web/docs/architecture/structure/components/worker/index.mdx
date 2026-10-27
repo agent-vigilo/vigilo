@@ -20,6 +20,13 @@ Describes the major internal responsibilities of the worker runtime.
 
 ## Notes
 
+- Workers use `VIGILO_STORAGE_CONFIG` to resolve the frozen storage owner, read
+  configuration and assigned case files through a shared, bounded immutable-byte
+  cache, and fetch misses through the provider-neutral adapter. Every use verifies
+  complete files and exact chunk membership before execution. Large assignments
+  use a bounded verification/reread pass. See
+  [Run Preparation](/docs/architecture/case-storage/run-preparation).
+
 - Workers consume `run.chunk.ready` broker messages carrying `run_id`,
   `run_shard`, `chunk_id`, `database_alias`, and `write_epoch`, then validate
   local shard admission while claiming the chunk lease.
@@ -44,6 +51,8 @@ Describes the major internal responsibilities of the worker runtime.
   process-local broker circuit. Consumer reopening also uses bounded backoff;
   message retry budgets remain independent from broker availability.
 - Duplicate broker deliveries are expected under at-least-once messaging; chunk claims, attempt authority tokens, and evaluator-result uniqueness make processing idempotent at the persistence boundary.
+
+Workers settle terminal chunks under the chunk lock, preserve authoritative committed results, and retire unfinished authority before writing an immutable receipt. They acknowledge after this transaction; coordinators own shard aggregation and sealing. See [settlement](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
 ## Related
 

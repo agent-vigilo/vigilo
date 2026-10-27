@@ -20,8 +20,9 @@ sequenceDiagram
     ControlDB-->>Vigilo: Run record
     Vigilo->>ControlDB: Resolve readable execution routes
     ControlDB-->>Vigilo: Run-shard database aliases
-    Vigilo->>ExecutionDB: Load routed shard summaries
-    ExecutionDB-->>Vigilo: Summary counts and scores
+    Vigilo->>ExecutionDB: Load published summaries in one batch per database
+    ExecutionDB-->>Vigilo: Settlement counts, missing/unresolved counts, and retained scores
+    Vigilo->>Vigilo: Merge routed summaries in shard order
 
     alt Results loaded
         Vigilo->>Vigilo: Build summary-only payload

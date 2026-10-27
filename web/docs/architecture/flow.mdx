@@ -1,5 +1,5 @@
 ---
-title: Execution Flow & State Model
+title: Runtime Model
 sidebar_label: Runtime Model
 sidebar_position: 2
 description: Architecture overview for Agent Vigilo evaluation execution, worker attempts, retries, aggregation, and run state transitions.
@@ -12,9 +12,10 @@ keywords:
   - evaluator result aggregation
 ---
 
-# Execution Flow & State Model
+# Runtime Model
 
-This document describes how Agent Vigilo processes an evaluation run from start to completion, including execution lifecycle, retry behavior, and event publication.
+Agent Vigilo creates durable runs, distributes case evaluation, retains partial
+results, and publishes gate decisions after exact settlement.
 
 ---
 
@@ -75,8 +76,8 @@ A run is created with:
 At creation, every evaluator reference is resolved to an immutable
 <GlossaryTerm term="evaluator-execution-plan">evaluator execution plan</GlossaryTerm>.
 The plan pins registry id, artifact hash, evaluator ABI, host adapter, runtime
-version, and the complete scoring-policy hash. Each execution placement receives
-the same plan and workers verify its hash before use.
+version, and the complete scoring-policy hash. The immutable run configuration stores this plan. Execution placements retain
+its verified reference, and workers verify its hash before use.
 
 Reference formats:
 
@@ -84,11 +85,19 @@ Reference formats:
 - [Dataset Format](../configuration/dataset-format.mdx)
 
 ```text
-run.status = pending
+run.status = creating
 run.gate_status = unknown
 ```
 
-Run chunks are then generated and assigned a stable `run_shard` from the 128 logical shard range. Executions are allocated later by workers from the chunk's dataset cases:
+Dataset ingestion publishes immutable case files. Preparation publishes run
+configuration, chunk membership, and expected gate counts. Admission seeds
+compact execution metadata and verifies exact local coverage before atomically
+publishing routes and dispatch cursors and changing the run to `pending`.
+`--prepare-only` holds a ready plan in `creating` until execution is requested.
+
+Chunks receive a stable `run_shard` from the 128 logical shard range. Workers
+read their cases from verified object storage and allocate executions when work
+is due:
 
 ```text
 run_chunk.status = pending
@@ -124,7 +133,7 @@ The resolved evaluation plan is stored on the execution before the attempt runs:
 - `evaluator_manifest`: the resolved evaluator bindings and, when `persistence.mode: full`, evaluator configs
 - `expected_evaluator_count`: the number of evaluator invocations expected for the execution
 
-The dataset `case_group` value is part of immutable case content. It is loaded from `case_blobs`, passed into evaluator input, and affects the case hash because changing it changes evaluator routing.
+The dataset `case_group` value is part of immutable case content. It is loaded from verified case batches, passed into evaluator input, and affects the case hash because changing it changes evaluator routing.
 
 ### 3. Agent Invocation
 
@@ -173,7 +182,7 @@ Each evaluator invocation result records:
 Each diagnostic records severity, category, reason, tags, and evidence. It has
 no dimension, score, judgment, weight, or blocking authority.
 
-When `persistence.mode: summary`, execution-level case payload snapshots and evaluator binding config are replaced with redaction markers. Dataset case blobs remain durable for retry execution and reproducibility.
+When `persistence.mode: summary`, execution-level case payload snapshots and evaluator binding config are replaced with redaction markers. Immutable dataset case files remain durable in object storage for retries and reproducibility.
 When `persistence.persist_evaluator_evidence: false`, raw evaluator output is also redacted because raw output may contain embedded evidence.
 
 If evaluation fails:
@@ -238,16 +247,16 @@ Before finalization, the coordinator recovers expired chunk leases for running r
 
 The coordinator checks a bounded number of candidates per cycle:
 
-> Are all chunks terminal?
+> Does every planned shard have a valid sealed summary?
 
-`pending` or `leased` chunks keep a run out of finalization, including chunks waiting on execution retry windows. Once chunks are terminal, each shard publishes bounded scorecard counters for the configured run gates.
+`pending` or `leased` chunks keep a run out of finalization, including chunks waiting on execution retry windows. Terminal chunk transactions record immutable receipts. Coordinators consume bounded pages and seal only exact planned membership; [partial results remain valid evidence](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
-A candidate with missing or non-terminal shard summaries is recorded as
+A candidate with missing, unsealed, or invalid shard summaries is recorded as
 checked and rotated behind unchecked candidates. The coordinator continues to
 later candidates in the same cycle, preventing one slow shard from blocking
 unrelated ready runs.
 
-If all chunks are terminal:
+After exact shard settlement:
 
 ```text
 run.status = finalizing
@@ -294,10 +303,14 @@ The ledger row is retained for idempotency, audit, and replay. The delivery queu
 ### Run Lifecycle
 
 ```text
-pending → running → finalizing → completed
-                  ↘ failed
-                  ↘ cancelled
+creating → pending → running → finalizing → completed (gate pass or fail)
+    └─ immutable admission conflict → failed
+open run → cancellation → cancelled
 ```
+
+Completion requires exact settlement, not a successful result for every case.
+Missing or unresolved results remain explicit and fail the gate. See the
+[Run Lifecycle](./state/run-lifecycle/) for guarded transitions and recovery.
 
 ### Execution Lifecycle
 

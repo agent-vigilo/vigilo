@@ -645,3 +645,67 @@ required_metrics = ["wall_time", "child_cpu", "peak_rss", "sql", "wal"]
 watchdog_ms = 600000
 planning_duration_ms = 90000
 preconditioning = "none"
+
+[[workloads]]
+id = "run.create-ingestion.v1"
+owner = "run-creation"
+status = "implemented"
+capability = "run.create.v1"
+fixture = "mvp-v1"
+tuples = [
+  "cases-1000-payload-1024-fresh",
+  "cases-10000-payload-1024-fresh",
+  "cases-50000-payload-1024-fresh",
+  "cases-1000-payload-16384-fresh",
+  "cases-10000-payload-16384-fresh",
+  "cases-10000-payload-1024-reuse",
+  "cases-50000-payload-1024-reuse",
+  "cases-10000-payload-16384-reuse",
+  "cases-10000-payload-1024-reference",
+  "cases-50000-payload-1024-reference",
+  "cases-10000-payload-16384-reference",
+  "cases-99-payload-1024-fresh",
+  "cases-101-payload-1024-fresh",
+  "cases-3100-payload-1024-fresh",
+  "cases-3300-payload-1024-fresh",
+  "cases-6300-payload-1024-fresh",
+  "cases-6500-payload-1024-fresh",
+  "cases-25500-payload-1024-fresh",
+  "cases-25700-payload-1024-fresh",
+  "cases-50000-payload-1024-fresh-gates-1-placements-0-creators-1",
+  "cases-50000-payload-1024-fresh-gates-8-placements-0-creators-1",
+  "cases-50000-payload-1024-fresh-gates-0-placements-2-creators-1",
+  "cases-50000-payload-1024-reference-gates-0-placements-0-creators-4",
+]
+unit = "case_and_run"
+oracle = "exact_control_and_execution_rows"
+required_metrics = ["wall_time", "child_cpu", "peak_rss", "sql", "wal"]
+watchdog_ms = 600000
+planning_duration_ms = 60000
+preconditioning = "none"
+
+# Absolute statement ceilings include transactions and all participating databases.
+[workloads.statement_budgets]
+"cases-1000-payload-1024-fresh" = 300
+"cases-10000-payload-1024-fresh" = 400
+"cases-50000-payload-1024-fresh" = 600
+"cases-1000-payload-16384-fresh" = 300
+"cases-10000-payload-16384-fresh" = 400
+"cases-10000-payload-1024-reuse" = 250
+"cases-50000-payload-1024-reuse" = 300
+"cases-10000-payload-16384-reuse" = 250
+"cases-10000-payload-1024-reference" = 250
+"cases-50000-payload-1024-reference" = 300
+"cases-10000-payload-16384-reference" = 250
+"cases-99-payload-1024-fresh" = 300
+"cases-101-payload-1024-fresh" = 300
+"cases-3100-payload-1024-fresh" = 350
+"cases-3300-payload-1024-fresh" = 350
+"cases-6300-payload-1024-fresh" = 400
+"cases-6500-payload-1024-fresh" = 400
+"cases-25500-payload-1024-fresh" = 500
+"cases-25700-payload-1024-fresh" = 500
+"cases-50000-payload-1024-fresh-gates-1-placements-0-creators-1" = 700
+"cases-50000-payload-1024-fresh-gates-8-placements-0-creators-1" = 700
+"cases-50000-payload-1024-fresh-gates-0-placements-2-creators-1" = 750
+"cases-50000-payload-1024-reference-gates-0-placements-0-creators-4" = 1200

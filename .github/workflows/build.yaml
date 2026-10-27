@@ -25,12 +25,14 @@ jobs:
       - rustfmt
       - clippy
       - unit-tests
+      - performance-service-integration-tests
       - database-integration-tests
       - migration-tests
       - end-to-end-tests
+      - blob-storage-integration-tests
       - coverage-report
-      - evaluator-wasm
-      - web
+      - evaluator-compatibility-tests
+      - documentation-checks
     steps:
       - run: exit 0
 
@@ -53,6 +55,7 @@ jobs:
         with:
           components: clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo clippy -p vigilo --locked --features blob-storage-services --test blob_storage_services --test dataset_ingestion_services -- -D warnings
 
   unit-tests:
     name: Unit and Contract Tests (${{ matrix.os }})
@@ -86,23 +89,46 @@ jobs:
       - name: Run performance contract check with coverage
         if: matrix.coverage
         run: cargo llvm-cov run --no-report -p xtask --locked -- perf check
-      - name: Run performance service tests with coverage
-        if: matrix.coverage
-        run: >-
-          cargo llvm-cov --no-report -p xtask --locked
-          --features performance-services --test performance_services -- --nocapture
-      - name: Generate unit and performance coverage report
+      - name: Generate unit and contract coverage report
         if: matrix.coverage
         run: >-
           cargo llvm-cov report
           --ignore-filename-regex '[/\\]postgres_tests(\.rs|[/\\])'
           --lcov --output-path lcov-unit.info
-      - name: Store unit and performance coverage
+      - name: Store unit and contract coverage
         if: matrix.coverage
         uses: actions/upload-artifact@v6
         with:
           name: coverage-unit
           path: lcov-unit.info
+          if-no-files-found: error
+          retention-days: 1
+
+  performance-service-integration-tests:
+    name: Performance Service Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run performance service integration tests with coverage
+        run: >-
+          cargo llvm-cov --no-report -p xtask --locked
+          --features performance-services --test performance_services -- --nocapture
+      - name: Generate performance service integration coverage report
+        run: >-
+          cargo llvm-cov report
+          --ignore-filename-regex '[/\\]postgres_tests(\.rs|[/\\])'
+          --lcov --output-path lcov-performance-services.info
+      - name: Store performance service integration coverage
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-performance-services
+          path: lcov-performance-services.info
           if-no-files-found: error
           retention-days: 1
 
@@ -235,6 +261,12 @@ jobs:
       DATABASE_URL: postgresql://postgres:password@localhost:5432/agent_vigilo
       VIGILO_TEST_SHARD_001_DATABASE_URL: postgresql://postgres:password@localhost:5433/agent_vigilo
       MESSAGING_URL: amqp://guest:guest@localhost:5672
+      DEV_S3_ACCESS_KEY_ID: vigilo-ci-runtime
+      DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-runtime-secret
+      DEV_S3_BUCKET: vigilo-ci-runtime
+      DEV_S3_PORT: 13900
+      COMPOSE_PROJECT_NAME: vigilo-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+      VIGILO_STORAGE_CONFIG: ${{ github.workspace }}/target/runtime-storage.toml
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -243,6 +275,23 @@ jobs:
           targets: wasm32-wasip2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Start isolated runtime object storage
+        run: |
+          docker compose -p "$COMPOSE_PROJECT_NAME" -f infra/dev/docker-compose.single.yml up -d --build --wait --wait-timeout 240 ceph
+          mkdir -p target
+          cat > "$VIGILO_STORAGE_CONFIG" <<'EOF'
+          provider = 's3'
+          alias = 'cases'
+          bucket = 'vigilo-ci-runtime'
+          prefix = 'runtime-tests'
+          region = 'us-east-1'
+          endpoint = 'http://127.0.0.1:13900'
+          allow_http = true
+          path_style = true
+          [credential_variables]
+          access_key = 'DEV_S3_ACCESS_KEY_ID'
+          secret_key = 'DEV_S3_SECRET_ACCESS_KEY'
+          EOF
       - name: Reset coverage data
         run: cargo llvm-cov clean --workspace
       - name: Build the end-to-end evaluator
@@ -269,14 +318,97 @@ jobs:
           path: lcov-e2e.info
           if-no-files-found: error
           retention-days: 1
+      - name: Remove isolated runtime object storage
+        if: always()
+        run: >-
+          docker compose -p "$COMPOSE_PROJECT_NAME"
+          -f infra/dev/docker-compose.single.yml
+          down --volumes --remove-orphans --timeout 45
+
+  blob-storage-integration-tests:
+    name: Blob Storage Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: postgres
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:password@localhost:15432/postgres
+      DEV_S3_ACCESS_KEY_ID: vigilo-ci-storage
+      DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-storage-secret
+      DEV_S3_BUCKET: vigilo-ci-storage
+      DEV_S3_PORT: 13900
+      COMPOSE_PROJECT_NAME: vigilo-storage-${{ github.run_id }}-${{ github.run_attempt }}
+      VIGILO_BLOB_TEST_ENDPOINT: http://127.0.0.1:13900
+      VIGILO_BLOB_TEST_BUCKET: vigilo-ci-storage
+      VIGILO_BLOB_TEST_ACCESS_KEY_ID: vigilo-ci-storage
+      VIGILO_BLOB_TEST_SECRET_ACCESS_KEY: vigilo-ci-storage-secret
+      VIGILO_BLOB_TEST_INVALID_SECRET_ACCESS_KEY: deliberately-invalid
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Start isolated Ceph gateway
+        run: >-
+          docker compose -p "$COMPOSE_PROJECT_NAME"
+          -f infra/dev/docker-compose.single.yml
+          up -d --build --wait --wait-timeout 240 ceph
+      - name: Apply schema through setup to a fresh control database
+        run: cargo llvm-cov run --no-report -p vigilo --locked -- setup --skip-evaluators
+      - name: Verify signed storage and restart persistence with coverage
+        run: >-
+          VIGILO_BLOB_TEST_RESTART_CONTAINER="${COMPOSE_PROJECT_NAME}-ceph-1"
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features blob-storage-services --test blob_storage_services
+          -- signed_storage_contract --exact --nocapture
+      - name: Verify transport faults with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features blob-storage-services --test blob_storage_services
+          -- ceph_fault_contract --exact --nocapture
+      - name: Verify upload and run-plan process recovery with exact cleanup and coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features blob-storage-services --test dataset_ingestion_services -- --nocapture
+      - name: Generate storage coverage report
+        run: >-
+          cargo llvm-cov report
+          --ignore-filename-regex '[/\\]postgres_tests(\.rs|[/\\])'
+          --lcov --output-path lcov-storage.info
+      - name: Store storage coverage
+        uses: actions/upload-artifact@v6
+        with:
+          name: coverage-storage
+          path: lcov-storage.info
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove isolated service and volumes
+        if: always()
+        run: >-
+          docker compose -p "$COMPOSE_PROJECT_NAME"
+          -f infra/dev/docker-compose.single.yml
+          down --volumes --remove-orphans --timeout 45
 
   coverage-report:
     name: Aggregate Rust Coverage
     runs-on: ubuntu-latest
     needs:
       - unit-tests
+      - performance-service-integration-tests
       - database-integration-tests
       - end-to-end-tests
+      - blob-storage-integration-tests
     steps:
       - uses: actions/checkout@v6
       - name: Download coverage reports
@@ -293,8 +425,10 @@ jobs:
         run: >-
           lcov
           --add-tracefile coverage/lcov-unit.info
+          --add-tracefile coverage/lcov-performance-services.info
           --add-tracefile coverage/lcov-sqlx.info
           --add-tracefile coverage/lcov-e2e.info
+          --add-tracefile coverage/lcov-storage.info
           --output-file coverage/lcov-rust-all.info
       - name: Enforce aggregate Rust coverage
         run: >-
@@ -310,8 +444,8 @@ jobs:
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
 
-  evaluator-wasm:
-    name: Evaluator Wasm
+  evaluator-compatibility-tests:
+    name: Evaluator Compatibility Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -337,8 +471,8 @@ jobs:
           evaluator_abi::tests::all_registered_evaluator_abis_execute_in_one_host
           -- --exact
 
-  web:
-    name: Web
+  documentation-checks:
+    name: Documentation Checks
     runs-on: ubuntu-latest
     defaults:
       run:

@@ -1,54 +1,32 @@
----
-config:
-  flowchart:
-    nodeSpacing: 150
-    rankSpacing: 80
-  themeVariables:
-    edgeLabelBackground: 'transparent'
----
 sequenceDiagram
     actor User
-    participant Vigilo
-    participant ControlDB as Control DB
-    participant ExecutionDB as Execution DBs
-
-    User->>Vigilo: vigilo run create
-    activate Vigilo
-
-    Vigilo->>Vigilo: Load and parse profile and dataset inputs
-    Vigilo->>Vigilo: Canonicalize payloads and validate dataset
-    Vigilo->>ControlDB: Validate profile executability
-    ControlDB-->>Vigilo: Verified evaluator artifacts and ABI identities
-    Vigilo->>Vigilo: Hash scoring policy and immutable evaluator execution plan
-
-    Vigilo->>Vigilo: Plan case blobs, dataset version, run, chunks, and shard assignments
-    Vigilo->>ControlDB: Commit creating run, routes, placement ledger, and exact chunk plan
-    ControlDB-->>Vigilo: Durable run id and creation lease
-
-    loop Each pending execution placement
-        Vigilo->>ExecutionDB: Idempotently store prerequisites, hashed run snapshot, and owned chunks
-        alt Seed transaction committed
-            ExecutionDB-->>Vigilo: Placement seeded
-            Vigilo->>ControlDB: Mark placement seeded
-        else Retryable seed failure
-            ExecutionDB-->>Vigilo: Seed not confirmed
-            Vigilo->>ControlDB: Store error and next recovery time
-        else Persisted data conflicts with plan
-            ExecutionDB-->>Vigilo: Seed invariant error
-            Vigilo->>ControlDB: Mark placement and run failed
+    participant CLI
+    participant Control as Control PostgreSQL
+    participant Storage as Blob adapter
+    participant Execution as Execution PostgreSQL
+    User->>CLI: run create, profile and dataset source
+    opt Inline or file source
+        CLI->>Storage: Validate and publish immutable dataset
+    end
+    CLI->>Control: Freeze creating run and exact evaluator and placement identities
+    loop Bounded verified case files
+        CLI->>Storage: Verify cases and publish immutable chunk, gate and configuration files
+        CLI->>Control: Fence ownership and acknowledge progress
+    end
+    CLI->>Control: Publish verified plan root
+    alt Prepare only
+        CLI-->>User: Creating run with ready plan, execution held
+    else Execution requested
+        loop Bounded metadata pages
+            CLI->>Execution: Idempotently seed chunks, references and gate counts
+            CLI->>Control: Acknowledge contiguous admission cursor
+        end
+        CLI->>Execution: Independently verify exact local chunk membership
+        alt Every placement verified
+            CLI->>Control: Atomically publish routes, cursors and pending state
+            CLI-->>User: Pending run
+        else Interrupted or unavailable placement
+            CLI-->>User: Creating run and recovery progress
+            Note over Control: Coordinator resumes requested admission
         end
     end
-
-    alt Every placement is seeded
-        Vigilo->>ControlDB: Create dispatch cursors, set pending, and delete chunk plan
-        ControlDB-->>Vigilo: Run activated
-        Vigilo-->>User: Pending run response
-    else Creation remains retryable
-        Vigilo-->>User: Creating run response with progress and run id
-        Note over ControlDB: A coordinator claims the expired lease and resumes this run
-    else Input validation or initial control commit fails
-        ControlDB-->>Vigilo: Error
-        Vigilo-->>User: Creation error without a durable run
-    end
-
-    deactivate Vigilo

@@ -12,7 +12,7 @@ flowchart TD
     RunId{Run id valid?}
     LoadRun[Load status projection]
     Found{Run exists?}
-    Progress[Read creation or routed execution progress]
+    Progress[Read creation progress or batch shard summaries by database]
     Emit{Control or live progress changed?}
     Write[Write watch update]
     Terminal{Terminal status?}

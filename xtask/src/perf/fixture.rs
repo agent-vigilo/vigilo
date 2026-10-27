@@ -98,6 +98,23 @@ pub struct RunInputs {
     pub dataset: PathBuf,
 }
 
+/// Adds deterministic gates that cover every fixture case; zero leaves the
+/// ordinary fixture unchanged. This runs outside the measured process boundary.
+pub fn set_gates(inputs: &RunInputs, count: usize) -> Result<()> {
+    if count > 8 {
+        bail!("fixture gate limit exceeded");
+    }
+    if count == 0 {
+        return Ok(());
+    }
+    let mut value: Value = serde_yaml::from_str(&fs::read_to_string(&inputs.profile)?)?;
+    value["scorecard"] = json!({"gates": (0..count).map(|n| json!({
+        "id":format!("gate-{n:02}"),"dimension":"quality","min_coverage":1.0
+    })).collect::<Vec<_>>()});
+    fs::write(&inputs.profile, serde_yaml::to_string(&value)?)?;
+    Ok(())
+}
+
 /// Loads and validates a fixture catalog by stable ID.
 pub fn load(root: &Path, id: &str) -> Result<FixtureCatalog> {
     if !id
@@ -171,11 +188,33 @@ pub fn write_run_inputs_with_payload(
     }
     fs::create_dir_all(directory)?;
     let profile = directory.join("profile.yaml");
-    let dataset = directory.join("dataset.yaml");
+    let mut dataset = directory.join("dataset.yaml");
     let profile_value = profile_value(fixture, identity, agent_url, evaluator_count);
     let dataset_value = dataset_value(identity, case_count, payload_bytes);
     fs::write(&profile, serde_yaml::to_string(&profile_value)?)?;
-    fs::write(&dataset, serde_yaml::to_string(&dataset_value)?)?;
+    let encoded = serde_yaml::to_string(&dataset_value)?;
+    if encoded.len() <= 8 * 1024 * 1024 {
+        fs::write(&dataset, encoded)?;
+    } else {
+        use std::io::Write;
+        dataset = directory.join("dataset.jsonl");
+        let mut output = std::io::BufWriter::new(fs::File::create(&dataset)?);
+        let mut fields = dataset_value.clone();
+        fields
+            .as_object_mut()
+            .expect("fixture object")
+            .remove("cases");
+        serde_json::to_writer(
+            &mut output,
+            &json!({"schema":"vigilo/dataset-upload/v1","fields":fields}),
+        )?;
+        output.write_all(b"\n")?;
+        for case in dataset_value["cases"].as_array().expect("fixture cases") {
+            serde_json::to_writer(&mut output, case)?;
+            output.write_all(b"\n")?;
+        }
+        output.flush()?;
+    }
     Ok(RunInputs { profile, dataset })
 }
 

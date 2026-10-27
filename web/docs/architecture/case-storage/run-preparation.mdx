@@ -1,0 +1,231 @@
+---
+title: Run Preparation
+sidebar_label: Run Preparation
+sidebar_position: 4
+description: Bounded, resumable preparation of immutable run plans from finalized datasets.
+---
+
+import Mermaid from '@theme/Mermaid';
+import preparationFlow from './preparation-flow.mmd';
+import preparationState from './preparation-state.mmd';
+import preparationData from './preparation-data.mmd';
+
+# Run Preparation
+
+Run preparation reads a finalized dataset and publishes an immutable execution
+plan. It validates every case against the profile, freezes evaluator artifacts
+and initial shard placements, and records exact chunk membership and expected gate
+counts. Case payloads remain in blob storage.
+
+```bash
+vigilo run create --profile-file profile.yaml --dataset-upload-id <upload-id> \
+  --storage-config storage.toml --run-id <uuid> --prepare-only
+vigilo run status <uuid>
+```
+
+The upload ID identifies a finalized [dataset catalog entry](./ingestion).
+The profile is YAML or JSON, supplied through `--profile` or `--profile-file`,
+with an 8 MiB input and encoded limit. Storage configuration resolves the same
+recorded physical owner as the dataset; credentials remain outside SQL and files.
+
+Creation admits the published plan to execution storage and returns `pending`
+after exact placement verification. `--prepare-only` holds a run in `creating`
+with `plan_status: ready` and `dispatchable: false`. Repeat the same command
+without that flag to request execution. Coordinators resume requested admission
+after the foreground process stops; they leave preparation-only runs held.
+Inline and file YAML/JSON inputs use the same ingestion and preparation path.
+Set `VIGILO_STORAGE_CONFIG` for creators, coordinators, and workers, or supply
+`--storage-config` to creation. Runtime credentials need read access to the
+recorded owner; workers do not write capability probes.
+
+## Preparation Flow
+
+<Mermaid value={preparationFlow} />
+
+Preparation traverses the verified dataset index in submitted case order. The
+stack is bounded by eight index levels and a 4 MiB encoded index working set.
+One batch is consumed at a time; no dataset-wide case list or payload copy is
+written to PostgreSQL. A running identity check binds the complete pass to the
+catalog's original source hash, membership UUID, and case count.
+
+Execution chunks contain at most 100 consecutive cases, independently of storage
+batch boundaries. Chunk indexes select logical shards round-robin over 128
+shards. Chunk IDs are deterministic for the run ID and chunk index, so resuming
+preparation reproduces the same scheduling identities. The ordered case ID/hash
+fold matches the execution projection contract; the per-shard chunk fold matches
+the settlement contract.
+
+The planner retains one bounded chunk page and at most 128 shard accumulators.
+Each shard tracks its case/chunk totals, projection and settlement hashes, and
+counts for the profile's at most 64 gates. A gate count is the number of cases on
+that shard selected by that gate's required-evaluator, group, and tag rules.
+A case counts once per matching gate. A gate matching no cases anywhere rejects
+preparation. Gate count files contain sorted entries, including zero counts for
+used shards where a gate selects no cases.
+
+Chunk files, indexes, gate files, and the configuration use the
+[storage formats and budgets](./formats). The configuration freezes the full
+profile, agent settings, evaluator execution plan, logical dataset identity, and
+executability counts. The run-plan manifest links those objects to the finalized
+dataset and records per-shard totals and settlement hashes. The control run
+snapshot retains compact identities, references and expected shard settlement
+hashes rather than full policy or case payloads. Publication derives that bounded
+finalization projection from the same shard metadata in its atomic commit.
+
+## Authority, Recovery, and Status
+
+<Mermaid value={preparationState} />
+
+The run creation lease lasts five minutes. Each claim also increments a
+plan generation. Mutations lock the run, then recheck the current owner,
+generation, status, and wall-clock expiry. No SQL transaction spans storage I/O.
+Read-only traversal renews the lease periodically, without a SQL mutation for
+every dataset file. Each group of remote writes gets a finite admission window
+before its authority check.
+
+File ownership is recorded in bounded groups before PUT. A group contains at most
+64 files, 256 KiB of reference metadata, and 8 MiB of encoded payload. A single
+larger document admitted by its storage format is handled alone. Files are created
+and verified in dependency order: index levels flush before their parents are
+built, and gate chains are written from tail to head. The writer retains one
+bounded group plus the document being encoded; it does not collect all plan files.
+
+Acknowledgement follows successful creation and complete byte verification.
+After 30 seconds in a group, the writer checkpoints only its verified
+prefix and checks authority again before continuing. Each transfer keeps its
+120-second allowance within a 150-second window minted before registration.
+Chunk progress advances only across consecutive chunk ranges. A failed grouped
+acknowledgement changes no progress. Failed or uncertain writes retain their exact
+keys. Replaying a range with different bytes fails; acknowledged files are
+verified again without being uploaded again. Abandoned connection probes are
+reconciled by exact key.
+
+Choose `--run-id` before starting, or retain the ID included in command errors.
+After an interruption, repeat the command with the same run ID, profile, dataset
+ID, and storage configuration. A live lease rejects competing callers; after a
+crash the lease becomes reclaimable after five minutes. Ctrl-C cancels work and
+yields ownership when PostgreSQL is reachable. The planner replays the bounded
+case pass and reconciles existing files rather than retaining a local input path.
+Reusing a dataset verifies its immutable version identity without updating that
+shared row. Independent runs therefore do not serialize on a metadata update;
+normal foreign-key integrity checks still apply.
+
+Frozen evaluator artifacts and placements are reused even when registry state or
+default placement policy changes. Changed source identity, profile, limits, or
+physical storage binding is rejected.
+
+Recovery claims the run before opening its storage adapter or reading roots,
+configuration, and gate files. Competing coordinators cannot duplicate those
+reads for the same live lease. Adapter initialization and root reads share a
+120-second deadline minted before the claim; the complete gate traversal has
+its own 120-second deadline. Returned errors and cancellation release ownership
+when control storage is reachable; process death falls back to lease expiry.
+Each coordinator processes recovery candidates sequentially. A failed candidate
+is deferred and the next candidate can proceed, but slow reads delay later
+candidates until the bounded read finishes or fails.
+The foreground creator reuses its already verified roots and claims authority
+before gate reads and local admission. Preparation-only runs remain held.
+
+`run status` and `run watch` expose `creation_progress.plan_status` and
+`creation_progress.plan_chunk_cursor`. The cursor counts contiguous acknowledged
+chunks. It can reach the expected chunk count before indexes, gate files,
+configuration and the manifest finish; `plan_status: ready` indicates complete
+verified publication. Preparation-only runs expose these fields while held.
+
+Publication atomically records the verified root reference and compact shard
+metadata. Missing/corrupt objects, changed identity, incomplete coverage, stale
+leases, or cancelled runs cannot publish.
+
+## Execution Admission and Worker Reads
+
+Admission reads bounded chunk pages and the linked gate counts. It stores only
+execution-local chunk scheduling rows, immutable plan references, frozen gate
+policy/counts, and the exact settlement manifest. The control database
+acknowledges a contiguous chunk cursor and at most 128 shard folds after local
+commits. Lost acknowledgements replay identical metadata. Deterministic immutable
+seed conflicts fail the run without publishing dispatch cursors; availability
+failures remain resumable. Before activation,
+admission independently folds the local chunk identities and compares every
+shard with the published plan. One fenced control transaction publishes routes
+and dispatch cursors and changes the run to `pending`. No case payload or
+per-case membership table is required in either database.
+
+Admission groups each chunk page by execution database. Shared shard fences are
+acquired in ascending shard order before local writes, so cancellation tombstones
+and moved ownership are checked under the same locks. Admission rows and snapshots
+are inserted and compared in sets of at most 64 shards, targeting at most 8 MiB
+of logical snapshot metadata per statement. A single configuration admitted by
+the storage format may exceed that target and is handled alone. The common
+snapshot is transmitted once per set; SQL combines it with each shard's frozen
+manifest and gate counts. Chunk inserts also have ceilings of 256 metadata rows
+and 256 KiB, within the existing configured case-count limit.
+
+Local verification reads up to 256 ordered chunks across a database's assigned
+shards per query and folds each shard's identity independently. Placement
+serviceability is resolved once for each bounded database operation, including
+every verification page. Draining placements can replay metadata; activation
+still requires active placements. No mutable placement permission is cached for
+the lifetime of admission.
+
+Admission renews its creation lease on the first operation and after 60 seconds,
+while every control checkpoint and activation still checks live ownership and
+generation. Blob reads have 120-second deadlines minted before renewal. Local
+database operations have a 30-second outer deadline that includes placement
+resolution, pool and lock waits, and transaction completion. Cancellation or a
+timeout rolls back open local transactions; committed metadata remains exactly
+replayable if the control acknowledgement was lost.
+
+Workers hold a chunk lease and heartbeat while reading configuration and cases.
+They verify the claimed chunk against its immutable chunk file, traverse only
+the required dataset ranges, and check complete case files, including records
+outside the selected slice. Ordered case IDs, ordinals and hashes must reproduce
+the chunk's membership digest before execution starts. Small assignments retain
+a bounded vector. Larger assignments verify first and then reread immutable
+files one at a time, preserving the encoded resident-byte budget. Storage
+failure follows the bounded chunk retry path, with the same lease fencing as
+agent and evaluator failure.
+
+Each worker command shares an immutable-byte cache across its run/shard contexts.
+It retains at most 256 files and 8 MiB of charged payload/reference bytes; files
+over 1 MiB bypass retention. Small bounded container overhead is additional.
+Cache keys include the verified physical storage binding and every object-reference
+field, including its digest and revision. Hits still undergo byte verification,
+decoding, complete-file validation and membership checks. Eviction or worker
+restart simply causes another verified storage read. A verified cached copy stays
+usable if the remote object becomes unavailable; a miss must fetch and verify it.
+Missing reads and bytes that fail integrity verification are never retained.
+
+The cache adds a fixed memory allowance to the existing per-assignment working
+budget. Returned buffers are owned copies, so an active reader cannot pin an
+evicted cache allocation. Concurrent misses may download independently; no lock
+is held over storage I/O. Cancellation and read deadlines apply to hits and misses.
+The cache holds no mutable lease, route or admission authority, and publication
+and admission reads bypass it.
+
+Chunk receipts retain actual execution evidence. Shard summaries apply the
+frozen per-gate planned counts, so cases that never execute still reduce gate
+coverage. Settlement and cancellation require no object-storage reads inside
+SQL transactions. Exports retain the same execution/result records. Shard
+movement copies the compact references and runtime records; dataset files stay
+at their immutable storage locations.
+
+`run cancel` revokes creation authority and closes admission on partially seeded
+placements, including tombstones for shards not yet seeded. A delayed creator
+cannot reopen cancelled work. Cancellation keeps committed results and shared
+immutable dataset objects; it does not fabricate evaluator errors or delete
+the dataset.
+
+## Control Records
+
+<Mermaid value={preparationData} />
+
+The diagram shows the fields used by preparation and admission. Run snapshots
+are local copies linked by run/shard identity; their logical relationship to
+control runs is not a cross-database foreign key.
+
+`run_plans` freezes the dataset catalog ID, storage binding, limits, evaluator
+artifacts and initial placements, then records generation, acknowledged chunk
+progress, execution intent, admission cursor/folds and the published root. `run_plan_objects` holds one compact reference
+per owned file. `run_plan_shards` holds at most 128 rows of verified totals,
+placement aliases and membership hashes. There are no per-case plan rows, case
+payloads, or temporary per-chunk SQL plans in this preparation path.

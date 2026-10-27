@@ -184,7 +184,7 @@ impl Default for PlacementOptions {
 /// Bounded run-creation paging used by immediate creation and recovery.
 #[derive(Debug, Clone, Copy, Args)]
 pub(crate) struct RunCreationOptions {
-    /// Maximum cases written in one creation page
+    /// Maximum planned cases per chunk-metadata insert, with at least one whole chunk
     #[arg(long = "run-creation-case-batch-size", env = "VIGILO_RUN_CREATION_CASE_BATCH_SIZE", default_value_t = run_creation::DEFAULT_CASE_BATCH_SIZE as u64, value_parser = clap::value_parser!(u64).range(1..=1_000_000))]
     case_batch_size: u64,
 

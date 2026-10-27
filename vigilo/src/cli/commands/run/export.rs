@@ -9,6 +9,28 @@ use std::collections::BTreeSet;
 
 use super::*;
 
+/// Labels retained evidence without promoting an unfinished or superseded attempt.
+fn evidence_state(
+    execution: &Execution,
+    attempt: &ExecutionAttempt,
+    aggregate: Option<&ExecutionAggregate>,
+) -> &'static str {
+    if execution.current_attempt_id != Some(attempt.id) || attempt.status == "stale" {
+        "stale"
+    } else if matches!(
+        execution.status.as_str(),
+        "completed" | "failed" | "timed_out" | "cancelled"
+    ) && matches!(
+        attempt.status.as_str(),
+        "completed" | "failed_agent_call" | "failed_evaluation" | "timed_out"
+    ) && aggregate.is_some_and(|a| a.attempt_id == attempt.id)
+    {
+        "authoritative"
+    } else {
+        "partial"
+    }
+}
+
 pub(super) struct RunExportRows<'a> {
     pub(super) executions: &'a [Execution],
     pub(super) attempts: &'a [ExecutionAttempt],
@@ -70,6 +92,7 @@ pub(super) fn run_export_payload(
 
                     json!({
                         "attempt": attempt,
+                        "evidence_state": evidence_state(execution, attempt, aggregates_by_execution.get(&(execution.run_shard, execution.id)).copied()),
                         "evaluator_results": attempt_result_rows,
                         "evaluator_diagnostics": attempt_diagnostics,
                     })
@@ -84,6 +107,8 @@ pub(super) fn run_export_payload(
             json!({
                 "execution": execution,
                 "aggregate": aggregate,
+                "aggregate_authoritative": attempts_by_execution.get(&(execution.run_shard, execution.id))
+                    .is_some_and(|attempts| attempts.iter().any(|attempt| evidence_state(execution, attempt, aggregates_by_execution.get(&(execution.run_shard, execution.id)).copied()) == "authoritative")),
                 "attempts": exported_attempts,
             })
         })
@@ -112,6 +137,11 @@ pub(super) fn run_export_payload(
                 "execution_count": summary.execution_count,
                 "aggregate_count": summary.aggregate_count,
                 "missing_aggregate_count": summary.missing_aggregate_count,
+                "missing_execution_count": summary.missing_execution_count,
+                "unresolved_execution_count": summary.unresolved_execution_count,
+                "planned_chunk_count": summary.planned_chunk_count,
+                "settled_chunk_count": summary.settled_chunk_count,
+                "sealed_shard_count": summary.sealed_shard_count,
                 "status_counts": {
                     "passed": summary.passed_execution_count,
                     "failed": summary.failed_execution_count,
@@ -233,6 +263,11 @@ pub(super) async fn exec(
                     "error_execution_count": summary.error_execution_count,
                     "skipped_execution_count": summary.skipped_execution_count,
                     "missing_aggregate_count": summary.missing_aggregate_count,
+                "missing_execution_count": summary.missing_execution_count,
+                "unresolved_execution_count": summary.unresolved_execution_count,
+                "planned_chunk_count": summary.planned_chunk_count,
+                "settled_chunk_count": summary.settled_chunk_count,
+                "sealed_shard_count": summary.sealed_shard_count,
                     "evaluator_result_count": summary.evaluator_result_count,
                     "blocking_failure_count": summary.blocking_failure_count,
                     "average_score": summary.average_score,
@@ -338,6 +373,8 @@ pub(super) async fn exec(
                                 "database_alias": route.database_alias(),
                                 "execution_id": execution.id,
                                 "aggregate": aggregate,
+                                "authoritative": attempts_by_execution.get(&(execution.run_shard, execution.id))
+                                    .is_some_and(|attempts| attempts.iter().any(|attempt| evidence_state(execution, attempt, Some(aggregate)) == "authoritative")),
                             });
                             out.write_line(serde_json::to_string(&aggregate_line)?)?;
                         }
@@ -354,6 +391,7 @@ pub(super) async fn exec(
                                 "database_alias": route.database_alias(),
                                 "execution_id": execution.id,
                                 "attempt": attempt,
+                                "evidence_state": evidence_state(execution, attempt, aggregates_by_execution.get(&(execution.run_shard, execution.id)).copied()),
                             });
                             out.write_line(serde_json::to_string(&attempt_line)?)?;
 
@@ -370,6 +408,7 @@ pub(super) async fn exec(
                                     "execution_id": execution.id,
                                     "attempt_id": attempt.id,
                                     "evaluator_result": result,
+                                    "evidence_state": evidence_state(execution, attempt, aggregates_by_execution.get(&(execution.run_shard, execution.id)).copied()),
                                 });
                                 out.write_line(serde_json::to_string(&result_line)?)?;
                                 for diagnostic in

@@ -14,7 +14,7 @@ flowchart TD
     Running[Execution running]
     AttemptRunning[Attempt running]
     AgentAndEvaluators[Invoke agent and run evaluators]
-    TerminalGuard{Current attempt still authoritative?}
+    TerminalGuard{Chunk live and current attempt authoritative?}
     AggregateGuard{Aggregate available or failure transition?}
     AttemptCompleted[Attempt completed]
     ExecutionCompleted[Execution completed]
@@ -28,6 +28,8 @@ flowchart TD
     RetryDue{Retry window due and attempts remain?}
     TimedOut[Timed out]
     Awaiting[Awaiting evaluators]
+    Settle[Terminal chunk settlement under chunk lock]
+    Unresolved[Close unresolved execution without inventing an aggregate]
     Stale[Attempt stale]
     Reject[Reject stale transition]
 
@@ -53,6 +55,11 @@ flowchart TD
     AttemptRunning --> Cancel
     Cancel --> ExecutionCancelled
     Cancel --> AttemptCancelled
+
+    Running --> Settle
+    RetryScheduled --> Settle
+    Settle --> Stale
+    Settle --> Unresolved --> ExecutionFailed
 
     Running -. Reserved partial path .-> Awaiting
     Running -. Reserved timeout path .-> TimedOut

@@ -1,0 +1,206 @@
+---
+title: Dataset Ingestion
+sidebar_label: Dataset Ingestion
+sidebar_position: 3
+description: Bounded dataset uploads, durable progress, explicit recovery, fenced publication, and exact cleanup.
+---
+
+import Mermaid from '@theme/Mermaid';
+import ingestionFlow from './ingestion-flow.mmd';
+import ingestionState from './ingestion-state.mmd';
+import ingestionData from './ingestion-data.mmd';
+
+# Dataset Ingestion
+
+Dataset ingestion turns submitted cases into verified immutable files and a
+finalized catalog reference. The CLI owns preparation and upload work; PostgreSQL
+stores compact ownership, file references, and progress. Blob storage holds case
+bytes, source fields, indexes, and the dataset manifest.
+
+## Upload and Resume
+
+<Mermaid value={ingestionFlow} />
+
+```bash
+vigilo dataset upload --input-file dataset.jsonl --input-format jsonl \
+  --storage-config storage.toml --batch-cases 100 --batch-bytes 8388608
+vigilo dataset status <upload-id>
+vigilo dataset resume <upload-id> --input-file dataset.jsonl --input-format jsonl \
+  --storage-config storage.toml
+```
+
+Supply `--upload-id <uuid>` to choose an upload identity before starting. Otherwise
+the command creates one and includes it in failures after upload registration.
+If the process exits before registration, repeat
+`upload` with the same chosen ID; there is no registered upload to resume yet.
+Success returns `data.id` and `data.manifest`, the compact catalog identity and
+verified manifest reference. Status exposes `case_cursor`, the number of
+contiguous acknowledged cases, `batch_count`, the acknowledged batch count, and
+the total under `identity.case_count`. Lease and expiry timestamps show when work
+can be reclaimed; `cleanup_after` shows the quarantine deadline and `cleaned_at`
+records completed cleanup. File bytes never enter these progress rows.
+
+Case-file progress commits in bounded groups, so status advances at checkpoints.
+Each group contains at most 64 files, 64 MiB of encoded payload, and 256 KiB of
+queued metadata. Every exact file reference is registered together before any
+group upload. Files upload and verify individually, outside database transactions;
+one transaction acknowledges only a verified contiguous prefix. A failed group
+retains its exact ownership records for replay and cleanup.
+
+An operator or job scheduler runs `resume` with the original input after a failed
+invocation or process restart. Coordinators do not discover or retain local
+input paths. A live lease rejects competing resumptions; a terminated process's
+lease becomes reclaimable after five minutes. Ctrl-C cancels preparation and
+storage work and yields the lease when the process can still reach PostgreSQL.
+
+Resume checks the logical dataset identity, batching policy and recorded storage
+binding. Changed cases, source fields, ordering, or physical owner are rejected.
+Whitespace and object-key ordering do not change logical identity. Acknowledged
+batches avoid another upload; an uncertain completed object is verified at its
+same immutable key before acknowledgement. Finalization reads and validates all
+stored membership again, including acknowledged batches. Missing or corrupt
+files cannot produce a catalog reference.
+
+An upload without an explicit ID reuses a finalized catalog entry when its source
+hash, owner binding and admitted limits match. A finalized ID returns its existing
+reference. Concurrent independent upload IDs may produce separate immutable
+copies; publication requires no global dataset lock.
+
+## Input Formats
+
+`--input-format json` and `yaml` accept the [dataset document](/docs/configuration/dataset-format)
+with an 8 MiB document limit. YAML also bounds expanded values and nesting so
+aliases cannot evade admission. Large inputs use the versioned JSONL format:
+
+```jsonl
+{"schema":"vigilo/dataset-upload/v1","fields":{"dataset_id":"018f1111-1111-7111-8111-111111111111","dataset_version":"1.0.0"}}
+{"id":"018f1111-1111-7111-8111-111111111101","task_type":"generation","input":{"prompt":"Hello"}}
+{"id":"018f1111-1111-7111-8111-111111111102","task_type":"generation","input":{"prompt":"Goodbye"}}
+```
+
+The first line contains original top-level fields except `cases`. Every following
+line is one original case object, in submitted order. Every line ends with LF;
+blank lines, duplicate JSON keys, unknown upload schemas, and malformed suffixes
+fail validation. An equivalent JSON/YAML document and JSONL upload preserve the
+same source hash, case hashes, and dataset-version UUID. Dataset version labels
+are bounded to 1,024 UTF-8 bytes.
+
+Input is a regular file, bounded to 8 GiB. The header is bounded by the source-field
+limit; each case record must fit the admitted batch budget including its stored
+envelope and header. Preparation spools canonical records and detects duplicate
+UUIDs with 1 MiB sort runs and merges of at most 32 readers. One preparation/upload
+holds the process's 8 GiB validation-spool reservation. Remote transfer uses the
+separate shared [object I/O budgets](./formats/#resource-budgets). Batch case and
+byte caps both apply; they do not change execution chunk size.
+
+Checkpoint preparation retains small headers, references, and offsets into the
+canonical preparation spool. Upload reconstructs one file at a time from that
+spool and verifies its digest before remote I/O. It adds no group payload spool
+and does not retain 64 file payloads in memory. The file count and byte limits
+also bound the work that may need replay after a failed checkpoint.
+
+## Storage Owner Configuration
+
+`storage.toml` selects a provider and physical namespace separately from case or
+evaluator policy:
+
+```toml
+provider = "s3"
+alias = "case-storage"
+bucket = "vigilo-cases"
+prefix = "vigilo"
+region = "us-east-1"
+endpoint = "http://127.0.0.1:3900"
+allow_http = true
+path_style = true
+
+[credential_variables]
+access_key = "AWS_ACCESS_KEY_ID"
+secret_key = "AWS_SECRET_ACCESS_KEY"
+# session_token = "AWS_SESSION_TOKEN"
+```
+
+This S3 API configuration applies to Ceph RGW and S3-compatible services. AWS uses
+its regional endpoint when `endpoint` is omitted. Omitting `credential_variables`
+selects the AWS workload credential chain. HTTP needs an explicit opt-in for
+local development. The configuration file is bounded to 64 KiB; namespace prefixes
+are bounded to 256 UTF-8 bytes. Credentials and signed URLs are not persisted.
+
+An upload pins the alias's bucket, prefix, region, endpoint and addressing style
+through a binding hash. Changing these values cannot redirect a resumed upload.
+Credential-variable names and credential values can rotate without changing the
+physical binding. The connector returns the provider-neutral storage interface;
+ingestion does not depend on an SDK or provider-specific file type.
+
+An optional S3 `read_endpoint_variable` names an environment variable containing
+an alternate read URL, such as an internal container address. If unset, reads use
+`endpoint`. It affects only read connections; publication and the immutable
+physical binding use the canonical endpoint. The alternate route must serve the
+same bucket/prefix and exact immutable objects. It undergoes the same URL
+validation, and every object read still verifies its expected digest and size.
+This lets host creators and container workers share one owner configuration.
+
+## Authority and Publication
+
+<Mermaid value={ingestionState} />
+
+One upload lease owns a generation. Object registration and acknowledgement check
+that generation under a row lock, including a live-time check after acquiring the
+lock. A case-file group receives a 150-second monotonic admission deadline
+before registration and lease renewal. Each file retains its normal 120-second
+operation budget, capped by that admission deadline. After 30 seconds of work,
+the next completed file triggers a prefix
+checkpoint and the remaining files require fresh admission. A paused owner cannot mint a fresh transfer window
+without a live authority check. Single metadata objects retain their own bounded
+operation and fenced checkpoint.
+No database transaction spans remote storage work. Database operations have a
+30-second outer budget covering pool and lock waits as well as SQL execution.
+
+Read-only finalization renews authority at the first file and when 60 seconds
+have elapsed, instead of renewing per file. Each read has its own 120-second
+deadline within the five-minute lease. Every file is still verified, and final
+publication checks live authority again.
+
+Finalization verifies contiguous ranges, exact case counts, source/membership
+identity, unique case IDs, and bounded index coverage. Catalog insertion and the
+`finalized` transition commit atomically under current authority. Run identifiers,
+profile policy and execution results are outside dataset publication.
+
+The diagram’s `cleanup` and `cleaned` nodes describe maintenance progress. The
+persisted upload status remains `aborted` or `expired`; `cleaned_at` records
+completion.
+
+## Expiry and Cleanup
+
+```bash
+vigilo dataset abort <upload-id>
+vigilo dataset expire
+vigilo dataset cleanup <upload-id> --storage-config storage.toml --limit 100
+```
+
+A scheduler invokes `expire` and repeats `cleanup` for eligible upload IDs.
+`expire` returns at most 64 upload IDs per invocation for cleanup scheduling. Active ingestion renews its
+seven-day inactivity expiry. `abort` and expiry revoke the current generation;
+finalized datasets cannot be aborted or claimed for upload cleanup.
+
+Cleanup waits until the former lease window plus the 120-second object-operation
+window has elapsed. This quarantine protects against transfers admitted before
+revocation. Each invocation deletes at most `--limit` data/object records
+(1–256), plus a bounded connection-probe reconciliation page. Delete failures
+retain their exact ownership records for retry. Missing keys are safe to delete
+again. `cleanup_complete` is true only after every recorded key is reconciled.
+SQL tombstones remain separate from blob retention policy.
+
+Connection capability probes are recorded before their first PUT. Each connection
+reconciles at most 64 older probes. Cleanup targets only recorded keys, never a
+bucket or prefix listing. Shared finalized content is never upload-cleanup work.
+
+## Control Data
+
+<Mermaid value={ingestionData} />
+
+`dataset_uploads` contains identity, admitted limits, progress, lease and expiry.
+`dataset_upload_objects` contains one bounded reference per owned file and its
+acknowledgement/cleanup state. `dataset_catalog` exposes only finalized roots.
+These records scale with files rather than individual case payloads. Cases and
+case-ID uniqueness data are not inserted into the control database during upload.

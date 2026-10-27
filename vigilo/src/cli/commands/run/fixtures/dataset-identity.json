@@ -1,0 +1,58 @@
+{
+  "dataset_id": "018f1111-1111-7111-8111-111111111111",
+  "dataset_version": "release-α",
+  "cases": [
+    {
+      "id": "018f1111-1111-7111-8111-111111111101",
+      "task_type": "classification",
+      "case_group": "quality",
+      "input": {
+        "z": [
+          3,
+          {
+            "z": false,
+            "a": "café 🌍"
+          }
+        ],
+        "a": {
+          "number": 1.5,
+          "nil": null
+        }
+      },
+      "expected": {
+        "z": true,
+        "a": "ok"
+      },
+      "context": {
+        "z": 2,
+        "a": 1
+      },
+      "tags": [
+        "zeta",
+        "alpha",
+        "alpha"
+      ],
+      "metadata": {
+        "z": {
+          "z": 0,
+          "a": null
+        },
+        "a": "trace"
+      }
+    },
+    {
+      "id": "018f1111-1111-7111-8111-111111111102",
+      "task_type": "generation",
+      "input": {
+        "prompt": "line\nbreak"
+      }
+    },
+    {
+      "id": "018f1111-1111-7111-8111-111111111103",
+      "task_type": "generation",
+      "input": {
+        "prompt": "line\nbreak"
+      }
+    }
+  ]
+}

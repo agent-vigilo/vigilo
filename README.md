@@ -10,15 +10,15 @@
 
 # Agent Vigilo
 
-**Distributed AI evaluation infrastructure and deployment gating experiments for generative AI systems.**
+**Distributed AI evaluation infrastructure and deployment gating for generative AI systems.**
 
-Agent Vigilo explores what LLM and agent evaluation infrastructure can look like beyond ad hoc scripts: versioned WASM evaluators, durable evaluation runs, worker/coordinator execution, normalized results, and pass/fail gates that can sit in CI or release workflows.
+Agent Vigilo provides versioned WASM evaluators, durable evaluation runs, worker/coordinator execution, normalized results, and pass/fail gates that can sit in CI or release workflows.
 
 It focuses on the parts of AI evaluation that become hard as systems grow: idempotent distributed work, durable event delivery, evaluator isolation, retry-safe persistence, and auditable results.
 
 ## Why It Matters
 
-- **Run evaluations like infrastructure**: PostgreSQL-backed state, RabbitMQ work distribution, Rust workers, and deterministic state guards.
+- **Run evaluations like infrastructure**: Immutable datasets and run plans in object storage, PostgreSQL-backed state, RabbitMQ work distribution, and Rust workers.
 - **Ship versioned evaluators**: publish WASI Preview 2 WebAssembly evaluators with strict WIT contracts.
 - **Protect the runtime**: Wasmtime fuel, memory, timeout, log, and concurrency limits isolate evaluator execution.
 - **Avoid lost events**: durable outbox ledger plus hot delivery queue, RabbitMQ publisher confirms, and idempotency keys.
@@ -32,7 +32,7 @@ Run scorecard gates enforce dimension or evaluator thresholds across the full ru
 
 See [Measurement Normalization](web/docs/configuration/measurement-normalization.mdx) for copyable binary, numeric, curve, threshold, and ordinal policy examples.
 
-A run can fail operationally because work did not complete, or complete with a failed gate because evaluation policy failed.
+A run completes after exact chunk settlement, including when retained results are partial. Missing coverage or failed evaluation policy fails the release gate. Immutable admission conflicts can mark the run failed before dispatch.
 
 ## Start Here
 
@@ -48,7 +48,7 @@ A run can fail operationally because work did not complete, or complete with a f
 
 ## Core Stack
 
-Rust, Tokio, PostgreSQL, SQLx, RabbitMQ, Wasmtime, WASI Preview 2, WIT, Docusaurus.
+Rust, Tokio, PostgreSQL, SQLx, RabbitMQ, S3-compatible object storage, Wasmtime, WASI Preview 2, WIT, Docusaurus.
 
 ## Development Checks
 
@@ -66,8 +66,11 @@ git config core.hooksPath scripts/hooks
 | Unit and contract | Service-free Rust behavior across the workspace | None | `Unit and Contract Tests` |
 | Database integration | SQL, migrations, transactions, advisory locks, leases, and concurrency | One PostgreSQL server; `DATABASE_URL` must use a role that can create test databases | `Database Integration Tests` |
 | Migration | Greenfield schema application through the CLI setup path | One fresh PostgreSQL database | `Migration Tests` |
-| End-to-end | Routing and the real distributed runtime across process and protocol boundaries | Two PostgreSQL servers, RabbitMQ, evaluator Wasm, and the test HTTP agent | `End-to-End Tests` |
-| Performance services | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | Opt-in local tier |
+| End-to-end | Routing and the real distributed runtime across process and protocol boundaries | Two PostgreSQL servers, RabbitMQ, S3-compatible object storage, evaluator Wasm, and the test HTTP agent | `End-to-End Tests` |
+| Blob storage integration | Signed object I/O, transport faults, upload/run-plan recovery, and exact cleanup | PostgreSQL and disposable Ceph Object Gateway | `Blob Storage Integration Tests` |
+| Performance service integration | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | `Performance Service Integration Tests` |
+| Evaluator compatibility | Fixture-backed evaluator ABI compatibility | Built Wasm fixtures; no live services | `Evaluator Compatibility Tests` |
+| Documentation | Website typecheck and production build | Node.js and installed website dependencies | `Documentation Checks` |
 
 Run the service-free tier with:
 
@@ -93,6 +96,25 @@ It is feature-gated and therefore does not expand normal workspace, database,
 migration, or end-to-end test commands. Build, workload, artifact, and
 isolation details are in [`performance/README.md`](performance/README.md).
 
+The signed object-storage tier is also explicitly opt-in. Configure the endpoint,
+bucket, and credentials using the [development storage instructions](infra/dev/README.md#local-object-storage), then run:
+
+```bash
+cargo test -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
+```
+
+This tier checks Ceph persistence and transport faults. Dataset ingestion also
+uses a disposable PostgreSQL database initialized through `setup`:
+
+```bash
+cargo test -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
+```
+
+The ingestion tier kills and resumes real upload and run-plan CLI processes,
+checks frozen inputs and finalized reuse, verifies the dispatch boundary, and
+checks exact cleanup. Both storage tiers contribute to the same aggregate
+coverage report and 80% gate.
+
 After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:
 
 ```bash
@@ -105,14 +127,15 @@ integration tier so the command remains complete.
 The end-to-end tier runs `multi_database_routing` and `multi_database_e2e`
 separately because they require the complete distributed dependency set. The
 workflow builds the evaluator Wasm and supplies the required database,
-messaging, and opt-in environment variables.
+messaging, storage-owner configuration (`VIGILO_STORAGE_CONFIG`), and opt-in environment variables.
 
-The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, migration, end-to-end, evaluator Wasm, and web production build checks run as separate required CI jobs.
+The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, blob storage integration, performance service integration, migration, end-to-end, evaluator compatibility, and documentation checks run as separate required CI jobs.
 
-The unit/performance, PostgreSQL, and end-to-end jobs collect coverage in
-parallel while running their existing test tiers. The Linux unit pass also runs
-the performance contract check and Docker-backed service ownership test. A
-final job merges the three reports, requires at least 80% aggregate line
+The unit and contract, performance service integration, database integration,
+blob storage integration, and end-to-end jobs collect coverage in parallel. The
+Linux unit pass includes the service-free performance contract check; Docker-backed
+service ownership tests run in their own integration job. A final job merges
+the five reports, requires at least 80% aggregate line
 coverage, and uploads that report under the `rust-all` Codecov flag. Project
 coverage and the repository badge therefore reflect code reached through unit,
 integration, and distributed runtime tests.
@@ -123,7 +146,8 @@ SQLx creates each isolated PostgreSQL test database with `CREATE DATABASE`,
 which clones PostgreSQL's built-in `template1` database. The PostgreSQL coverage
 job migrates `template1` once, so each test validates the recorded migrations
 instead of rebuilding every partition and index. The separate migration job
-still applies the complete migration set to an empty database.
+applies the complete migration set to an empty database. The
+[migration layout](migrations/README.md) documents dependency order and file ownership.
 
 Accumulate the same reports locally after starting the services and setting the
 environment variables required by each tier:
@@ -133,6 +157,8 @@ cargo llvm-cov clean --workspace
 cargo llvm-cov --no-report --workspace --locked --lib --bins
 cargo llvm-cov run --no-report -p xtask --locked -- perf check
 cargo llvm-cov --no-report -p xtask --locked --features performance-services --test performance_services -- --nocapture
+cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
+cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_routing -- --nocapture
 VIGILO_E2E_MULTI_DATABASE=1 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e -- --nocapture

@@ -2,9 +2,8 @@
 
 Basic English-only lexicon sentiment evaluator for Agent Vigilo.
 
-Template reference for cloning into a new single-evaluator crate: `evaluators/sentiment-basic-en/README.md`
-
-General guide: `web/docs/guides/creating-evaluators.mdx`
+Use this crate as a single-evaluator template. See
+[Creating Evaluators](https://agentvigilo.com/docs/guides/creating-evaluators).
 
 Shared evaluator guidance: `evaluators/AGENTS.md`
 

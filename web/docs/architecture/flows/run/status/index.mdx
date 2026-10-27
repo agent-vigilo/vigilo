@@ -15,13 +15,13 @@ import Mermaid from '@theme/Mermaid';
 import executionFlowDiagram from './execution-flow.mmd';
 import decisionFlowDiagram from './decision-flow.mmd';
 
-# Run Status Command
+# Status
 
 How `vigilo run status` loads the authoritative control row and returns the same
 status payload shape used by run watches. A `creating` run, or one that failed
 during creation, reports control-owned placement progress without contacting
 unseeded execution databases; active and completed states read routed shard
-summaries for live execution progress.
+summaries for live execution progress, using one query per execution database.
 
 A terminal run is not necessarily a passing run. Check `status` for lifecycle and `gate_status` for the evaluation policy outcome; CI should treat `completed` with `gate_status: pass` as success.
 
@@ -32,6 +32,8 @@ A terminal run is not necessarily a passing run. Check `status` for lifecycle an
 ## Decision Flow
 
 <Mermaid value={decisionFlowDiagram} />
+
+Progress reports include planned and settled chunk counts, sealed shard count, and missing/unresolved execution counts. Progress may lag committed receipts; final scorecards require every planned shard to be sealed. Missing counts describe settled work only. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
 ## Related
 

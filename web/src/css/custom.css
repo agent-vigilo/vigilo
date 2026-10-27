@@ -15,6 +15,7 @@
   --ifm-color-primary-lightest: #a8c8ff;
   --ifm-code-font-size: 95%;
   --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+  --diagram-background: #f6f8fa;
   --diagram-user-fill: #bbf7d0;
   --diagram-user-stroke: #16a34a;
   --diagram-user-text: #14532d;
@@ -40,6 +41,7 @@
 
 /* For readability concerns, you should choose a lighter palette in dark mode. */
 [data-theme='dark'] {
+  --diagram-background: var(--ifm-background-surface-color);
   --ifm-color-primary: #78aaff;
   --ifm-color-primary-dark: #5f9bff;
   --ifm-color-primary-darker: #2f7dff;
@@ -73,12 +75,12 @@
 
 /* Edge label backgrounds match the surrounding diagram viewer surface. */
 .docusaurus-mermaid-container :is(div.labelBkg, .edgeLabel .labelBkg) {
-  background-color: var(--ifm-background-surface-color) !important;
+  background-color: var(--diagram-background) !important;
 }
 
 .docusaurus-mermaid-container :is(rect.labelBkg, .edgeLabel rect) {
-  fill: var(--ifm-background-surface-color) !important;
-  stroke: var(--ifm-background-surface-color) !important;
+  fill: var(--diagram-background) !important;
+  stroke: var(--diagram-background) !important;
 }
 
 .docusaurus-mermaid-container {
@@ -165,7 +167,7 @@
   fill: color-mix(
     in srgb,
     var(--diagram-system-fill) 40%,
-    var(--ifm-background-surface-color)
+    var(--diagram-background)
   ) !important;
   stroke: var(--diagram-system-stroke) !important;
   stroke-width: 2 !important;

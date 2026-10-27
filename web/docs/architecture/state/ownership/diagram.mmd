@@ -13,21 +13,23 @@ flowchart TD
     DB[(DB guards)]
     Queue[Message broker]
 
-    RunCreate[Persist creating run and seed plan]
+    RunCreate[Publish immutable plan and record creating checkpoints]
     RunCancel[Cancel run and open work]
     RunRead[Read status, watch, results, export]
 
-    RecoverCreation[Resume expired run creation]
+    RecoverCreation[Resume requested admission from ready plans]
     Dispatch[Dispatch chunk windows]
     RecoverLeases[Recover expired chunk leases]
-    Finalize[Finalize terminal runs]
+    Aggregate[Consume receipts and seal exact shard membership]
+    GuardSummary[Nonblocking page claim and atomic consumption checkpoint]
+    Finalize[Finalize exact sealed shard set]
     Publish[Publish outbox records as broker messages]
 
     ChunkClaim[Claim and release chunks]
     Execute[Allocate attempts, schedule retries, and persist results]
-    CompleteChunk[Complete chunks]
+    CompleteChunk[Settle chunk and write immutable receipt]
 
-    GuardCreation[Creation ledger and coordinator lease]
+    GuardCreation[Plan generation and live creation lease]
     GuardRun[Run status and lifecycle lease]
     GuardDispatch[Run-shard dispatch cursor]
     GuardAdmission[Local shard admission, write epoch, and mover fence]
@@ -42,6 +44,10 @@ flowchart TD
     Coordinator --> RecoverCreation
     Coordinator --> Dispatch
     Coordinator --> RecoverLeases
+    Coordinator --> Aggregate
+    Aggregate --> GuardSummary
+    Aggregate --> GuardAdmission
+    GuardSummary --> DB
     Coordinator --> Finalize
     Coordinator --> Publish
 
@@ -55,6 +61,7 @@ flowchart TD
     Dispatch --> GuardDispatch
     Dispatch --> GuardRun
     RecoverLeases --> GuardChunk
+    RecoverLeases --> GuardAdmission
     Finalize --> GuardRun
     Publish --> GuardOutbox
     ChunkClaim --> GuardChunk
@@ -64,6 +71,7 @@ flowchart TD
     Execute --> GuardRun
     Execute --> GuardAdmission
     Execute --> GuardAttempt
+    Execute --> GuardChunk
 
     GuardCreation --> DB
     GuardRun --> DB

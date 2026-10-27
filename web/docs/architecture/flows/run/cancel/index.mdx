@@ -15,7 +15,7 @@ import Mermaid from '@theme/Mermaid';
 import executionFlowDiagram from './execution-flow.mmd';
 import decisionFlowDiagram from './decision-flow.mmd';
 
-# Run Cancel Command
+# Cancel
 
 How `vigilo run cancel` marks the control run cancelled, fans out execution-local cleanup, and returns the cancellation outcome.
 
@@ -26,6 +26,10 @@ How `vigilo run cancel` marks the control run cancelled, fans out execution-loca
 ## Decision Flow
 
 <Mermaid value={decisionFlowDiagram} />
+
+Each placement commits terminal chunk receipts with cancellation, preserving committed results and retiring unfinished authority. Undispatched shards obtain snapshots from their frozen local run context. Coordinator pages subsequently publish progress and seals; the control lifecycle remains `cancelled`. A run in blob-plan preparation can also be cancelled while `creating`.
+The control transition revokes its publication authority; no execution rows are
+fabricated and the shared finalized dataset is retained.
 
 ## Related
 

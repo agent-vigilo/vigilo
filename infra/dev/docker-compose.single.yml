@@ -4,6 +4,10 @@ x-vigilo-env: &vigilo-env
   DATABASE_URL: ${VIGILO_CONTAINER_DATABASE_URL:-postgresql://postgres:password@postgres:5432/agent_vigilo}
   DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-5}
   VIGILO_CONTROL_DATABASE_ALIAS: ${VIGILO_CONTROL_DATABASE_ALIAS:-primary}
+  VIGILO_STORAGE_CONFIG: /workspace/infra/dev/storage.toml
+  VIGILO_S3_READ_ENDPOINT: http://ceph:3900
+  DEV_S3_ACCESS_KEY_ID: ${DEV_S3_ACCESS_KEY_ID:?Set DEV_S3_ACCESS_KEY_ID in the selected env file}
+  DEV_S3_SECRET_ACCESS_KEY: ${DEV_S3_SECRET_ACCESS_KEY:?Set DEV_S3_SECRET_ACCESS_KEY in the selected env file}
 
 x-vigilo-rust-service: &vigilo-rust-service
   image: rust:latest
@@ -17,6 +21,33 @@ x-vigilo-rust-service: &vigilo-rust-service
     - agent_vigilo_network
 
 services:
+  ceph:
+    build:
+      context: ./ceph
+    entrypoint: ["/bin/bash", "/opt/vigilo-ceph/start.sh"]
+    init: true
+    hostname: dev-ceph
+    mem_limit: 4g
+    environment:
+      DEV_S3_ACCESS_KEY_ID: ${DEV_S3_ACCESS_KEY_ID:?Set DEV_S3_ACCESS_KEY_ID in the selected env file}
+      DEV_S3_SECRET_ACCESS_KEY: ${DEV_S3_SECRET_ACCESS_KEY:?Set DEV_S3_SECRET_ACCESS_KEY in the selected env file}
+      DEV_S3_BUCKET: ${DEV_S3_BUCKET:?Set DEV_S3_BUCKET in the selected env file}
+    ports:
+      - "127.0.0.1:${DEV_S3_PORT:-3900}:3900"
+    volumes:
+      - ./ceph:/opt/vigilo-ceph:ro
+      - agent_vigilo_ceph_data:/var/lib/ceph/dev
+    networks:
+      - agent_vigilo_network
+    healthcheck:
+      test: ["CMD", "python3.12", "/opt/vigilo-ceph/bucket.py", "check"]
+      interval: 5s
+      timeout: 10s
+      retries: 36
+      start_period: 30s
+    stop_grace_period: 45s
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -98,6 +129,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      ceph:
+        condition: service_healthy
       setup:
         condition: service_completed_successfully
     restart: unless-stopped
@@ -114,6 +147,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      ceph:
+        condition: service_healthy
       agent:
         condition: service_started
       setup:
@@ -123,6 +158,7 @@ services:
       replicas: ${WORKER_REPLICAS:-1}
 
 volumes:
+  agent_vigilo_ceph_data:
   agent_vigilo_db_data:
   agent_vigilo_mq_data:
   agent_vigilo_cargo_registry:

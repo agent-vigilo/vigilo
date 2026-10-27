@@ -1,0 +1,52 @@
+sequenceDiagram
+    actor Caller
+    participant Creator as Run creator
+    participant Control as Control PostgreSQL
+    participant Objects as Storage adapter
+    participant Local as Execution PostgreSQL
+    Caller->>Creator: Profile and dataset source or finalized upload ID
+    opt Inline or file dataset
+        Creator->>Objects: Bounded resumable ingestion and verified catalog publication
+    end
+    Creator->>Control: Freeze creating run, evaluator artifacts and placements
+    loop Verified dataset batches
+        Creator->>Objects: Read and verify index and complete case file
+        Creator->>Creator: Validate cases, fold chunk identity and gate counts
+        opt Bounded chunk-file group ready
+            Creator->>Control: Register every exact key under creation lease
+            Creator->>Objects: Create or reconcile files, verify complete bytes
+            Creator->>Control: Atomically acknowledge verified contiguous prefix
+        end
+    end
+    loop Remaining chunks, index levels, gates, configuration and manifest
+        Creator->>Control: Register bounded file group before remote writes
+        Creator->>Objects: Create and verify files in dependency order
+        Creator->>Control: Atomically acknowledge verified group or prefix
+    end
+    Creator->>Control: Publish verified root and compact shard metadata
+    alt Preparation only
+        Creator-->>Caller: Creating, plan ready, execution held
+    else Execution requested
+        Creator->>Control: Claim creation authority for admission
+        Creator->>Objects: Recovery reads roots and gate counts under its lease
+        Note over Creator,Objects: Foreground creation reuses already verified roots
+        loop Bounded chunk pages
+            Creator->>Objects: Read verified ordered chunk page
+            loop Bounded placement operations
+                Creator->>Control: Resolve current placement serviceability
+                Creator->>Local: Lock shard fences in order, batch snapshots and chunks
+                Local-->>Creator: Commit exact replayable metadata
+            end
+            Creator->>Control: Acknowledge contiguous admission progress
+        end
+        loop Ordered verification pages per execution database
+            Creator->>Control: Resolve current placement serviceability
+            Creator->>Local: Read bounded chunk page and admission state
+            Creator->>Creator: Fold and compare each shard identity independently
+        end
+        Creator->>Control: Fenced activation, publish routes and dispatch cursors
+        Creator-->>Caller: Pending, dispatchable
+    end
+    Note over Creator,Control: Admission renews by elapsed time<br/>Checkpoints and activation check live authority
+    Note over Creator,Control: Coordinators resume requested admission after lease release or expiry
+    Note over Creator,Control: Returned failures release ownership<br/>Process death uses lease expiry
