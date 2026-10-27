@@ -6,6 +6,7 @@
     "docusaurus": "docusaurus",
     "start": "docusaurus start",
     "build": "docusaurus build && node scripts/validate-sitemap.mjs",
+    "brand:generate": "node scripts/generate-brand-assets.mjs",
     "validate:sitemap": "node scripts/validate-sitemap.mjs",
     "swizzle": "docusaurus swizzle",
     "deploy": "docusaurus deploy",

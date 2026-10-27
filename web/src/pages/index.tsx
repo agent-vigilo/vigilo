@@ -4,12 +4,13 @@ import Head from '@docusaurus/Head';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import HomepageFeatures from '@site/src/components/HomepageFeatures';
+import HeroNetwork from '@site/src/components/HeroNetwork';
 import Heading from '@theme/Heading';
 
 import styles from './index.module.css';
 
 const HOME_DESCRIPTION =
-  'Agent Vigilo is distributed evaluation infrastructure for generative AI systems, versioned WASM evaluators, durable runs, and deployment gates.';
+  'Test your AI agents against your own cases and criteria. Review failures and use evaluation results to gate releases with Agent Vigilo.';
 
 const HOME_KEYWORDS = [
   'Agent Vigilo',
@@ -29,30 +30,27 @@ function HomepageHeader() {
 
   return (
     <header className={styles.heroBanner}>
+      <HeroNetwork />
       <div className={styles.heroShell}>
-        <img className={styles.heroMark} src="/img/logo.svg" alt="" aria-hidden="true" />
-        <p className={styles.heroEyebrow}>Distributed evaluation infrastructure</p>
+        <img className={styles.heroMark} src="/img/logo-dark.svg" width="188" height="112" alt="" aria-hidden="true" />
+        <p className={styles.heroEyebrow}>AI evaluation and release gates</p>
         <Heading as="h1" className={styles.heroTitle}>
           {siteConfig.title}
         </Heading>
-        <p className={styles.heroSubtitle}>{siteConfig.tagline}</p>
+        <p className={styles.heroSubtitle}>Know what passes before you deploy.</p>
         <p className={styles.heroText}>
-          Publish versioned WASM evaluators, turn measurements and profile policy into aggregate scores,
-          and gate releases on explicit thresholds and blocking failures.
+          Test your agents against your own cases and criteria.
+          Review failures and use the results in your release pipeline.
         </p>
         <div className={styles.buttons}>
-          <Link className={styles.primaryButton} to="/docs/guides/getting-started">
-            Get Started
+          <Link className="button button--primary" to="/docs/guides/getting-started">
+            Get started
           </Link>
-          <Link className={styles.secondaryButton} to="/docs/architecture/flows/">
-            View Flows
+          <Link className={styles.secondaryButton} to="/docs/architecture/structure/">
+            How it works
           </Link>
         </div>
-        <div className={styles.signalBar} aria-label="Agent Vigilo capabilities">
-          <span>WASM evaluators</span>
-          <span>durable runs</span>
-          <span>CI gates</span>
-        </div>
+        <p className={styles.projectDetails}>Open source. Self-hosted.</p>
       </div>
     </header>
   );

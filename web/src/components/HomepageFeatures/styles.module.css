@@ -16,7 +16,7 @@
 }
 
 .sectionHeader span {
-  color: #0b5fff;
+  color: var(--ifm-color-emphasis-700);
   display: block;
   font-size: 0.78rem;
   font-weight: 900;
@@ -46,9 +46,9 @@
 
 .featureLabel {
   align-items: center;
-  background: #031026;
+  background: #242424;
   border-radius: 6px;
-  color: #78aaff;
+  color: #f2f0e9;
   display: inline-flex;
   font-size: 0.78rem;
   font-weight: 900;
@@ -59,28 +59,36 @@
 }
 
 .featureTitle {
-  font-size: 1.25rem;
-  letter-spacing: 0;
-  margin: 0 0 0.65rem;
+  color: #1c1e21;
+  font-size: 1.4rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  margin: 0 0 0.9rem;
 }
 
 .featureText {
-  color: var(--ifm-color-emphasis-700);
-  line-height: 1.6;
+  color: #555d68;
+  font-size: 0.95rem;
+  line-height: 1.7;
   margin: 0;
 }
 
 [data-theme='dark'] .features {
-  background: #061225;
+  background: #1b1b1d;
 }
 
 [data-theme='dark'] .feature {
-  background: #08172e;
-  border-color: #123468;
+  background: #242424;
+  border-color: #3c3c3e;
+}
+
+[data-theme='dark'] .featureTitle {
+  color: #f4f4f5;
 }
 
 [data-theme='dark'] .featureText {
-  color: #bfd6ff;
+  color: #b9bdc6;
 }
 
 @media screen and (max-width: 996px) {

@@ -5,7 +5,68 @@
  */
 
 /* You can override the default Infima variables here. */
+.navbar__logo {
+  height: 20px;
+}
+
+.button.button--primary {
+  align-items: center;
+  background: #f2f0e9;
+  border: 1px solid #b7b5af;
+  border-radius: 6px;
+  color: #171717;
+  display: inline-flex;
+  font-size: 1rem;
+  font-weight: 800;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0.8rem 1.2rem;
+  text-decoration: none;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.button.button--primary:hover,
+.button.button--primary:focus-visible {
+  background: var(--vigilo-interactive-on-dark);
+  border-color: var(--vigilo-interactive-on-dark);
+  color: #171717;
+  text-decoration: none;
+}
+
+.button.button--primary:focus-visible {
+  outline: 2px solid var(--vigilo-interactive-on-dark);
+  outline-offset: 3px;
+}
+
+/* Card widths shrink beside the docs sidebar, so long labels must wrap. */
+.theme-doc-markdown .card__footer .button--block {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.footer--dark {
+  --ifm-footer-background-color: #171717;
+  --ifm-footer-color: #d6d6d6;
+  --ifm-footer-title-color: #f2f0e9;
+  --ifm-footer-link-color: #e0e0e0;
+  --ifm-footer-link-hover-color: var(--vigilo-interactive-on-dark);
+  border-top: 1px solid #343434;
+}
+
+.footer__link-item:hover,
+.footer__link-item:focus-visible {
+  text-decoration: none;
+}
+
+.footer__link-item:focus-visible {
+  color: var(--ifm-footer-link-hover-color);
+  outline: 2px solid var(--ifm-footer-link-hover-color);
+  outline-offset: 3px;
+}
+
 :root {
+  /* The hero and footer keep dark surfaces in both color modes. */
+  --vigilo-interactive-on-dark: #78aaff;
   --ifm-color-primary: #0b5fff;
   --ifm-color-primary-dark: #0052d6;
   --ifm-color-primary-darker: #0047ba;
@@ -42,7 +103,7 @@
 /* For readability concerns, you should choose a lighter palette in dark mode. */
 [data-theme='dark'] {
   --diagram-background: var(--ifm-background-surface-color);
-  --ifm-color-primary: #78aaff;
+  --ifm-color-primary: var(--vigilo-interactive-on-dark);
   --ifm-color-primary-dark: #5f9bff;
   --ifm-color-primary-darker: #2f7dff;
   --ifm-color-primary-darkest: #0b5fff;
