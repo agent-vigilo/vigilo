@@ -5,7 +5,10 @@
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <p align="center">
-  <img src="web/static/img/logo.svg" alt="Agent Vigilo logo" width="120" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="web/static/img/logo-dark.svg" />
+    <img src="web/static/img/logo.svg" alt="Agent Vigilo logo" width="160" height="95" />
+  </picture>
 </p>
 
 # Agent Vigilo

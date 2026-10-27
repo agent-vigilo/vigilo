@@ -8,6 +8,16 @@ const config: Config = {
   title: 'Agent Vigilo',
   tagline: 'Distributed Evaluation and Deployment Gating for Generative AI Systems',
   favicon: 'img/favicon.svg',
+  headTags: [
+    {
+      tagName: 'link',
+      attributes: {rel: 'alternate icon', type: 'image/x-icon', href: '/img/favicon.ico'},
+    },
+    {
+      tagName: 'link',
+      attributes: {rel: 'apple-touch-icon', sizes: '180x180', href: '/img/apple-touch-icon.png'},
+    },
+  ],
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
@@ -98,8 +108,7 @@ const config: Config = {
   ],
 
   themeConfig: {
-    // Replace with your project's social card
-    image: 'img/docusaurus-social-card.jpg',
+    image: 'img/social-card.png',
     metadata: [
       {
         name: 'keywords',
@@ -124,6 +133,7 @@ const config: Config = {
       logo: {
         alt: 'Agent Vigilo',
         src: 'img/logo.svg',
+        srcDark: 'img/logo-dark.svg',
       },
       items: [
         {

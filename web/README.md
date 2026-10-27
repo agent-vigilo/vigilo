@@ -19,6 +19,30 @@ labels, and visible headings consistent. Document behavior in present tense and
 update paired diagrams when flows or ownership change. Repository READMEs link
 to the canonical guides instead of duplicating them.
 
+## Brand Assets
+
+Brand assets live in `static/img/`. `logo.svg` owns the mark geometry;
+`logo-dark.svg` supplies the ivory variant for dark surfaces. The README and
+navigation select the appropriate variant, while the homepage uses the ivory
+mark on charcoal. Favicons and the social sharing card use the same geometry.
+
+After editing the source mark, regenerate the derived assets with ImageMagick 7
+(`magick`) and the Liberation Sans font installed:
+
+```bash
+npm --prefix web run brand:generate
+```
+
+Generated SVG, PNG, and ICO assets are checked in; the website build needs no
+image tools or system fonts.
+
+The homepage's decorative network lives in `src/components/HeroNetwork/`.
+Eight translucent planes frame a clear area for the headline and calls to action.
+A brief left-to-right highlight repeats every 14 seconds to suggest inference;
+this is an abstract visual, not a model simulation. CSS scales the composition to
+the viewport, with a gentler angle on mobile. Animation pauses offscreen and in
+hidden tabs; reduced-motion preferences leave the static lighting and planes.
+
 ## Verification
 
 ```bash

@@ -11,31 +11,30 @@ type FeatureItem = {
 const FeatureList: FeatureItem[] = [
   {
     label: '01',
-    title: 'Publish evaluator artifacts',
+    title: 'Set your criteria',
     description: (
       <>
-        Version WASM evaluators once, reference them from profiles, and keep
-        scoring logic stable across local runs, CI, and production gates.
+        Choose what to test, how to score it, and what counts as a pass.
       </>
     ),
   },
   {
     label: '02',
-    title: 'Run distributed evaluations',
+    title: 'Run your evaluations',
     description: (
       <>
-        Coordinators dispatch durable run chunks while workers call the target
-        agent, execute evaluators, and persist normalized results.
+        Evaluate large datasets, track progress, and inspect or export
+        individual results.
       </>
     ),
   },
   {
     label: '03',
-    title: 'Gate releases with evidence',
+    title: 'Check before release',
     description: (
       <>
-        Watch pass/fail outcomes, inspect summaries, and export execution
-        evidence for release decisions and debugging.
+        Use the final pass or fail result in CI. Incomplete evaluations
+        keep the release gate closed.
       </>
     ),
   },
