@@ -267,6 +267,7 @@ impl Fixture {
             &draft,
             &execution,
             &assignments,
+            false,
         )
         .await
         .unwrap();
@@ -371,6 +372,7 @@ async fn interrupted_chunk_and_manifest_writes_resume_exactly_without_control_ca
         &f.draft,
         &f.plan.execution_plan,
         &f.plan.assignments,
+        false,
     )
     .await
     .unwrap();
@@ -465,7 +467,8 @@ async fn competing_expired_cancelled_and_changed_replays_fail_closed(db: PgPool)
             &f.plan.limits,
             &draft,
             &f.plan.execution_plan,
-            &f.plan.assignments
+            &f.plan.assignments,
+            false,
         )
         .await
         .is_err()
@@ -481,7 +484,8 @@ async fn competing_expired_cancelled_and_changed_replays_fail_closed(db: PgPool)
             &f.plan.limits,
             &wrong_dataset,
             &f.plan.execution_plan,
-            &f.plan.assignments
+            &f.plan.assignments,
+            false,
         )
         .await
         .is_err()
@@ -497,7 +501,8 @@ async fn competing_expired_cancelled_and_changed_replays_fail_closed(db: PgPool)
             &f.plan.limits,
             &f.draft,
             &f.plan.execution_plan,
-            &assignments
+            &assignments,
+            false,
         )
         .await
         .is_err()
@@ -513,7 +518,8 @@ async fn competing_expired_cancelled_and_changed_replays_fail_closed(db: PgPool)
             &limits,
             &f.draft,
             &f.plan.execution_plan,
-            &f.plan.assignments
+            &f.plan.assignments,
+            false,
         )
         .await
         .is_err()
@@ -697,6 +703,7 @@ async fn reused_dataset_identity_does_not_require_a_row_write_lock(db: PgPool) {
             &draft,
             &f.plan.execution_plan,
             &f.plan.assignments,
+            false,
         ),
     )
     .await;
@@ -1028,3 +1035,12 @@ mod batched_admission;
 
 #[path = "postgres_tests/metadata.rs"]
 mod metadata;
+
+#[path = "postgres_tests/creation.rs"]
+mod creation;
+
+#[path = "postgres_tests/publication.rs"]
+mod publication;
+
+#[path = "postgres_tests/intent.rs"]
+mod intent;

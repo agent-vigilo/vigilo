@@ -1,14 +1,14 @@
 stateDiagram-v2
-    [*] --> Preparing: Dataset and profile admitted
+    [*] --> Preparing: Identity and execution intent recorded atomically
     Preparing --> Preparing: Register file group, verify bytes, checkpoint prefix
-    Preparing --> Ready: Verified manifest published
+    Preparing --> Ready: Verified manifest published and lease released
     Ready --> Ready: Preparation-only run held
     Ready --> Admitting: Execution requested and creation lease claimed
-    Admitting --> Ready: Read failure or caller interruption yields lease
+    Admitting --> Ready: Deferred work or errors yield lease
     Admitting --> Admitting: Replay bounded placement commits and acknowledge pages
     Admitting --> Failed: Immutable seed conflict
     Failed --> [*]: No dispatch
-    Admitting --> Pending: Exact local coverage and fenced activation
+    Admitting --> Pending: Exact local coverage, fenced activation and lease release
     Preparing --> Cancelled: Cancellation fences publication
     Ready --> Cancelled: Cancellation revokes execution intent
     Admitting --> Cancelled: Close partial local admission

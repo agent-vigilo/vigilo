@@ -41,24 +41,69 @@ pub(crate) struct RunCreationRecoveryStats {
     pub(crate) deferred_runs: usize,
     pub(crate) failed_runs: usize,
 }
+/// Run status and creation progress observed in one PostgreSQL statement snapshot.
+/// This is reporting data, never authority for a later mutation.
+#[derive(Debug)]
+pub(crate) struct RunCreationState {
+    pub(crate) status: String,
+    pub(crate) error: Option<String>,
+    pub(crate) progress: RunCreationProgress,
+}
+
+#[derive(sqlx::FromRow)]
+struct CreationRow {
+    status: String,
+    error: Option<String>,
+    plan_status: Option<String>,
+    total: Option<i32>,
+    admitted: Option<i32>,
+    attempts: Option<i64>,
+    placements: i64,
+}
+
+/// Returns current status and bounded placement progress from the same snapshot.
+/// Missing runs return None; runs without a blob plan retain empty progress.
+pub(crate) async fn select_creation_state(
+    db: &PgPool,
+    run_id: Uuid,
+) -> anyhow::Result<Option<RunCreationState>> {
+    let row: Option<CreationRow> = sqlx::query_as(
+        "SELECT r.status::text AS status, r.error_message AS error,
+                p.status AS plan_status, p.chunk_cursor AS total,
+                p.admission_cursor AS admitted, p.generation AS attempts,
+                (SELECT count(DISTINCT database_alias) FROM run_plan_shards WHERE run_id=$1) AS placements
+         FROM runs r LEFT JOIN run_plans p ON p.run_id=r.id WHERE r.id=$1",
+    ).bind(run_id).fetch_optional(db).await?;
+    Ok(row.map(|row| {
+        let progress = if let Some(status) = row.plan_status {
+            let complete = status == "ready" && row.total == row.admitted;
+            RunCreationProgress {
+                placement_count: row.placements,
+                pending_placement_count: if complete { 0 } else { row.placements },
+                seeded_placement_count: if complete { row.placements } else { 0 },
+                attempt_count: row.attempts.expect("plan generation is non-null"),
+                last_error: row.error.clone(),
+                plan_status: Some(status),
+                plan_chunk_cursor: row.total,
+                ..Default::default()
+            }
+        } else {
+            RunCreationProgress::default()
+        };
+        RunCreationState {
+            status: row.status,
+            error: row.error,
+            progress,
+        }
+    }))
+}
+
 pub(crate) async fn select_creation_progress(
     db: &PgPool,
     run_id: Uuid,
 ) -> anyhow::Result<RunCreationProgress> {
-    let row:Option<(String,i32,i32,i64,Option<String>,i64)>=sqlx::query_as("SELECT p.status,p.chunk_cursor,p.admission_cursor,p.generation,r.error_message,(SELECT count(DISTINCT database_alias) FROM run_plan_shards WHERE run_id=$1) FROM run_plans p JOIN runs r ON r.id=p.run_id WHERE p.run_id=$1")
-        .bind(run_id).fetch_optional(db).await?;
-    let Some((status, total, admitted, attempts, error, placements)) = row else {
-        return Ok(RunCreationProgress::default());
-    };
-    let complete = status == "ready" && total == admitted;
-    Ok(RunCreationProgress {
-        placement_count: placements,
-        pending_placement_count: if complete { 0 } else { placements },
-        seeded_placement_count: if complete { placements } else { 0 },
-        attempt_count: attempts,
-        last_error: error,
-        plan_status: Some(status),
-        plan_chunk_cursor: Some(total),
-        ..Default::default()
-    })
+    Ok(select_creation_state(db, run_id)
+        .await?
+        .map(|state| state.progress)
+        .unwrap_or_default())
 }

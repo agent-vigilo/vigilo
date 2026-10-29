@@ -18,8 +18,13 @@ pub(super) const SELECT_RUN: &str = r#"
 "#;
 
 pub(super) const INSERT_PLAN: &str = r#"
-    INSERT INTO run_plans(run_id,dataset_upload_id,storage_binding_hash,limits,execution_plan,assignments)
-    VALUES($1,$2,$3,$4,$5,$6)
+    INSERT INTO run_plans(run_id,dataset_upload_id,storage_binding_hash,limits,execution_plan,assignments,execution_requested)
+    VALUES($1,$2,$3,$4,$5,$6,$7)
+"#;
+
+pub(super) const REQUEST_EXECUTION: &str = r#"
+    UPDATE run_plans SET execution_requested=true
+    WHERE run_id=$1 AND EXISTS(SELECT 1 FROM runs WHERE id=$1 AND status='creating')
 "#;
 
 pub(super) const LOCK_RUN: &str = r#"
@@ -117,7 +122,9 @@ pub(super) const SELECT_FROZEN_IDENTITY: &str = r#"
     WHERE plan.run_id=$1
 "#;
 
-pub(super) const HAS_ACKNOWLEDGED_REFERENCES: &str = r#"
+// Independent publication predicates share one statement snapshot. Keep separate
+// results so the workflow preserves its validation order and error context.
+pub(super) const SELECT_PUBLICATION_CHECKS: &str = r#"
     SELECT NOT EXISTS (
         SELECT 1
         FROM jsonb_to_recordset($2::jsonb) AS expected(object_key text, reference jsonb)
@@ -125,24 +132,16 @@ pub(super) const HAS_ACKNOWLEDGED_REFERENCES: &str = r#"
             ON actual.run_id=$1 AND actual.object_key=expected.object_key
             AND actual.reference=expected.reference AND actual.acknowledged
         WHERE actual.object_key IS NULL
-    )
-"#;
-
-pub(super) const HAS_UNACKNOWLEDGED_OBJECTS: &str = r#"
-    SELECT EXISTS(SELECT 1
-    FROM run_plan_objects
-    WHERE run_id=$1
-    AND NOT acknowledged)
-"#;
-
-pub(super) const HAS_MANIFEST: &str = r#"
-    SELECT EXISTS(SELECT 1
-    FROM run_plan_objects
-    WHERE run_id=$1
-    AND kind='manifest'
-    AND object_key=$2
-    AND reference=$3
-    AND acknowledged)
+    ) AS references_acknowledged,
+    EXISTS (
+        SELECT 1 FROM run_plan_objects
+        WHERE run_id=$1 AND NOT acknowledged
+    ) AS has_unacknowledged_objects,
+    EXISTS (
+        SELECT 1 FROM run_plan_objects
+        WHERE run_id=$1 AND kind='manifest'
+            AND object_key=$3 AND reference=$4 AND acknowledged
+    ) AS manifest_acknowledged
 "#;
 
 pub(super) const PUBLISH_PLAN: &str = r#"

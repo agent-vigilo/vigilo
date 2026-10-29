@@ -33,7 +33,7 @@ const config: Config = {
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
   organizationName: 'agent-vigilo', // Usually your GitHub org/user name.
-  projectName: 'agent-vigilo', // Usually your repo name.
+  projectName: 'vigilo', // Usually your repo name.
 
   onBrokenLinks: 'throw',
 
@@ -58,7 +58,7 @@ const config: Config = {
           // Please change this to your repo.
           // Remove this to remove the "edit this page" links.
           editUrl:
-            'https://github.com/gregl83/agent-vigilo/tree/main/web/docs/',
+            'https://github.com/agent-vigilo/vigilo/tree/main/web/docs/',
         },
         blog: false,
         sitemap: {
@@ -148,7 +148,7 @@ const config: Config = {
           position: 'left',
         },
         {
-          href: 'https://github.com/gregl83/agent-vigilo',
+          href: 'https://github.com/agent-vigilo/vigilo',
           label: 'GitHub',
           position: 'right',
         },
@@ -192,7 +192,7 @@ const config: Config = {
           items: [
             {
               label: 'GitHub',
-              href: 'https://github.com/gregl83/agent-vigilo',
+              href: 'https://github.com/agent-vigilo/vigilo',
             },
           ],
         },

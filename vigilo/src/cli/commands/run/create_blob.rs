@@ -24,6 +24,47 @@ use crate::{
     },
 };
 
+/// Request-local inputs already read by either creation entry point. Finalized
+/// datasets cannot be aborted or expired. Only immutable plan fields cross this
+/// handoff; status, cursors, publication and lease authority are read live later.
+pub(super) struct Preparation {
+    payload: Value,
+    upload: dataset_upload::Upload,
+    catalog: dataset_upload::Catalog,
+    frozen_plan: Option<FrozenPlanInputs>,
+}
+struct FrozenPlanInputs {
+    execution: EvaluatorExecutionPlan,
+    assignments: Vec<run_create::RunShardPlacementAssignment>,
+}
+impl From<run_plan::Plan> for FrozenPlanInputs {
+    fn from(plan: run_plan::Plan) -> Self {
+        Self {
+            execution: plan.execution_plan.0,
+            assignments: plan.assignments.0,
+        }
+    }
+}
+impl Preparation {
+    pub(super) fn new(
+        payload: Value,
+        upload: dataset_upload::Upload,
+        catalog: dataset_upload::Catalog,
+        existing: Option<run_plan::Plan>,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            upload.status == "finalized" && upload.id == catalog.id,
+            "dataset is not finalized or catalog identity differs"
+        );
+        Ok(Self {
+            payload,
+            upload,
+            catalog,
+            frozen_plan: existing.map(FrozenPlanInputs::from),
+        })
+    }
+}
+
 /// A bounded profile source; input configuration cannot become a dataset-sized
 /// allocation merely because a wrong file was supplied to plan preparation.
 pub(super) fn profile_input(
@@ -69,55 +110,68 @@ pub(super) async fn exec(
             signal.cancel();
         }
     });
-    let result = prepare(
-        context,
-        config,
-        profile,
-        profile_file,
-        upload_id,
-        storage_config,
-        id,
-        prepare_only,
-        &cancel,
-    )
+    let result = async {
+        let payload = profile_input(profile, profile_file)?;
+        let _: RunProfile = serde_json::from_value(payload.clone())?;
+        let db = context.dbr().await?.control().await?;
+        let upload = dataset_upload::load(db, upload_id).await?;
+        let catalog = dataset_upload::catalog(db, upload_id)
+            .await?
+            .context("dataset is not finalized")?;
+        let inputs = Preparation::new(payload, upload, catalog, None)?;
+        prepare(
+            context,
+            config,
+            inputs,
+            storage_config,
+            id,
+            prepare_only,
+            &cancel,
+        )
+        .await
+    }
     .await
     .with_context(|| format!("run plan {id}; retry with --run-id {id} and the same inputs"));
     task.abort();
     result
 }
-#[allow(clippy::too_many_arguments)]
-async fn prepare(
+/// Continues creation with immutable inputs. Every publication/admission mutation
+/// retains its live database fence; the final response reads committed state.
+pub(super) async fn prepare(
     context: Context,
     config: crate::db::workflows::run_creation::Config,
-    profile: Option<String>,
-    profile_file: Option<PathBuf>,
-    upload_id: Uuid,
+    inputs: Preparation,
     storage_config: PathBuf,
     id: Uuid,
     prepare_only: bool,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    let payload = profile_input(profile, profile_file)?;
+    let Preparation {
+        payload,
+        upload,
+        catalog,
+        frozen_plan,
+    } = inputs;
+    let upload_id = upload.id;
     let profile: RunProfile = serde_json::from_value(payload.clone())?;
     let owner = super::super::dataset::owner(&storage_config)?;
     let router = context.dbr().await?;
     let db = router.control().await?;
-    let upload = dataset_upload::load(db, upload_id).await?;
-    let catalog = dataset_upload::catalog(db, upload_id)
-        .await?
-        .context("dataset is not finalized")?;
     ensure!(
-        upload.status == "finalized"
-            && owner.alias() == upload.storage_alias
-            && owner.binding_hash()? == upload.binding_hash,
+        owner.alias() == upload.storage_alias && owner.binding_hash()? == upload.binding_hash,
         "dataset storage owner binding changed"
     );
     owner.validate(&upload.limits)?;
     let policy = compute_aggregation_policy_hash(&profile)?;
     let profile_hash = hash_serialized_json(&payload)?;
-    let existing = run_plan::load(db, id).await?;
-    let execution = if let Some(plan) = existing.as_ref() {
-        plan.execution_plan.0.clone()
+    // Absence is not immutable: another creator may have frozen this run while
+    // we uploaded its dataset. Resolve only after checking for that durable plan.
+    let frozen_plan = match frozen_plan {
+        Some(plan) => Some(plan),
+        None => run_plan::load(db, id).await?.map(FrozenPlanInputs::from),
+    };
+    let execution = if let Some(plan) = frozen_plan.as_ref() {
+        plan.execution.clone()
     } else {
         EvaluatorExecutionPlan::new(
             policy.clone(),
@@ -171,8 +225,8 @@ async fn prepare(
         config_snapshot: snapshot.clone(),
         expected_execution_count: identity.case_count,
     };
-    let assignments = if let Some(existing) = &existing {
-        existing.assignments.0.clone()
+    let assignments = if let Some(existing) = &frozen_plan {
+        existing.assignments.clone()
     } else {
         let count = (identity.case_count - 1) / 100 + 1;
         let representatives = (0..count.min(128))
@@ -195,17 +249,9 @@ async fn prepare(
         &draft,
         &execution,
         &assignments,
+        !prepare_only,
     )
     .await?;
-    if !prepare_only {
-        let status: String = sqlx::query_scalar("SELECT status::text FROM runs WHERE id=$1")
-            .bind(id)
-            .fetch_one(db)
-            .await?;
-        if status == "creating" {
-            run_plan::admission::request(db, id).await?;
-        }
-    }
     ensure!(
         (plan.status == "ready") == plan.manifest.is_some(),
         "inconsistent run-plan publication state"
@@ -239,11 +285,13 @@ async fn prepare(
             .await
         }
         .await;
-        let error = result.as_ref().err().map(|error| format!("{error:#}"));
-        let release = run_plan::release(db, lease, error.as_deref()).await;
-        let reference = result?;
-        release?;
-        reference
+        // Publication releases ownership in its commit. Only errors (including
+        // an uncertain commit) need a separate fenced cleanup attempt; preserve
+        // the original failure if cleanup is unavailable too.
+        if let Err(error) = &result {
+            let _ = run_plan::release(db, lease, Some(&format!("{error:#}"))).await;
+        }
+        result?
     };
     let plan = run_plan::load(db, id)
         .await?
@@ -271,12 +319,12 @@ async fn prepare(
     {
         tracing::warn!(run_id=%id,error=%error,"execution admission stopped before dispatch");
     }
-    let (status, error): (String, Option<String>) =
-        sqlx::query_as("SELECT status::text,error_message FROM runs WHERE id=$1")
-            .bind(id)
-            .fetch_one(db)
-            .await?;
-    let progress = crate::db::workflows::run_creation::select_creation_progress(db, id).await?;
+    let state = crate::db::workflows::run_creation::select_creation_state(db, id)
+        .await?
+        .context("run disappeared while reporting creation")?;
+    let status = state.status;
+    let error = state.error;
+    let progress = state.progress;
     let aliases = plan
         .assignments
         .iter()

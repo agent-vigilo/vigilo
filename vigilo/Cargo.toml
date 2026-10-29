@@ -13,7 +13,7 @@ keywords = [
     "evaluations",
     "gating",
 ]
-repository = "https://github.com/gregl83/agent-vigilo"
+repository = "https://github.com/agent-vigilo/vigilo"
 homepage = "https://agentvigilo.com"
 
 [dependencies]

@@ -52,7 +52,8 @@ use crate::{
     },
 };
 
-/// Seeds a bounded number of pages and yields its lease on every outcome.
+/// Seeds bounded pages; activation releases its lease atomically on completion.
+/// Deferred work and errors attempt a separate fenced release.
 /// Returns true only after exact activation. The coordinator resumes ready plans.
 #[cfg(test)]
 pub(crate) async fn resume(
@@ -99,8 +100,9 @@ pub(crate) async fn resume_verified(
 }
 
 /// One recovery owner covers adapter opening, root reads, gate reads and local
-/// admission. Every returned outcome attempts release, including failures before
-/// local writes. A replaced owner cannot release its successor's generation.
+/// admission. Confirmed activation already released ownership atomically;
+/// deferred work and errors (including uncertain commits) attempt release.
+/// A replaced owner cannot release its successor's generation.
 async fn with_claim<F, Fut>(context: &Context, plan: &Plan, work: F) -> Result<bool>
 where
     F: FnOnce(run_plan::Lease) -> Fut,
@@ -112,6 +114,11 @@ where
     }
     let lease = ledger::claim(db, plan.run_id).await?;
     let result = work(lease).await;
+    // Only the confirmed activation commit returns true. Another write must not
+    // turn committed success into a reported failure if the database goes away.
+    if matches!(&result, Ok(true)) {
+        return Ok(true);
+    }
     let error = result.as_ref().err().map(|e| format!("{e:#}"));
     if let Err(error) = &result
         && run_create::is_seed_invariant_error(error)

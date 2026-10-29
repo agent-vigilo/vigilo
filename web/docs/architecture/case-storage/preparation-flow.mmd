@@ -8,7 +8,8 @@ sequenceDiagram
     opt Inline or file dataset
         Creator->>Objects: Bounded resumable ingestion and verified catalog publication
     end
-    Creator->>Control: Freeze creating run, evaluator artifacts and placements
+    Note over Creator,Control: Reuse finalized dataset and frozen plan inputs<br/>Recheck plan existence when no frozen inputs are available
+    Creator->>Control: Atomically record run identity, frozen inputs and execution intent
     loop Verified dataset batches
         Creator->>Objects: Read and verify index and complete case file
         Creator->>Creator: Validate cases, fold chunk identity and gate counts
@@ -23,8 +24,10 @@ sequenceDiagram
         Creator->>Objects: Create and verify files in dependency order
         Creator->>Control: Atomically acknowledge verified group or prefix
     end
-    Creator->>Control: Publish verified root and compact shard metadata
+    Creator->>Control: Check references, outstanding objects and manifest together
+    Creator->>Control: Publish verified root, compact shard metadata and release lease atomically
     alt Preparation only
+        Creator->>Control: Read current status, error and progress in one snapshot
         Creator-->>Caller: Creating, plan ready, execution held
     else Execution requested
         Creator->>Control: Claim creation authority for admission
@@ -44,9 +47,11 @@ sequenceDiagram
             Creator->>Local: Read bounded chunk page and admission state
             Creator->>Creator: Fold and compare each shard identity independently
         end
-        Creator->>Control: Fenced activation, publish routes and dispatch cursors
-        Creator-->>Caller: Pending, dispatchable
+        Creator->>Control: Read shard totals, hashes and aliases together
+        Creator->>Control: Fenced activation, publish routes and cursors and release lease atomically
+        Creator->>Control: Read current status, error and progress in one snapshot
+        Creator-->>Caller: Current status and progress
     end
     Note over Creator,Control: Admission renews by elapsed time<br/>Checkpoints and activation check live authority
     Note over Creator,Control: Coordinators resume requested admission after lease release or expiry
-    Note over Creator,Control: Returned failures release ownership<br/>Process death uses lease expiry
+    Note over Creator,Control: Deferred work and errors attempt fenced release<br/>Confirmed commits need no extra release; process death uses expiry

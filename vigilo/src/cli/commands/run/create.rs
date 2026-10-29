@@ -70,7 +70,7 @@ pub(super) async fn exec(
         let binding = owner.binding_hash()?;
         let upload_id = identity_upload_id(id)?;
         let existing = crate::db::workflows::run_plan::load(db, id).await?;
-        let catalog = if let Some(plan) = existing {
+        let catalog = if let Some(plan) = &existing {
             dataset_upload::catalog(db, plan.dataset_upload_id)
                 .await?
                 .context("run dataset is not finalized")?
@@ -109,19 +109,20 @@ pub(super) async fn exec(
             release?;
             catalog
         };
+        let upload = dataset_upload::load(db, catalog.id).await?;
         anyhow::ensure!(
-            dataset_upload::load(db, catalog.id).await?.identity.0 == prepared.identity,
+            upload.identity.0 == prepared.identity,
             "dataset changed while resuming run"
         );
-        create_blob::exec(
+        let inputs = create_blob::Preparation::new(payload, upload, catalog, existing)?;
+        create_blob::prepare(
             context,
             config,
-            Some(serde_json::to_string(&payload)?),
-            None,
-            catalog.id,
+            inputs,
             storage_config,
-            Some(id),
+            id,
             prepare_only,
+            &cancel,
         )
         .await
     }
