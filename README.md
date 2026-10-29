@@ -172,6 +172,36 @@ The integration commands require the database, messaging, evaluator Wasm, and
 test agent dependencies described above. Configure the repository secret
 `CODECOV_TOKEN` for the aggregate CI upload.
 
+## Crate Releases
+
+Publishing a GitHub release tagged `vigilo/vX.Y.Z` runs **Publish Vigilo Crate**.
+The workflow checks out the release commit, verifies the tag against
+`vigilo/Cargo.toml`, and requires a successful **Build** workflow for that exact
+commit (a push or manual run). It publishes only the `vigilo` crate with Cargo's
+package verification enabled. Evaluator collection releases do not trigger crate
+publication.
+
+Configure the GitHub environment `crates-io` with the required reviewers and
+release-tag deployment restrictions for your repository. Add the secret
+`CARGO_REGISTRY_TOKEN` with a crates.io token authorized to publish `vigilo`.
+The token is exposed only to the publish step. Referencing an environment in the
+workflow does not configure its protection rules.
+
+Release procedure:
+
+1. Commit and push the release changes, including the crate version and lockfile.
+2. Wait for **Build** to pass for the commit being released.
+3. Tag that commit as `vigilo/vX.Y.Z` and publish its GitHub release.
+4. Approve the `crates-io` environment deployment when required, then check the
+   publish job's result.
+
+Rerunning the job skips a version already present on crates.io. Registry errors
+fail the job instead of being treated as an absent version. To verify locally
+without uploading, run `cargo publish -p vigilo --dry-run --locked`.
+
+Official evaluator collections have their own **Release Core Evaluators** workflow;
+see [Publishing Evaluators](https://agentvigilo.com/docs/guides/publishing#core-evaluators).
+
 ## Project Status
 
 Agent Vigilo is an active systems project focused on reliable AI evaluation, LLM evaluation workflows, agent testing, and deployment gates. The implementation favors explicit contracts, durable state transitions, and operational diagrams over black-box orchestration.
