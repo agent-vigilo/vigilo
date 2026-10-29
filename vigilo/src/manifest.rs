@@ -1,9 +1,9 @@
-//! Evaluator crate manifest loading.
+//! Evaluator source-package manifest loading.
 //!
 //! Evaluator packages carry a `Vigilo.toml` manifest next to their crate. This
 //! module parses that manifest into the fields needed by CLI publishing and
 //! evaluator build flows: package metadata, the WIT contract reference, and
-//! named build profiles.
+//! named build profiles. Portable release manifests are owned by evaluator_package.
 
 use std::{
     collections::HashMap,

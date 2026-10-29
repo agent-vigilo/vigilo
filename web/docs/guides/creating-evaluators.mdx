@@ -56,7 +56,7 @@ The reference evaluator uses `wit-bindgen`, imports `evaluator-world`, implement
 
 ## Contract-First Implementation
 
-Implement the current contract at `wit/evaluator/v1.0.0/evaluator.wit`.
+Implement the current contract at `vigilo/wit/evaluator/v1.0.0/evaluator.wit`.
 
 - Read fields from the <GlossaryTerm term="evaluator-input">evaluator input</GlossaryTerm>,
   including run IDs, the test case, captured
@@ -125,7 +125,7 @@ Codex works best when you keep prompts constrained to the project contract and c
 Recommended prompt constraints:
 
 - "Create one Rust evaluator crate with one evaluator entrypoint."
-- "Follow `wit/evaluator/v1.0.0/evaluator.wit` input/output contract exactly."
+- "Follow `vigilo/wit/evaluator/v1.0.0/evaluator.wit` input/output contract exactly."
 - "Use `evaluators/sentiment-basic-en` as the style reference."
 - "Add `example-input.json` and include build/test commands."
 
@@ -146,3 +146,10 @@ Recommended validation checklist:
 - **Existing evaluator with a different content hash**: bump the evaluator version before publishing changed content.
 - **No evaluator trace/debug output**: run with appropriate log level filters so debug logs are visible.
 - **Evaluator not found**: use a fully qualified identifier: `<namespace>/<name>:<version>`.
+
+## Distribute A Portable Package
+
+Use `vigilo evaluator package` to turn the prebuilt source package into a
+self-contained release archive. Recipients publish it without a Rust toolchain
+or source checkout. See [Publishing Evaluators](./publishing.mdx#portable-packages)
+for the package command, validation rules, and registration workflow.

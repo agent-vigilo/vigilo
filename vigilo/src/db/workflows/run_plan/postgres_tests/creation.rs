@@ -23,7 +23,7 @@ async fn replay_loaded_inputs(db: &PgPool, f: &Fixture, loaded: &Plan) -> Result
     .await
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn reused_inputs_cannot_restore_cancelled_or_replaced_authority(db: PgPool) {
     let f = Fixture::with_size(&db, 2, 2, 2).await;
@@ -66,7 +66,7 @@ async fn reused_inputs_cannot_restore_cancelled_or_replaced_authority(db: PgPool
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn reused_finalized_dataset_and_plan_inputs_preserve_publication_and_replay(db: PgPool) {
     let f = Fixture::with_size(&db, 2, 2, 2).await;
@@ -101,7 +101,7 @@ async fn reused_finalized_dataset_and_plan_inputs_preserve_publication_and_repla
     assert!(replay_loaded_inputs(&db, &f, &changed).await.is_err());
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn creation_state_reports_current_progress_and_missing_plan_defaults(db: PgPool) {
     let missing = Uuid::now_v7();

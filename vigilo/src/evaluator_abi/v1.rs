@@ -27,11 +27,11 @@ use crate::{
     },
 };
 
-const WIT: &[u8] = include_bytes!("../../../wit/evaluator/v1.0.0/evaluator.wit");
+const WIT: &[u8] = include_bytes!("../../wit/evaluator/v1.0.0/evaluator.wit");
 
 mod bindings {
     wasmtime::component::bindgen!({
-        path: "../wit/evaluator/v1.0.0/evaluator.wit",
+        path: "wit/evaluator/v1.0.0/evaluator.wit",
         world: "evaluator-world",
     });
 }
@@ -70,7 +70,11 @@ impl EvaluatorAbiAdapter for V1Adapter {
             _,
             wasmtime::component::HasSelf<EvaluatorHost>,
         >(&mut linker, |host: &mut EvaluatorHost| host)?;
-        Ok(linker.instantiate_pre(component)?)
+        let instance_pre = linker.instantiate_pre(component)?;
+        // Import linking alone accepts components with missing exports. Check
+        // the generated world types before publication without executing Wasm.
+        bindings::EvaluatorWorldPre::new(instance_pre.clone())?;
+        Ok(instance_pre)
     }
 
     fn execute(

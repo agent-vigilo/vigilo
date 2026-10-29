@@ -58,7 +58,7 @@ struct PersistedRawMeasurement {
     raw_ordinal: Option<String>,
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn evaluator_invocation_and_diagnostics_persist_as_separate_rows(pool: PgPool) {
     let seed = seed_running_attempt(&pool, 60, 120).await;
@@ -573,7 +573,7 @@ async fn insert_passing_aggregate(pool: &PgPool, seed: &SeededAttempt) {
     .unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn terminal_transition_rejects_expired_attempt_lease(pool: PgPool) {
     let seed = seed_running_attempt(&pool, -5, 120).await;
@@ -616,7 +616,7 @@ async fn terminal_transition_rejects_expired_attempt_lease(pool: PgPool) {
     assert_eq!(status, "stale");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn expired_chunk_recovery_stales_attempt_and_requeues_chunk(pool: PgPool) {
     let seed = seed_running_attempt(&pool, -5, -5).await;
@@ -685,7 +685,7 @@ async fn expired_chunk_recovery_stales_attempt_and_requeues_chunk(pool: PgPool) 
     assert_eq!(requeued, 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn recovered_attempt_cannot_persist_late_results(pool: PgPool) {
     let seed = seed_running_attempt(&pool, -5, -5).await;
@@ -728,7 +728,7 @@ async fn recovered_attempt_cannot_persist_late_results(pool: PgPool) {
     assert_eq!(aggregate_count, 0);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn incomplete_required_evaluator_persists_error_without_score(pool: PgPool) {
     let seed = seed_running_attempt(&pool, 60, 120).await;
@@ -832,7 +832,7 @@ async fn incomplete_required_evaluator_persists_error_without_score(pool: PgPool
     assert_eq!(summary["evaluator_completeness"]["complete"], false);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn recovered_chunk_token_cannot_allocate_a_new_attempt(pool: PgPool) {
     let seed = seed_running_attempt(&pool, -5, -5).await;
@@ -877,7 +877,7 @@ async fn recovered_chunk_token_cannot_allocate_a_new_attempt(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn chunk_heartbeat_preserves_claim_token(pool: PgPool) {
     let seed = seed_running_attempt(&pool, 60, 60).await;

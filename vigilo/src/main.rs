@@ -23,6 +23,10 @@ use tracing_subscriber::{
     prelude::*,
 };
 
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
+
 mod agent_client;
 mod blob_storage;
 mod case_reader;
@@ -35,9 +39,11 @@ use cli::{
 mod context;
 use context::Context;
 mod contracts;
+mod core_evaluators;
 mod dataset_ingestion;
 mod db;
 mod evaluator_abi;
+mod evaluator_package;
 mod evaluators;
 mod manifest;
 mod models;
@@ -85,9 +91,16 @@ async fn main() -> ExitCode {
                 }
             };
 
+            let database_url = match app.database_uri() {
+                Ok(url) => url,
+                Err(e) => {
+                    error!(error = %e, "invalid database configuration");
+                    return ExitCode::FAILURE;
+                }
+            };
             let context = Context::new(
                 context::database::Config::new(
-                    app.database_url.clone(),
+                    database_url,
                     app.database_pool_max_connections_per_target,
                     Duration::from_secs(app.database_acquire_timeout_seconds),
                     command_context.circuit_breaker,

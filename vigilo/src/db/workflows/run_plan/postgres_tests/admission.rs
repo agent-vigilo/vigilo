@@ -21,7 +21,7 @@ async fn allow_ack(db: &PgPool) {
 async fn progress(db: &PgPool, id: Uuid) -> (i32, i64, i64) {
     sqlx::query_as("SELECT admission_cursor,(SELECT count(*) FROM run_chunks WHERE run_id=$1),(SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1) FROM run_plans WHERE run_id=$1").bind(id).fetch_one(db).await.unwrap()
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn grouped_local_commit_survives_lost_control_ack_and_replays_exactly(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -48,7 +48,7 @@ async fn grouped_local_commit_survives_lost_control_ack_and_replays_exactly(db: 
     );
     assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn grouped_replay_rejects_changed_snapshots_and_closed_or_moved_admissions(db: PgPool) {
     for mutation in [
@@ -93,7 +93,7 @@ async fn grouped_replay_rejects_changed_snapshots_and_closed_or_moved_admissions
         assert_eq!(status, "failed");
     }
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn disabled_or_draining_placement_never_activates_until_active(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -139,7 +139,7 @@ async fn disabled_or_draining_placement_never_activates_until_active(db: PgPool)
     );
     assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn snapshot_groups_cross_64_shards_without_per_shard_renewal(db: PgPool) {
     let f = Fixture::with_size(&db, 6500, 100, 256).await;
@@ -174,7 +174,7 @@ async fn snapshot_groups_cross_64_shards_without_per_shard_renewal(db: PgPool) {
     assert_eq!(progress(&db, plan.run_id).await, (65, 65, 65));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn placement_verification_folds_shards_across_256_row_boundaries(db: PgPool) {
     let f = Fixture::with_size(&db, 25701, 100, 256).await;
@@ -204,7 +204,7 @@ async fn wait_for_fence(db: &PgPool) {
         }
     }).await.expect("seed did not wait on shard authority");
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn grouped_seed_checks_cancellation_tombstone_after_waiting_for_shard_fence(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -248,7 +248,7 @@ async fn grouped_seed_checks_cancellation_tombstone_after_waiting_for_shard_fenc
     .unwrap();
     assert_eq!(states, vec![(1, "closed".into())]);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn owner_replaced_during_local_lock_wait_cannot_acknowledge_or_activate(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -290,7 +290,7 @@ async fn owner_replaced_during_local_lock_wait_cannot_acknowledge_or_activate(db
     );
     assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn cancelled_or_timed_out_placement_operations_rollback_and_remain_resumable(db: PgPool) {
     for cancel_early in [true, false] {
@@ -342,7 +342,7 @@ async fn cancelled_or_timed_out_placement_operations_rollback_and_remain_resumab
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn snapshot_byte_bounds_split_large_templates_and_preserve_one_admitted_snapshot(db: PgPool) {
     use crate::{
@@ -410,7 +410,7 @@ async fn snapshot_byte_bounds_split_large_templates_and_preserve_one_admitted_sn
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn activation_rechecks_published_shard_totals_before_installing_exact_routes(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -508,7 +508,7 @@ async fn activation_rechecks_published_shard_totals_before_installing_exact_rout
     assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn committed_activation_succeeds_when_subsequent_writes_fail(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -534,7 +534,7 @@ async fn committed_activation_succeeds_when_subsequent_writes_fail(db: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn failed_activation_commit_releases_owner_and_retries_exactly(db: PgPool) {
     let (f, plan) = ready(&db).await;

@@ -18,7 +18,7 @@ use super::test_support::fixture;
 
 /// A chunk transaction must leave lock-table capacity for other shard workers.
 /// Repeating settlement also exercises PostgreSQL's prepared-plan selection.
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL for settlement relation-lock regression"]
 async fn settlement_relation_locks_stay_bounded_across_repeated_chunks(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 8).await;
@@ -83,7 +83,7 @@ async fn settlement_relation_locks_stay_bounded_across_repeated_chunks(pool: PgP
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL for chunk receipt access-work regression"]
 async fn receipt_execution_reads_stay_within_the_chunk_as_run_history_grows(pool: PgPool) {
     let mut observations = Vec::new();

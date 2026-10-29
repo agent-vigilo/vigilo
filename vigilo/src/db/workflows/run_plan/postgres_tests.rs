@@ -307,7 +307,7 @@ impl Fixture {
         .await
     }
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn interrupted_chunk_and_manifest_writes_resume_exactly_without_control_case_rows(
     db: PgPool,
@@ -450,7 +450,7 @@ async fn interrupted_chunk_and_manifest_writes_resume_exactly_without_control_ca
         205
     );
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn competing_expired_cancelled_and_changed_replays_fail_closed(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -544,7 +544,7 @@ async fn competing_expired_cancelled_and_changed_replays_fail_closed(db: PgPool)
             .is_none()
     );
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn corrupted_or_missing_dataset_cannot_publish_run_plan(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -582,7 +582,7 @@ async fn corrupted_or_missing_dataset_cannot_publish_run_plan(db: PgPool) {
     f.prepare(&db, lease).await.unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn run_plan_ranges_and_owned_keys_are_immutable_and_acknowledged_contiguously(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -634,7 +634,7 @@ async fn run_plan_ranges_and_owned_keys_are_immutable_and_acknowledged_contiguou
     owner.reference.storage_alias = "elsewhere".into();
     assert!(plan(&db, lease, &owner).await.is_err());
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn plan_lease_expiring_during_row_lock_wait_cannot_be_renewed(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -677,7 +677,7 @@ async fn plan_lease_expiring_during_row_lock_wait_cannot_be_renewed(db: PgPool) 
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn reused_dataset_identity_does_not_require_a_row_write_lock(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -737,7 +737,7 @@ fn runtime_context(db: &PgPool) -> crate::context::Context {
     )
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn blob_admission_resumes_bounded_pages_and_reads_exact_cross_file_chunks(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -839,7 +839,7 @@ async fn blob_admission_resumes_bounded_pages_and_reads_exact_cross_file_chunks(
     assert_eq!(snapshot["gate_planned_counts"]["gate_0"], 100);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn admission_cancellation_fences_old_owner_and_partial_local_metadata(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -903,7 +903,7 @@ async fn admission_cancellation_fences_old_owner_and_partial_local_metadata(db: 
     assert_eq!(dispatch, 0);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn preparation_only_is_held_until_execution_is_requested(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -936,7 +936,7 @@ async fn preparation_only_is_held_until_execution_is_requested(db: PgPool) {
     assert_eq!(cursors, 0);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn admission_rejects_changed_local_membership_after_acknowledgement(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -980,7 +980,7 @@ async fn admission_rejects_changed_local_membership_after_acknowledgement(db: Pg
     assert_eq!(cursors, 0);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn placement_admission_batches_snapshot_statements_without_changing_shard_snapshots(
     db: PgPool,

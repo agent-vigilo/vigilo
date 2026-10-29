@@ -21,11 +21,9 @@ async fn cli_plan_recovers_process_death_freezes_inputs_and_never_dispatches() -
     profile["case_groups"][0]["evaluators"][0]["ref"] = json!(format!("{namespace}/score:1.0.0"));
     profile["agent"]["http"]["url"] = json!("http://127.0.0.1:1");
     tokio::fs::write(&profile_file, serde_json::to_vec(&profile)?).await?;
-    let contract_hash = blake3::hash(include_bytes!(
-        "../../../wit/evaluator/v1.0.0/evaluator.wit"
-    ))
-    .to_hex()
-    .to_string();
+    let contract_hash = blake3::hash(include_bytes!("../../wit/evaluator/v1.0.0/evaluator.wit"))
+        .to_hex()
+        .to_string();
     sqlx::query("INSERT INTO evaluators(id,namespace,name,version,content_hash,wasm_bytes,wasm_size_bytes,interface_name,interface_version,wit_world,abi_contract_hash,abi_adapter,runtime,runtime_version,runtime_fingerprint) VALUES($1,$2,'score','1.0.0',$3,''::bytea,0,'vigilo:evaluator/evaluator','1.0.0','evaluator-world',$4,'vigilo-evaluator-v1@1','wasmtime','44.0.0','fixture')").bind(evaluator).bind(&namespace).bind("1".repeat(64)).bind(contract_hash).execute(&db).await?;
     let upload = Uuid::now_v7();
     let run = Uuid::now_v7();

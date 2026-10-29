@@ -2,7 +2,7 @@
 [![Coverage Status](https://codecov.io/gh/agent-vigilo/vigilo/graph/badge.svg?token=CL93O7DW9C)](https://codecov.io/gh/agent-vigilo/vigilo)
 [![Crates.io](https://img.shields.io/crates/v/vigilo.svg)](https://crates.io/crates/vigilo)
 [![Documentation](https://img.shields.io/badge/docs-agentvigilo.com-blue.svg)](https://agentvigilo.com/docs/guides/getting-started)
-[![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Apache-2.0 licensed](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 <p align="center">
   <picture>
@@ -67,12 +67,12 @@ git config core.hooksPath scripts/hooks
 | Tier | Scope | Required services | GitHub Actions job |
 | --- | --- | --- | --- |
 | Unit and contract | Service-free Rust behavior across the workspace | None | `Unit and Contract Tests` |
-| Database integration | SQL, migrations, transactions, advisory locks, leases, and concurrency | One PostgreSQL server; `DATABASE_URL` must use a role that can create test databases | `Database Integration Tests` |
+| Database integration | SQL, migrations, transactions, advisory locks, leases, concurrency, and portable evaluator publication | One PostgreSQL server; `DATABASE_URL` must use a role that can create test databases. Portable publication also uses the built evaluator Wasm fixture | `Database Integration Tests` |
 | Migration | Greenfield schema application through the CLI setup path | One fresh PostgreSQL database | `Migration Tests` |
 | End-to-end | Routing and the real distributed runtime across process and protocol boundaries | Two PostgreSQL servers, RabbitMQ, S3-compatible object storage, evaluator Wasm, and the test HTTP agent | `End-to-End Tests` |
 | Blob storage integration | Signed object I/O, transport faults, upload/run-plan recovery, and exact cleanup | PostgreSQL and disposable Ceph Object Gateway | `Blob Storage Integration Tests` |
 | Performance service integration | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | `Performance Service Integration Tests` |
-| Evaluator compatibility | Fixture-backed evaluator ABI compatibility | Built Wasm fixtures; no live services | `Evaluator Compatibility Tests` |
+| Evaluator compatibility | Fixture-backed evaluator ABI and portable artifact compatibility | Built Wasm fixtures; no live services | `Evaluator Compatibility Tests` |
 | Documentation | Website typecheck and production build | Node.js and installed website dependencies | `Documentation Checks` |
 
 Run the service-free tier with:
@@ -150,7 +150,7 @@ which clones PostgreSQL's built-in `template1` database. The PostgreSQL coverage
 job migrates `template1` once, so each test validates the recorded migrations
 instead of rebuilding every partition and index. The separate migration job
 applies the complete migration set to an empty database. The
-[migration layout](migrations/README.md) documents dependency order and file ownership.
+[migration layout](vigilo/migrations/README.md) documents dependency order and file ownership.
 
 Accumulate the same reports locally after starting the services and setting the
 environment variables required by each tier:
@@ -179,3 +179,7 @@ Agent Vigilo is an active systems project focused on reliable AI evaluation, LLM
 ## License
 
 [Apache 2.0](LICENSE)
+
+The root `LICENSE` is authoritative. Crate-local copies are included in published
+packages and checked against it in CI. Keep those copies identical when updating
+the license.

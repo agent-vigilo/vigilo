@@ -19,7 +19,7 @@ flowchart TD
     RuntimeContext["fa:fa-layer-group <br/> <b>Runtime Context Provider</b> <br/> <small>[Component: Rust]</small> <br/> <small>Lazily initializes routed database access, storage adapters, messaging, output, registry cache, and Wasm runtime clients.</small>"]:::component
     OutputRenderer["fa:fa-file-lines <br/> <b>Output Renderer</b> <br/> <small>[Component: Rust]</small> <br/> <small>Writes structured command responses as JSON or TOON.</small>"]:::component
 
-    SetupManager["fa:fa-screwdriver-wrench <br/> <b>Setup Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Applies schema migrations and bootstraps built-in evaluator packages.</small>"]:::component
+    SetupManager["fa:fa-screwdriver-wrench <br/> <b>Setup Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Applies embedded schema migrations or an explicit SQL directory validates database placement, and installs the official core evaluator collection unless skipped.</small>"]:::component
     EvaluatorRegistry["fa:fa-box-archive <br/> <b>Evaluator Registry Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Publishes, searches, inspects, tests, and changes evaluator registry state.</small>"]:::component
     EvaluatorPreparer["fa:fa-cubes <br/> <b>Evaluator Package Preparer</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Resolves the static ABI adapter registry, typed-links versioned components, and computes artifact metadata.</small>"]:::component
 
@@ -61,7 +61,7 @@ flowchart TD
     Queue[("<b>Queue</b> <br/> <small>[Container: RabbitMQ]</small> <br/> <small>Distributes run chunk-ready broker messages to workers.</small>")]:::component
     Coordinator["fa:fa-compass <br/> <b>Coordinator</b> <br/> <small>[Container: Rust]</small> <br/> <small>Owns run-creation recovery, dispatch, finalization, and outbox publication.</small>"]:::component
     Worker["fa:fa-gear <br/> <b>Worker</b> <br/> <small>[Container: Rust]</small> <br/> <small>Consumes chunks, invokes the agent target, runs evaluators, and persists results.</small>"]:::component
-    EvaluatorPackages["fa:fa-folder-tree <br/> <b>Evaluator Packages</b> <br/> <small>[External Files]</small> <br/> <small>Local evaluator crates, Vigilo.toml manifests, WIT references, and compiled Wasm artifacts.</small>"]:::external
+    EvaluatorPackages["fa:fa-folder-tree <br/> <b>Evaluator Packages</b> <br/> <small>[External Files]</small> <br/> <small>Source evaluator crates or portable Vigilo.toml and Wasm packages.</small>"]:::external
 
     CliRouter -->|"Uploads, resumes and cleans datasets"| DatasetIngestion
     DatasetIngestion -->|"Persists compact ownership and progress"| Database
@@ -85,8 +85,9 @@ flowchart TD
     CliRouter -->|"Starts and runs service mode using"| WorkerFacade
 
     SetupManager -->|"Applies migrations to <br> <small>[SQL/TCP]</small>"| Database
-    SetupManager -->|"Bootstraps built-in packages through"| EvaluatorRegistry
 
+    CliRouter -->|"Creates portable archives locally using"| EvaluatorPreparer
+    EvaluatorPreparer -->|"Writes verified portable packages to"| EvaluatorPackages
     EvaluatorRegistry -->|"Prepares packages with"| EvaluatorPreparer
     EvaluatorPackages -->|"Provides manifests and Wasm artifacts to"| EvaluatorPreparer
     EvaluatorRegistry -->|"Reads from and writes to <br> <small>[SQL/TCP]</small>"| Database
@@ -110,3 +111,7 @@ flowchart TD
     %% links
     click Coordinator "/docs/architecture/structure/components/coordinator/"
     click Worker "/docs/architecture/structure/components/worker/"
+
+    CoreReleases["Official evaluator collections<br/>GitHub Releases"]
+    SetupManager -->|"Fetches catalog and verified packages over HTTPS"| CoreReleases
+    SetupManager -->|"Validates and publishes core evaluators"| EvaluatorRegistry

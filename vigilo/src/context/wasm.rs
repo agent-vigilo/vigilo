@@ -156,17 +156,6 @@ struct WitMetadata {
 const PACKAGE_METADATA_SECTION: &str = "vigilo.package";
 const WASM_RUNTIME_NAME: &str = "wasmtime";
 
-#[derive(Deserialize)]
-struct CargoLockDocument {
-    package: Vec<CargoLockPackage>,
-}
-
-#[derive(Deserialize)]
-struct CargoLockPackage {
-    name: String,
-    version: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct EmbeddedPackageMetadata {
     name: String,
@@ -179,23 +168,29 @@ struct EmbeddedPackageMetadata {
 fn read_embedded_package_metadata(
     wasm_bytes: &[u8],
 ) -> anyhow::Result<Option<EmbeddedPackageMetadata>> {
+    let mut metadata = None;
+    let mut depth = 0;
     for payload in Parser::new(0).parse_all(wasm_bytes) {
-        if let Payload::CustomSection(section) = payload?
-            && section.name() == PACKAGE_METADATA_SECTION
-        {
-            let metadata = serde_json::from_slice::<EmbeddedPackageMetadata>(section.data())
-                .map_err(|err| {
+        match payload? {
+            Payload::Version { .. } => depth += 1,
+            Payload::End(_) => depth -= 1,
+            Payload::CustomSection(section)
+                if depth == 1 && section.name() == PACKAGE_METADATA_SECTION =>
+            {
+                anyhow::ensure!(metadata.is_none(), "duplicate vigilo.package metadata");
+                metadata = Some(serde_json::from_slice(section.data()).map_err(|err| {
                     anyhow::anyhow!(
                         "failed to decode {} metadata: {}",
                         PACKAGE_METADATA_SECTION,
                         err
                     )
-                })?;
-            return Ok(Some(metadata));
+                })?);
+            }
+            _ => {}
         }
     }
 
-    Ok(None)
+    Ok(metadata)
 }
 
 /// Push LEB128 (Little Endian Base 128) compressed value into vector buffer.
@@ -556,23 +551,8 @@ fn get_engine_fingerprint(engine: &Engine) -> String {
     format!("{:x}-{}", hasher.finish(), ARCH)
 }
 
-/// Resolve wasm runtime version from `Cargo.lock` file.
-fn resolve_runtime_version() -> anyhow::Result<String> {
-    let lock_content = include_str!("../../../Cargo.lock");
-    let lock = toml::from_str::<CargoLockDocument>(lock_content)
-        .map_err(|err| anyhow::anyhow!("failed to parse embedded Cargo.lock: {}", err))?;
-
-    lock.package
-        .into_iter()
-        .find(|pkg| pkg.name == WASM_RUNTIME_NAME)
-        .map(|pkg| pkg.version)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "{} dependency was not found in embedded Cargo.lock",
-                WASM_RUNTIME_NAME
-            )
-        })
-}
+/// Exact Wasmtime dependency version supplied by the build.
+const WASM_RUNTIME_VERSION: &str = env!("VIGILO_WASMTIME_VERSION");
 
 /// Wasm component wrapper.
 pub struct Component {
@@ -738,6 +718,35 @@ impl Wasm {
         package_path: PathBuf,
         profile: String,
     ) -> anyhow::Result<Component> {
+        if let Some(package) = crate::evaluator_package::load(&package_path)? {
+            let embedded = read_embedded_package_metadata(&package.wasm)?.ok_or_else(|| {
+                anyhow::anyhow!("portable artifact must contain vigilo.package metadata")
+            })?;
+            anyhow::ensure!(
+                embedded.name == package.name && embedded.version == package.version,
+                "embedded vigilo.package identity mismatch"
+            );
+            let prepared = self.compile_evaluator(&package.wasm, &package.abi)?;
+            let serialized = prepared.serialize()?;
+            return Ok(Component {
+                name: package.name,
+                version: package.version,
+                description: package.description,
+                tags: package.tags,
+                metadata: package.metadata,
+                interface_name: format!("{}/{}", package.abi.package, package.abi.interface),
+                interface_version: package.abi.version.clone(),
+                wit_world: package.abi.world.clone(),
+                abi: package.abi,
+                runtime: WASM_RUNTIME_NAME.into(),
+                runtime_version: WASM_RUNTIME_VERSION.into(),
+                runtime_fingerprint: self.fingerprint.clone(),
+                wasm_hash: blake3::hash(&package.wasm).to_hex().to_string(),
+                wasm_bytes: package.wasm,
+                component: prepared,
+                serialized,
+            });
+        }
         let manifest = read_manifest(&package_path)?;
         let manifest_profile = manifest.get_profile(&profile)?;
         let wit_metadata = resolve_wit_metadata(&package_path, manifest.wit.as_ref())?;
@@ -798,7 +807,7 @@ impl Wasm {
         let prepared = self.compile_evaluator(&wasm_bytes, &abi)?;
         let serialized = prepared.serialize()?;
 
-        let runtime_version = resolve_runtime_version()?;
+        let runtime_version = WASM_RUNTIME_VERSION.to_owned();
 
         Ok(Component {
             name: package_metadata.name,
@@ -1024,6 +1033,78 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_embedded_package_metadata_is_rejected() {
+        let original = b"\0asm\x0d\0\x01\0";
+        let embedded =
+            ensure_embedded_package_metadata(original.to_vec(), "example", "1.0.0").unwrap();
+        let duplicate = append_custom_section(
+            &embedded,
+            PACKAGE_METADATA_SECTION,
+            br#"{"name":"example","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        assert!(
+            read_embedded_package_metadata(&duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate")
+        );
+    }
+
+    #[cfg(feature = "evaluator-abi-fixtures")]
+    #[test]
+    fn portable_artifacts_preserve_exact_bytes_and_verify_embedded_identity_and_host_abi() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let raw =
+            fs::read(root.join("../target/wasm32-wasip2/release/sentiment_basic_en.wasm")).unwrap();
+        let bytes =
+            ensure_embedded_package_metadata(raw.clone(), "sentiment-basic-en", "0.1.0").unwrap();
+        let abi = resolve_declaration("vigilo:evaluator", "evaluator-world", "evaluator", "1.0.0")
+            .unwrap()
+            .identity()
+            .clone();
+        let package = |wasm, name: &str| crate::evaluator_package::PackageInput {
+            name: name.into(),
+            version: "0.1.0".into(),
+            description: None,
+            tags: serde_json::json!([]),
+            metadata: serde_json::json!({}),
+            abi: abi.clone(),
+            wasm,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Wasm::new(Config::default()).unwrap();
+        let good = dir.path().join("good.tar.gz");
+        crate::evaluator_package::write(&good, package(bytes.clone(), "sentiment-basic-en"))
+            .unwrap();
+        let component = runtime.prepare_evaluator(good, "dev".into()).unwrap();
+        assert_eq!(component.wasm_bytes, bytes);
+        assert_eq!(component.wasm_hash, blake3::hash(&bytes).to_hex().as_str());
+        assert_eq!(component.abi, abi);
+        for (label, wasm, name) in [
+            ("missing", raw, "sentiment-basic-en"),
+            ("identity", bytes, "different-name"),
+            (
+                "abi",
+                ensure_embedded_package_metadata(
+                    b"\0asm\x0d\0\x01\0".to_vec(),
+                    "sentiment-basic-en",
+                    "0.1.0",
+                )
+                .unwrap(),
+                "sentiment-basic-en",
+            ),
+        ] {
+            let path = dir.path().join(format!("{label}.tar.gz"));
+            crate::evaluator_package::write(&path, package(wasm, name)).unwrap();
+            assert!(
+                runtime.prepare_evaluator(path, "dev".into()).is_err(),
+                "accepted {label}"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_embedded_package_metadata_is_rejected() {
         let wasm = append_custom_section(
             &minimal_wasm_module(),
@@ -1182,10 +1263,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_identity_comes_from_the_engine_and_embedded_lockfile() {
+    fn runtime_identity_comes_from_the_engine_and_build_metadata() {
         let engine = Engine::default();
         let fingerprint = get_engine_fingerprint(&engine);
-        let version = resolve_runtime_version().unwrap();
+        let version = WASM_RUNTIME_VERSION;
 
         assert!(fingerprint.ends_with(&format!("-{ARCH}")));
         assert!(!version.is_empty());

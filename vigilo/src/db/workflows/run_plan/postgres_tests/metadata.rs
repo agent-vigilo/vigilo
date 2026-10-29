@@ -1,7 +1,7 @@
 //! PostgreSQL regressions for bounded plan-file publication and recovery authority.
 use super::*;
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn gate_files_share_a_durable_registration_statement(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -20,7 +20,7 @@ async fn gate_files_share_a_durable_registration_statement(db: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn competing_admission_does_not_read_blobs_before_claim(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -49,7 +49,7 @@ async fn competing_admission_does_not_read_blobs_before_claim(db: PgPool) {
     admission::renew(&db, owner).await.unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn interrupted_group_owns_every_file_before_put_and_replays_without_duplicates(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -76,7 +76,7 @@ async fn interrupted_group_owns_every_file_before_put_and_replays_without_duplic
     assert!(f.memory.0.lock().unwrap().creates.values().all(|n| *n == 1));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn lost_group_ack_and_corrupt_acknowledged_file_cannot_publish(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -161,7 +161,7 @@ fn chunk(f: &Fixture, start: i32, end: i32) -> Object {
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn group_registration_and_ack_are_exact_atomic_and_bounded(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -244,7 +244,7 @@ async fn group_registration_and_ack_are_exact_atomic_and_bounded(db: PgPool) {
     assert!(batches::acknowledge(&db, lease, &objects).await.is_err());
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn grouped_gate_publication_crosses_file_limit_with_complete_chains(db: PgPool) {
     let f = Fixture::with_size(&db, 6500, 100, 256).await;
@@ -272,7 +272,7 @@ async fn grouped_gate_publication_crosses_file_limit_with_complete_chains(db: Pg
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn missing_root_and_cancelled_metadata_reads_release_recovery_owner(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -371,7 +371,7 @@ async fn missing_root_and_cancelled_metadata_reads_release_recovery_owner(db: Pg
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn slow_plan_group_checkpoints_verified_prefix_then_renews_remaining_work(db: PgPool) {
     let f = Fixture::new(&db).await;
@@ -391,7 +391,7 @@ async fn slow_plan_group_checkpoints_verified_prefix_then_renews_remaining_work(
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn plan_group_rechecks_expiry_after_registration_and_ack_lock_waits(db: PgPool) {
     for acknowledgement in [false, true] {

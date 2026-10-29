@@ -169,13 +169,30 @@ file. Objects persist in a named volume. See
 [Case Storage](/docs/architecture/case-storage/) for batch, manifest, and
 publication behavior.
 
-Apply migrations and publish the bundled evaluator:
+Initialize the database:
 
 ```bash
 cargo run -p vigilo -- setup
 ```
 
-The setup command is safe to rerun. It applies pending migrations, builds bundled evaluators for release, and publishes them into the local registry when they are not already present.
+Setup applies embedded migrations, validates database placement, and installs the
+latest compatible [core evaluator collection](./publishing.mdx#core-evaluators)
+into the `vigilo` namespace. It runs without a source checkout or Rust toolchain.
+Repeating setup applies pending migrations and skips matching evaluator versions.
+Changed checksums in applied migrations are rejected. `--migrations-dir` explicitly
+replaces the embedded migration source with a directory of SQL files.
+
+For database-only setup, including offline environments and shard databases:
+
+```bash
+vigilo setup --skip-evaluators
+```
+
+Use `--evaluators YYYY.MM.DD.N` to select an exact published evaluator
+collection. Installation needs GitHub access; migration success is retained if
+installation fails. Rerun setup to retry. Development Compose uses
+`--skip-evaluators`; publish a local evaluator as described in the
+[development infrastructure guide](https://github.com/agent-vigilo/vigilo/blob/main/infra/dev/README.md).
 
 ## Validate The Example
 

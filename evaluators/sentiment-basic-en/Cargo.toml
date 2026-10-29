@@ -2,6 +2,7 @@
 name = "sentiment-basic-en"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 description = "Basic English lexicon sentiment evaluator for Agent Vigilo."
 
 [package.metadata.vigilo]

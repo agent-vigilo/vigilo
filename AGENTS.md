@@ -29,7 +29,7 @@ This file records Vigilo-specific constraints that are easy to miss. A nearer
 
 - Keep evaluator interface vocabulary as `input` and `output`. Preserve the
   strict evaluator identifier format `<namespace>/<name>:<version>`.
-- Treat `wit/evaluator/v1.0.0/evaluator.wit` as the sole pre-release source of
+- Treat `vigilo/wit/evaluator/v1.0.0/evaluator.wit` as the sole pre-release source of
   truth for the evaluator ABI, and freeze a versioned WIT contract on release.
 - Keep each ABI's bindings, identity, validation, mapping, execution, and fixture
   under `vigilo/src/evaluator_abi/`; register it in `vigilo/src/evaluator_abi.rs`.

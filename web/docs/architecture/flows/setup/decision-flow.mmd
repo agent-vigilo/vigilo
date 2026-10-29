@@ -1,0 +1,20 @@
+flowchart TD
+    Start[Setup] --> Schema[Apply migrations and validate placement]
+    Schema --> Skip{Skip evaluators?}
+    Skip -->|Yes| Done[Success]
+    Skip -->|No| Select[Resolve pinned or latest compatible collection]
+    Select --> Valid{Catalog valid and supported?}
+    Valid -->|No| Fail[Fail with context; retain completed work]
+    Valid -->|Yes| Next{More evaluators?}
+    Next -->|No| Done
+    Next -->|Yes| Existing{Installed version?}
+    Existing -->|Matching| Next
+    Existing -->|Conflicting| Fail
+    Existing -->|Absent| Download[Bounded download and checksum verification]
+    Download --> Verify{Package and host ABI match catalog?}
+    Verify -->|No| Fail
+    Verify -->|Yes| Publish[Insert missing version; retain newer and older versions]
+    Publish --> Next
+    Download -. Request or integrity failure .-> Fail
+    Publish -. Database failure .-> Fail
+    Schema -. Database failure .-> Fail

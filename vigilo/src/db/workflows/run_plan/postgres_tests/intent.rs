@@ -17,7 +17,7 @@ async fn replay(db: &PgPool, f: &Fixture, execute: bool) -> Result<Plan> {
     .await
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn fresh_creation_and_execution_intent_commit_together(db: PgPool) {
     let f = Fixture::with_size(&db, 2, 2, 2).await;
@@ -83,7 +83,7 @@ async fn fresh_creation_and_execution_intent_commit_together(db: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn held_plan_requests_execution_only_after_replay_validation(db: PgPool) {
     let f = Fixture::with_size(&db, 2, 2, 2).await;
@@ -133,7 +133,7 @@ async fn held_plan_requests_execution_only_after_replay_validation(db: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn cancellation_while_creation_waits_cannot_enable_execution(db: PgPool) {
     let f = Fixture::with_size(&db, 2, 2, 2).await;

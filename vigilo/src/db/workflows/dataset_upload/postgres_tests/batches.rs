@@ -3,7 +3,7 @@
 //! named service tests separately exercise signed uploads and process death.
 use super::*;
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn group_limits_reject_empty_oversized_and_noncontiguous_checkpoints(db: PgPool) {
     let (mut row, _) = fixture(&db).await;
@@ -56,7 +56,7 @@ async fn group_limits_reject_empty_oversized_and_noncontiguous_checkpoints(db: P
     assert_eq!((progress.case_cursor, progress.batch_count), (65, 65));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn checkpoint_replay_is_exact_and_acknowledgement_is_atomic(db: PgPool) {
     let (row, lease) = fixture(&db).await;
@@ -123,7 +123,7 @@ async fn checkpoint_replay_is_exact_and_acknowledgement_is_atomic(db: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn fences_recheck_expiry_after_registration_and_ack_lock_waits(db: PgPool) {
     for acknowledging in [false, true] {
@@ -194,7 +194,7 @@ async fn store(memory: Memory, limits: FormatLimits) -> Store<Memory> {
     .unwrap()
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn slow_group_checkpoints_a_verified_prefix_before_resuming_remaining_files(db: PgPool) {
     let prepared = prepared().await;
@@ -251,7 +251,7 @@ async fn slow_group_checkpoints_a_verified_prefix_before_resuming_remaining_file
     assert!(memory.0.lock().unwrap().creates.values().all(|&n| n == 1));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn abort_during_group_io_fences_ack_and_cleanup_reconciles_every_registered_key(db: PgPool) {
     let prepared = prepared().await;

@@ -21,7 +21,7 @@ the binary interface contract. They are separate.
 
 | ABI | WIT source | Host adapter | Use |
 | --- | --- | --- | --- |
-| `1.0.0` | `wit/evaluator/v1.0.0/evaluator.wit` | `vigilo-evaluator-v1@1` | Supported evaluator contract |
+| `1.0.0` | `vigilo/wit/evaluator/v1.0.0/evaluator.wit` | `vigilo-evaluator-v1@1` | Supported evaluator contract |
 
 Use the versioned WIT path in `Vigilo.toml` and generated bindings. The host
 accepts only the exact supported `1.0.0` identity and contract hash.
@@ -31,13 +31,19 @@ accepts only the exact supported `1.0.0` identity and contract hash.
 Publishing verifies all of the following before inserting an artifact:
 
 1. `[wit]` names a supported package, world, interface, and ABI version.
-2. The referenced WIT file declares those same values.
+2. Source packages reference an exact WIT file; portable packages declare its
+   immutable contract hash. Both must match the host's supported contract.
 3. The compiled component links against the exact host adapter.
-4. The registry records the artifact content hash, WIT contract hash, and adapter id.
+4. Portable Wasm bytes match their declared BLAKE3 hash and embedded package identity.
+5. The registry records the artifact content hash, WIT contract hash, and adapter id.
 
 A version string alone is not proof of compatibility. Unknown contracts,
 changed frozen contracts, and components compiled for a different interface are
 rejected.
+
+The registry also records the publishing host's Wasmtime version. Vigilo embeds
+the exact resolved runtime version during compilation; reporting it does not
+require Cargo or a lockfile at runtime.
 
 ## Run Pinning
 

@@ -13,15 +13,136 @@ keywords:
 
 # Publishing Evaluators
 
-This guide walks through building and
-<GlossaryTerm term="publish">publishing</GlossaryTerm> a Rust evaluator crate
-to the Agent Vigilo <GlossaryTerm term="evaluator-registry">registry</GlossaryTerm>.
+Publish a portable evaluator package or a prebuilt source package into a
+deployment's evaluator registry. Portable packages require no Rust toolchain,
+Cargo manifest, source checkout, or local WIT files.
 
 Need a build-first walkthrough before publishing? See [Creating Evaluators](./creating-evaluators.mdx), including the dedicated "Using Codex" section.
 
 ---
 
-## Prerequisites
+## Core Evaluators
+
+`vigilo setup` installs the latest compatible official core collection from
+[GitHub Releases](https://github.com/agent-vigilo/vigilo/releases) after applying
+migrations and validating database placement. No separate catalog service is
+required. Evaluators are registered under `vigilo`, for example
+`vigilo/sentiment-basic-en:0.1.0`.
+
+```bash
+vigilo setup
+vigilo setup --skip-evaluators
+```
+
+For a reproducible installation, pass `--evaluators YYYY.MM.DD.N`, replacing
+the placeholder with a published collection identifier. `--skip-evaluators`
+performs database-only setup and cannot be combined with a collection pin.
+
+Collections use `evaluators/YYYY.MM.DD.N` tags: a UTC date and a sequence starting
+at 1. CLI releases use `vigilo/vX.Y.Z`. Each evaluator retains its own semantic
+version; a collection groups exact versions without coupling them to CLI releases.
+Setup searches published, non-prerelease collection tags, orders them by date and
+sequence, and selects the newest collection whose complete ABI set is supported.
+It never uses GitHub's generic latest-release pointer. A pinned incompatible
+collection fails instead of silently selecting another.
+
+Each release contains `catalog.json`, individual `name-version.tar.gz` packages,
+`SHA256SUMS`, and the Apache-2.0 `LICENSE`. The catalog records evaluator names, versions, archive names,
+byte sizes, SHA-256 archive checksums, BLAKE3 Wasm hashes, and WIT identities.
+Setup verifies the catalog, archive, embedded package identity, and exact host ABI
+before publishing. HTTPS access to the official repository establishes the source;
+checksums detect corruption and do not replace publisher authentication.
+
+Downloads are sequential and streamed into temporary files. Catalogs are limited
+to 4 MiB and 1,000 evaluators; each archive is limited to 66 MiB. Discovery scans
+at most 1,000 GitHub releases; pin a collection if that limit is reached. HTTP
+requests have a 10-second connection timeout and a 120-second total timeout.
+Set `VIGILO_GITHUB_TOKEN` when authenticated GitHub API requests are needed to
+avoid anonymous rate limits; it is not sent to archive downloads.
+
+Matching installed versions are skipped without downloading their archives.
+Conflicting content fails; old versions and operator-set lifecycle states are
+preserved. Selecting an older collection adds its missing evaluator versions;
+it does not remove newer versions or switch profiles to older evaluators.
+To use an older evaluator, explicitly change its version reference in the profile.
+Existing runs retain their exact evaluator references. If a
+request or publication fails, setup returns an error; completed migrations and
+publications remain durable. Rerun setup to retry, preferably with the reported
+collection pinned when resuming a specific installation.
+
+### Releasing A Collection
+
+Maintainers run the **Release Core Evaluators** workflow independently of CLI
+releases. It tests and builds core evaluator crates, creates validated portable
+packages, and compares them with the latest published collection. Unchanged
+collections produce no tag or release. Changed package bytes or metadata require
+an evaluator version bump. Core releases use stable semantic versions and reject
+version decreases. Archive generation is deterministic; unchanged
+packages retain identical checksums. Compiler or dependency changes that alter
+package bytes also require a version bump.
+
+Assets are uploaded to a draft release before publication. Upload failure leaves
+a draft for inspection; setup ignores it. Published tags and assets are immutable.
+A workflow retry reserves another sequence rather than overwriting a draft.
+
+To inspect built assets without publishing:
+
+```bash
+cargo build -p vigilo --locked --release
+python3 scripts/releases/core_evaluators.py --prepare-only --output /tmp/core-evaluators
+```
+
+This requires Python 3.11+, the Rust `wasm32-wasip2` target, and a new output
+directory. The preview catalog has a placeholder collection ID. Actual release
+publication also requires GitHub CLI authentication and repository write access.
+
+## Portable Packages
+
+A release archive contains two files at its root:
+
+```text
+sentiment-basic-en-0.1.0.tar.gz
+├── Vigilo.toml
+└── evaluator.wasm
+```
+
+The manifest declares package metadata, the Wasm BLAKE3 hash, and the exact
+supported ABI identity and WIT contract hash. See the
+[portable manifest format](../configuration/vigilo-toml.mdx#portable-package-manifest).
+
+Publish a downloaded archive, or a directory containing these files:
+
+```bash
+vigilo evaluator publish sentiment-basic-en-0.1.0.tar.gz
+vigilo evaluator publish ./sentiment-basic-en-0.1.0
+```
+
+Set `DATABASE_URL` or pass `--database-url` for publication. Archives are read
+without extraction. Content hashes detect corruption; they do not authenticate
+the publisher. Select artifacts from a trusted release source.
+
+### Create a Package
+
+From an evaluator source checkout, build the Wasm and create the release archive:
+
+```bash
+cargo build -p sentiment-basic-en --target wasm32-wasip2 --release
+vigilo evaluator package evaluators/sentiment-basic-en --release \
+  --output sentiment-basic-en-0.1.0.tar.gz
+```
+
+Packaging requires Cargo and the source manifest but no database connection or
+`DATABASE_URL`. It validates the component, embeds its package identity, and
+writes a deterministic archive. Existing output files are never overwritten;
+failed writes do not leave partial release files. Publishing the archive preserves
+the exact Wasm bytes and registry content hash produced by source publication.
+
+`--release` and `--profile` select source artifacts. Portable packages contain
+one artifact; source-profile selection does not change it.
+
+## Source Packages
+
+### Prerequisites
 
 Install `vigilo` via Cargo:
 
@@ -35,15 +156,15 @@ Verify the installation:
 vigilo --version
 ```
 
-Evaluator publishing reads package identity from `Cargo.toml`,
+Source-package publishing reads package identity from `Cargo.toml`,
 validates the declared WIT contract, and expects a prebuilt
 <GlossaryTerm term="evaluator-artifact">WASI 0.2 (Preview 2) WebAssembly component artifact</GlossaryTerm>.
 
 ---
 
-## Setup
+### Source Manifest
 
-Each evaluator requires a [`Vigilo.toml`](../configuration/vigilo-toml.mdx) file at the evaluator crate root alongside `Cargo.toml`.
+Each source package requires a [`Vigilo.toml`](../configuration/vigilo-toml.mdx) file at the evaluator crate root alongside `Cargo.toml`.
 
 At minimum:
 
@@ -52,7 +173,7 @@ At minimum:
 manifest = "Cargo.toml"
 
 [wit]
-path = "../../wit/evaluator/v1.0.0/evaluator.wit"
+path = "../../vigilo/wit/evaluator/v1.0.0/evaluator.wit"
 world = "evaluator-world"
 package = "vigilo:evaluator"
 version = "1.0.0"
@@ -113,7 +234,7 @@ If neither `--release` nor `--profile` is provided, `vigilo` uses the `dev` prof
 
 ## What Happens at Publish Time
 
-When you run `vigilo evaluator publish`, the following steps occur:
+For source packages, publication performs these checks:
 
 1. `Vigilo.toml` is read from the evaluator directory.
 2. The selected `[profile.<name>]` resolves the compiled wasm artifact path.

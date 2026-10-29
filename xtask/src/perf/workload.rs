@@ -2401,9 +2401,9 @@ fn setup_database(
                 database_url,
                 [
                     "setup".into(),
+                    "--skip-evaluators".into(),
                     "--migrations-dir".into(),
                     path_arg(migrations)?,
-                    "--skip-evaluators".into(),
                 ],
             ),
             &[],

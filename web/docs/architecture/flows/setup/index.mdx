@@ -1,0 +1,33 @@
+---
+title: Setup
+sidebar_label: Setup
+description: Database setup and installation of official core evaluator collections.
+---
+
+import Mermaid from '@theme/Mermaid';
+import execution from './execution-flow.mmd';
+import decision from './decision-flow.mmd';
+
+# Setup
+
+Setup applies pending migrations and validates placement before installing the
+selected official evaluator collection. `--skip-evaluators` ends after database
+setup. Collection discovery and bounded downloads belong to the CLI; artifact
+validation and registry publication share the evaluator publishing path.
+
+Installation preserves completed work on failure. Matching evaluator versions
+are skipped on retry, conflicting content fails, and existing profiles, runs,
+and evaluator lifecycle states remain unchanged. Pinning an older collection
+adds missing versions while retaining newer ones; using an older evaluator
+requires an explicit profile reference change. There is no transaction across
+a whole collection. Temporary downloads are cleaned up on success and failure.
+See [Publishing Evaluators](/docs/guides/publishing#core-evaluators) for pins,
+release naming, limits, and retry behavior.
+
+## Execution Flow
+
+<Mermaid value={execution} />
+
+## Decision Flow
+
+<Mermaid value={decision} />

@@ -9,6 +9,9 @@ config:
 flowchart TD
     Start([vigilo evaluator publish])
 
+    Input{Source or portable package?}
+    Source[Resolve source profile and verify WIT file]
+    Portable[Check bounded package, hashes and embedded identity]
     Contract{Declared WIT is the exact supported ABI?}
     Compile{Wasm compiles and links to its adapter?}
     Version{Evaluator version exists?}
@@ -23,14 +26,21 @@ flowchart TD
     VersionFail([Evaluator version conflict])
     HashFail([Duplicate evaluator code conflict])
 
-    Start --> Contract
+    Start --> Input
+    Input -- Source --> Source
+    Input -- Portable --> Portable
+    Source --> Contract
+    Portable --> Contract
 
     Contract -- No --> ContractFail
     Contract -- Yes --> Compile
     Compile -- No --> CompileFail
     Compile -- Yes --> Version
 
-    Version -- Yes --> VersionFail
+    Replay{Same artifact hash?}
+    Version -- Yes --> Replay
+    Replay -- Yes --> Success
+    Replay -- No --> VersionFail
     Version -- No --> Hash
 
     Hash -- Yes --> HashFail

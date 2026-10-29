@@ -17,7 +17,15 @@ import decisionFlowDiagram from './decision-flow.mmd';
 
 # Publish
 
-How `vigilo evaluator publish` validates an evaluator and records it for future runs.
+`vigilo evaluator publish` accepts a source directory, portable directory, or
+portable archive. Portable input is bounded and checked against its content hash,
+embedded identity, and exact supported ABI before database access. Archives are
+read without extraction. Identical publication is idempotent; changed content
+under an existing identity is rejected.
+
+`vigilo evaluator package` performs local preparation and writes a deterministic
+portable archive without contacting the database. See
+[Publishing Evaluators](/docs/guides/publishing) for commands and package layout.
 
 ## Execution Flow
 

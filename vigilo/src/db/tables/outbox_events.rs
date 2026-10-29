@@ -339,7 +339,7 @@ mod tests {
     use super::*;
     use crate::models::outbox_event::OutboxEventDraft;
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx outbox tests"]
     async fn count_publishable_outbox_backlog_tracks_available_delivery_rows(pool: PgPool) {
         insert_outbox_event(&pool, &draft("first")).await.unwrap();

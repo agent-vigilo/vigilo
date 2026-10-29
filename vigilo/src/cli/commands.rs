@@ -49,7 +49,7 @@ pub(crate) struct CommandContextConfig {
 ///
 /// Each variant wraps a subcommand module that implements [`Executable`].
 pub(crate) enum Command {
-    /// Run system setup (install or upgrade)
+    /// Apply database migrations and validate placement configuration
     Setup(setup::Command),
 
     /// Manage system evaluators
@@ -83,6 +83,18 @@ pub(crate) enum Command {
 }
 
 impl Command {
+    /// Packaging is local and does not consume a database connection.
+    pub(crate) fn is_evaluator_package(&self) -> bool {
+        matches!(
+            self,
+            Self::Evaluator(evaluators::CanonicalCommand {
+                command: evaluators::SubCommand::Package { .. }
+            }) | Self::Evaluators(evaluators::Command {
+                command: Some(evaluators::SubCommand::Package { .. })
+            })
+        )
+    }
+
     pub(crate) fn context_config(
         &self,
         control_database_alias: &str,
@@ -107,7 +119,6 @@ impl Command {
             }
             Self::Setup(command) => {
                 placement = command.placement.clone();
-                wasm = command.wasm;
             }
             Self::Evaluator(command) => {
                 if let Some(options) = command.command.wasm_options() {
@@ -387,7 +398,15 @@ mod tests {
 
         assert_eq!(
             visible_subcommands(evaluator),
-            ["list", "publish", "show", "search", "test", "set-state"]
+            [
+                "list",
+                "publish",
+                "package",
+                "show",
+                "search",
+                "test",
+                "set-state"
+            ]
         );
         assert_eq!(
             visible_subcommands(run_shard),

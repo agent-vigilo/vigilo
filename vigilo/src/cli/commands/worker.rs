@@ -1633,7 +1633,7 @@ mod tests {
         }
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for worker database containment tests"]
     async fn failed_worker_database_does_not_block_healthy_database(pool: PgPool) {
         let database_name = sqlx::query_scalar::<_, String>("SELECT current_database()")

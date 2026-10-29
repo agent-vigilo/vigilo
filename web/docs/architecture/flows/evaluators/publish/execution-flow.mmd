@@ -14,10 +14,20 @@ sequenceDiagram
     User->>Vigilo: vigilo evaluator publish
     activate Vigilo
 
-    Vigilo->>Vigilo: Resolve exact supported WIT ABI
+    alt Source directory
+        Vigilo->>Vigilo: Resolve source profile, WIT file and package identity
+    else Portable directory or archive
+        Vigilo->>Vigilo: Read bounded manifest and Wasm without extraction
+        Vigilo->>Vigilo: Verify artifact hash and embedded package identity
+    end
+    Vigilo->>Vigilo: Resolve exact supported WIT ABI and contract hash
     Vigilo->>Vigilo: Compile Wasm and typed-link selected adapter
     Vigilo->>DB: Check evaluator version uniqueness
-    DB-->>Vigilo: Version available
+    alt Same identity and content hash already exist
+        DB-->>Vigilo: Existing evaluator
+        Vigilo-->>User: Idempotent success
+    else Version available
+        DB-->>Vigilo: Version available
 
     Vigilo->>DB: Check evaluator hash uniqueness
     DB-->>Vigilo: Hash available
@@ -26,4 +36,5 @@ sequenceDiagram
     DB-->>Vigilo: Saved
 
     Vigilo-->>User: Success response
+    end
     deactivate Vigilo

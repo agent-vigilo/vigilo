@@ -171,7 +171,7 @@ export const glossarySections: readonly GlossarySection[] = [
   {
     id: 'evaluator-packaging',
     entries: [
-      {id: 'wit', term: 'WIT', definition: 'Wasm Interface Type language used to define Component Model interfaces and worlds.', scope: 'Versioned evaluator contracts live under `wit/evaluator/<version>/evaluator.wit` and become immutable when released.'},
+      {id: 'wit', term: 'WIT', definition: 'Wasm Interface Type language used to define Component Model interfaces and worlds.', scope: 'Versioned evaluator contracts live under `vigilo/wit/evaluator/<version>/evaluator.wit` and become immutable when released.'},
       {id: 'wit-world', term: 'WIT world', definition: 'WIT boundary that groups the evaluator\'s imported and exported interfaces.', scope: 'The evaluator implements `evaluator-world`.'},
       {id: 'evaluator-abi', term: 'Evaluator ABI', definition: 'Exact versioned WIT binary contract implemented by an evaluator WebAssembly component.', scope: 'Identified by package, world, interface, version, and immutable contract hash.'},
       {id: 'evaluator-adapter', term: 'Evaluator host adapter', definition: 'Version-specific host binding that validates, invokes, and maps one supported evaluator ABI.', scope: 'Selected from the run\'s immutable execution plan.'},
@@ -181,7 +181,7 @@ export const glossarySections: readonly GlossarySection[] = [
       {id: 'evaluator-registry', term: 'Evaluator registry', definition: 'Durable catalog of published evaluator identities, metadata, contracts, and artifact content.', scope: 'Contains many versioned evaluators.'},
       {id: 'evaluator-state', term: 'Evaluator state', definition: 'Registry lifecycle value: `active`, `yanked`, `deprecated`, `disabled`, or `removed`.', scope: 'One current state per published evaluator identity.'},
       {id: 'package-manifest', term: 'Package manifest', definition: '`Cargo.toml` file that supplies evaluator crate identity and version.', scope: 'One Cargo manifest per evaluator crate.'},
-      {id: 'evaluator-manifest', term: 'Evaluator manifest', definition: '`Vigilo.toml` file describing artifact paths, WIT expectations, and publish metadata.', scope: 'One per evaluator package.'},
+      {id: 'evaluator-manifest', term: 'Evaluator manifest', definition: '`Vigilo.toml` file describing source build profiles or portable artifact identity, ABI requirements, and publication metadata.', scope: 'One per evaluator package.'},
       {id: 'wit-contract', term: 'WIT contract', definition: 'Immutable versioned interface definition that a compiled evaluator component must implement.', scope: 'Validated by declaration, contract hash, and typed component linking.'},
       {id: 'build-profile', term: 'Build profile', definition: 'Named artifact selection in `Vigilo.toml`, such as `dev` or `release`.', scope: 'Selects a build output; not an evaluation run profile.'},
       {id: 'wasm-store', term: 'Wasm store', definition: 'Fresh Wasmtime execution state created for one evaluator invocation.', scope: 'One isolated store per invocation.'},

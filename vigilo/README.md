@@ -1,55 +1,61 @@
 # Vigilo
 
-Command Line Interface application for operating Agent Vigilo.
+**Evaluation infrastructure for AI agents.**
 
-## Package Contents
+> **Warning: pre-v1 release — API subject to change**
+>
+> Vigilo is under active development. Public APIs, CLI commands, configuration
+> formats, and storage schemas may change before 1.0, including breaking changes.
+> Pin the version you deploy and review release notes before updating. Do not
+> assume backward compatibility between pre-v1 releases.
 
-Quick-search overview of the main modules under `vigilo/src`.
+Test your agents against your own cases and criteria. Inspect failures, compare
+results, and use pass/fail gates to decide what ships.
 
-| Module | Summary |
-| --- | --- |
-| `main` | CLI binary entry point: argument parsing, logging setup, context creation, and exit codes. |
-| `cli` | Clap application definition, global flags, and command dispatch. |
-| `cli::commands` | Top-level command router for setup, dataset, evaluator, run, database, rebalance, coordinator, and worker commands. |
-| `cli::commands::setup` | Applies database migrations and optionally publishes built-in evaluators. |
-| `cli::commands::evaluators` | Publish, search, show, test, and state-management commands for evaluator registry entries. |
-| `cli::commands::dataset` | Upload, resume, inspect, abort, and clean immutable dataset uploads. |
-| `cli::commands::shard` | Database registration and lifecycle, routed shard inspection/movement, and rebalance commands. |
-| `cli::commands::run` | Run creation, validation, status, watch, cancellation, result summary, and export commands. |
-| `cli::commands::coordinator` | Coordinator process modes, orchestration cycle, and placement-scoped failure handling for creation recovery, dispatch, finalization, and outbox publishing. |
-| `cli::commands::worker` | Worker process modes and chunk execution flow for agent calls and evaluator processing. |
-| `cli::args` | Shared clap value parsers for existing files and directories. |
-| `context` | Lazy process-wide service container for database, blob storage, HTTP, messaging, output, registry, and Wasm runtime. |
-| `context::database` | Lifetime PostgreSQL connection configuration and lazy pools with live placement status and role admission. |
-| `context::http` | Lazy shared `reqwest` client initialization. |
-| `context::messaging` | Lazy RabbitMQ client initialization. |
-| `context::output` | Structured stdout writer for JSON and TOON command output. |
-| `context::registry` | In-memory cache for compiled evaluator Wasm components. |
-| `context::storage` | Resolves configured storage owners and shares bounded adapter instances. |
-| `context::wasm` | Wasmtime setup, evaluator artifact preparation, WIT mapping, and evaluator test execution. |
-| `contracts` | Host-side runtime contracts for run inputs, evaluator I/O, evaluator refs, and aggregation. |
-| `contracts::run` | Run profile, agent config, aggregation policy, and dataset input payloads. |
-| `contracts::evaluator` | Canonical evaluator `input` and `output` payloads plus normalization helpers. |
-| `contracts::evaluator_ref` | Parser for fully qualified evaluator ids: `<namespace>/<name>:<version>`. |
-| `contracts::case_storage` | Immutable dataset/run-plan formats, object references, limits, encoding, and validation. |
-| `contracts::aggregation` | Runtime aggregation policy for normalized evaluator findings. |
-| `db` | Database access layer split into migrations, table helpers, and multi-table workflows. |
-| `db::migrations` | SQL migration runner. |
-| `db::tables` | Narrow row-oriented database helpers. |
-| `db::workflows` | Transactional and concurrency-aware database operations for runs, chunks, executions, and cancellation. |
-| `db::workflows::dataset_upload` | Upload leases, grouped file ownership/checkpoints, finalized catalog publication, and cleanup records. |
-| `db::workflows::run_plan` | Run preparation ownership, grouped file metadata, shard totals, admission progress, and activation. |
-| `db::workflows::run_creation` | Compact creation progress queries and shared recovery-reporting types. |
-| `models` | Persistence model structs that mirror database rows and drafts. |
-| `blob_storage` | Provider-neutral object I/O contract and bounded S3-compatible adapter. |
-| `dataset_ingestion` | Bounded input parsing/spooling, immutable batch publication, resumable uploads, and exact cleanup. |
-| `run_planning` | Verifies finalized datasets and publishes immutable configuration, chunk plans, and gate counts. |
-| `run_admission` | Seeds and verifies execution-local metadata, recovers requested admission, and activates dispatch after exact coverage. |
-| `case_reader` | Verifies worker assignments and complete touched case files, with bounded immutable-byte reuse. |
-| `evaluator_abi` | Registry and adapters for evaluator identity, bindings, validation, mapping, and execution. |
-| `agent_client` | Worker-side HTTP client for invoking configured agent endpoints and normalizing responses. |
-| `evaluators` | Built-in evaluator discovery, build, bootstrap, and publishing workflows. |
-| `manifest` | `Vigilo.toml` evaluator manifest parsing. |
-| `mq` | RabbitMQ topology, publishing, worker consumption, retry, and quarantine handling. |
-| `outbox` | Durable outbox event publication from database rows to the message broker. |
-| `runtime` | Generic service runner for long-running coordinator and worker processes. |
+[Get started](https://agentvigilo.com/docs/guides/getting-started) ·
+[Documentation](https://agentvigilo.com/docs/) ·
+[GitHub](https://github.com/agent-vigilo/vigilo)
+
+## What You Get
+
+- **Release gates:** define evaluation criteria and use the results in your CI or
+  deployment workflow.
+- **Durable runs:** distribute work across workers, retry failures, and retain
+  results for inspection and export.
+- **Versioned evaluators:** use core evaluators or publish your own sandboxed
+  WebAssembly components. Runs retain their exact evaluator versions.
+- **Self-hosted infrastructure:** run evaluations on your own infrastructure with
+  PostgreSQL, RabbitMQ, and S3-compatible object storage.
+
+## Install
+
+```bash
+cargo install vigilo --locked
+vigilo --help
+```
+
+This crate installs the `vigilo` command, including coordinator and worker modes.
+It is an application, not a Rust library dependency.
+
+## Run Your First Evaluation
+
+Follow the [getting-started guide](https://agentvigilo.com/docs/guides/getting-started)
+to start the local services, configure an agent endpoint, and run the example.
+Bring your test cases, choose your evaluators, and define the criteria for passing.
+
+For an existing deployment, `vigilo setup` applies database migrations and
+installs the latest compatible core evaluators. Use
+`--evaluators YYYY.MM.DD.N` to pin a published collection, or
+`--skip-evaluators` for database-only setup.
+
+## Explore
+
+- [CLI reference](https://agentvigilo.com/docs/guides/cli-reference)
+- [Create evaluators](https://agentvigilo.com/docs/guides/creating-evaluators)
+- [Publish evaluators](https://agentvigilo.com/docs/guides/publishing)
+- [Architecture](https://agentvigilo.com/docs/architecture/structure/)
+- [Report an issue](https://github.com/agent-vigilo/vigilo/issues)
+
+## License
+
+Licensed under the [Apache License, Version 2.0](https://github.com/agent-vigilo/vigilo/blob/main/LICENSE).

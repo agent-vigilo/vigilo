@@ -1,5 +1,5 @@
 wit_bindgen::generate!({
-    path: "../../wit/evaluator/v1.0.0/evaluator.wit",
+    path: "../../vigilo/wit/evaluator/v1.0.0/evaluator.wit",
     world: "evaluator-world",
 });
 

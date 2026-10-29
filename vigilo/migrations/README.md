@@ -1,6 +1,9 @@
 # Database schema
 
-`vigilo setup` applies the numbered SQL files in dependency order. Every database
+`vigilo setup` applies the numbered SQL files embedded in the executable in
+dependency order. `--migrations-dir` explicitly selects a directory instead.
+SQLx locks migration execution and verifies applied checksums before applying
+pending migrations transactionally. Use `--skip-evaluators` for database-only setup; default setup also installs the official core evaluator collection. Every database
 placement uses the same schema; runtime routing determines which records each
 placement owns.
 

@@ -3,7 +3,7 @@
 //! publication, so the workflow itself must reject inconsistent ledger evidence.
 use super::*;
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn publication_rejects_each_incomplete_ledger_condition_without_exposing_routes(db: PgPool) {
     let cases = [

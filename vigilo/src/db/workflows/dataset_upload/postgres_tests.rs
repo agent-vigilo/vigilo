@@ -75,7 +75,7 @@ fn batch(row: &Upload, start: i32, end: i32) -> Object {
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn leases_fence_stale_owners_and_acknowledgements_are_contiguous(db: PgPool) {
     let (row, lease) = fixture(&db).await;
@@ -112,7 +112,7 @@ async fn leases_fence_stale_owners_and_acknowledgements_are_contiguous(db: PgPoo
     assert!(finalizing(&db, replacement).await.is_err());
     assert!(catalog(&db, row.id).await.unwrap().is_none());
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn changed_input_owner_limits_and_unowned_keys_cannot_replay(db: PgPool) {
     let (row, lease) = fixture(&db).await;
@@ -173,7 +173,7 @@ async fn changed_input_owner_limits_and_unowned_keys_cannot_replay(db: PgPool) {
     assert!(finish_cleanup(&db, cleanup).await.unwrap());
     assert!(renew(&db, cleanup, true).await.is_err());
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn expiry_is_bounded_and_revokes_authority(db: PgPool) {
     let (row, lease) = fixture(&db).await;
@@ -294,7 +294,7 @@ impl Transport for Memory {
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn batch_group_registers_before_io_and_partial_upload_keeps_atomic_progress(db: PgPool) {
     let input = tempfile::NamedTempFile::new().unwrap();
@@ -378,7 +378,7 @@ async fn batch_group_registers_before_io_and_partial_upload_keeps_atomic_progres
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn object_commit_before_ack_recovers_exactly_and_finalizes_multilevel_index(db: PgPool) {
     let input = tempfile::NamedTempFile::new().unwrap();
@@ -462,7 +462,7 @@ async fn object_commit_before_ack_recovers_exactly_and_finalizes_multilevel_inde
     assert!(renew(&db, resumed, false).await.is_err());
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn corrupt_acknowledged_batch_never_publishes_and_abort_cleanup_is_exact(db: PgPool) {
     let input = tempfile::NamedTempFile::new().unwrap();
@@ -581,7 +581,7 @@ async fn corrupt_acknowledged_batch_never_publishes_and_abort_cleanup_is_exact(d
     assert!(claim(&db, row.id, true).await.is_err());
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn lease_expiring_while_waiting_for_row_lock_cannot_be_resurrected(db: PgPool) {
     let (row, lease) = fixture(&db).await;

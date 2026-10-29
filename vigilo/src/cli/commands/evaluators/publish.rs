@@ -2,8 +2,8 @@
 //!
 //! This module resolves the requested manifest profile, prepares the evaluator
 //! Wasm artifact, and inserts it into the built-in Vigilo registry namespace.
-//! Callers must provide an evaluator crate directory with `Vigilo.toml`; release
-//! publishing expects the release Wasm artifact to have been built.
+//! Accepts source directories and portable package directories or archives.
+//! Source profiles select prebuilt artifacts; portable packages are self-contained.
 
 use super::*;
 

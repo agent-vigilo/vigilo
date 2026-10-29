@@ -12,7 +12,7 @@ use super::{
     *,
 };
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn batched_summary_reads_preserve_run_and_requested_shard_isolation(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 11).await;
@@ -59,7 +59,7 @@ async fn batched_summary_reads_preserve_run_and_requested_shard_isolation(pool: 
     assert_eq!(statements.len(), 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn empty_and_invalid_summary_reads_do_not_submit_sql(pool: PgPool) {
     let run = Uuid::now_v7();
@@ -79,7 +79,7 @@ async fn empty_and_invalid_summary_reads_do_not_submit_sql(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn missing_checkpoint_update_rolls_back_receipt_consumption(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 1).await;

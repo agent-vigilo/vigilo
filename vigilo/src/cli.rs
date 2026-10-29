@@ -42,7 +42,7 @@ pub(super) trait Executable {
 pub(crate) struct App {
     /// Database URL (connection string)
     #[arg(long, env = "DATABASE_URL")]
-    pub database_url: String,
+    pub database_url: Option<String>,
 
     /// Maximum Postgres connections in each database pool
     #[arg(long = "database-max-connections", env = "DATABASE_MAX_CONNECTIONS", value_name = "COUNT_PER_DATABASE", default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=256))]
@@ -80,6 +80,17 @@ pub(crate) struct App {
     pub command: Command,
 }
 
+impl App {
+    /// Database-backed commands require a URL; local packaging never opens a pool.
+    pub(crate) fn database_uri(&self) -> anyhow::Result<String> {
+        match &self.database_url {
+            Some(url) => Ok(url.clone()),
+            None if self.command.is_evaluator_package() => Ok(String::new()),
+            None => anyhow::bail!("--database-url or DATABASE_URL is required for this command"),
+        }
+    }
+}
+
 #[async_trait]
 impl Executable for App {
     async fn exec(self, context: Context) -> anyhow::Result<()> {
@@ -95,6 +106,36 @@ mod tests {
     };
 
     use super::App;
+
+    #[test]
+    fn only_local_packaging_can_omit_database_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut package = App::try_parse_from([
+            "vigilo",
+            "evaluator",
+            "package",
+            dir.path().to_str().unwrap(),
+            "--output",
+            "example.tar.gz",
+        ])
+        .unwrap();
+        package.database_url = None;
+        assert_eq!(package.database_uri().unwrap(), "");
+        let mut publish = App::try_parse_from([
+            "vigilo",
+            "evaluator",
+            "publish",
+            dir.path().to_str().unwrap(),
+        ])
+        .unwrap();
+        publish.database_url = None;
+        assert!(publish.database_uri().is_err());
+        publish.database_url = Some("postgresql://control/vigilo".into());
+        assert_eq!(
+            publish.database_uri().unwrap(),
+            "postgresql://control/vigilo"
+        );
+    }
 
     #[test]
     fn cli_definition_has_no_argument_conflicts() {

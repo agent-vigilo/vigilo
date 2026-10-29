@@ -102,7 +102,7 @@ async fn create_migrated_target_database() -> (String, String) {
 
     Postgres::create_database(&database_url).await.unwrap();
     let pool = PgPool::connect(&database_url).await.unwrap();
-    sqlx::migrate!("../migrations").run(&pool).await.unwrap();
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     pool.close().await;
 
     (database_name, database_url)

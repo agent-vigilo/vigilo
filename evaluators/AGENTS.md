@@ -10,7 +10,7 @@ These rules add to the root guidance for crates under `evaluators/`.
 - Make results deterministic for identical declared inputs. If the contract
   intentionally permits nondeterminism, make its source explicit and controllable
   in tests.
-- Implement the current contract from `wit/evaluator/v1.0.0/evaluator.wit`.
+- Implement the current contract from `vigilo/wit/evaluator/v1.0.0/evaluator.wit`.
   Evaluator crates select an ABI but never contain host adapters or compatibility
   dispatch; those remain under `vigilo/src/evaluator_abi/`.
 - Read canonical evaluator `input` fields and return canonical `output`. Do not

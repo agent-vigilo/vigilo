@@ -1541,7 +1541,7 @@ mod tests {
         assert!(context.cell.get().unwrap().control_pool.get().is_none());
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn configured_statement_timeout_cancels_slow_query_and_keeps_pool_usable(pool: PgPool) {
         let database_url = isolated_database_url(&pool).await;
@@ -1578,7 +1578,7 @@ mod tests {
         db.close().await;
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn outer_database_deadline_rolls_back_owned_transaction(pool: PgPool) {
         sqlx::query("CREATE TABLE timeout_probe (value INTEGER NOT NULL)")
@@ -1611,7 +1611,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn execution_routes_active_primary_placement_to_control_pool(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -1641,7 +1641,7 @@ mod tests {
         assert_eq!(placement.status, SHARD_PLACEMENT_STATUS_ACTIVE);
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn draining_placement_serves_owned_routes_but_rejects_new_ownership(pool: PgPool) {
         sqlx::query(
@@ -1678,7 +1678,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn execution_rejects_moving_placement(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -1701,7 +1701,7 @@ mod tests {
         assert!(error.to_string().contains("not dispatchable"));
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn execution_placement_refreshes_after_explicit_invalidation(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -1749,7 +1749,7 @@ mod tests {
         assert!(error.to_string().contains("not dispatchable"));
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn stale_execution_route_cannot_claim_after_move_begins(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -1803,7 +1803,7 @@ mod tests {
         ));
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn worker_stale_hint_invalidates_cache_and_claims_current_epoch(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool.clone());
@@ -1882,7 +1882,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn missing_admission_is_repaired_for_an_unchanged_route(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool.clone());
@@ -1923,7 +1923,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn missing_admission_repair_rechecks_route_after_waiting_for_fence(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool.clone());
@@ -1990,7 +1990,7 @@ mod tests {
         assert_eq!(admission_count, 0);
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn routed_cancellation_waits_for_shard_move_admission(pool: PgPool) {
         let database_name = sqlx::query_scalar::<_, String>("SELECT current_database()")
@@ -2046,7 +2046,7 @@ mod tests {
         assert!(outcome.cancelled);
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn dropped_write_transaction_releases_waiting_move_fence(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool.clone());
@@ -2112,7 +2112,7 @@ mod tests {
         assert_eq!(state, "draining");
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn cleanup_admission_allows_draining_but_rejects_moving(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -2159,7 +2159,7 @@ mod tests {
         ));
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn execution_placement_requires_stored_shard_placement(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -2178,7 +2178,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn execution_routes_for_run_returns_routed_primary_pools(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -2213,7 +2213,7 @@ mod tests {
         assert_eq!(routed[1].1, DEFAULT_DATABASE_ALIAS);
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn execution_read_routes_for_run_include_moving_placements(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -2247,7 +2247,7 @@ mod tests {
         assert_eq!(readable[0].1, DEFAULT_DATABASE_ALIAS);
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn placement_rejects_alias_disabled_after_pool_initialization(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -2278,7 +2278,7 @@ mod tests {
         assert!(database_router.placement_pools.get().is_some());
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn execution_rejects_live_non_shard_role(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -2315,7 +2315,7 @@ mod tests {
         assert!(error.to_string().contains("not shard-capable"));
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn placement_discovers_alias_added_after_pool_initialization(pool: PgPool) {
         let database_url = isolated_database_url(&pool).await;
@@ -2345,7 +2345,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn placement_requires_restart_after_connection_metadata_changes(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -2375,7 +2375,7 @@ mod tests {
         assert!(error.to_string().contains("restart Vigilo"));
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn active_placement_with_missing_env_var_fails_clearly(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);
@@ -2398,7 +2398,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
     async fn unrelated_missing_placement_secret_does_not_block_healthy_database(pool: PgPool) {
         let database_router = database_router_with_control_pool(pool);

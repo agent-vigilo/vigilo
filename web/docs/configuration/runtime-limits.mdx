@@ -15,16 +15,23 @@ as CLI flags or environment variables. Vigilo parses subsystem settings only
 for commands that consume that subsystem; unrelated configuration cannot block
 a database-only command.
 
+`setup --skip-evaluators` does not download or compile evaluators. Default setup
+uses the host's default Wasm limits when validating downloaded packages. See
+[core evaluator installation](../guides/publishing.mdx#core-evaluators) for download
+limits, collection pins, and GitHub authentication.
+
 ## Command Scope
 
 ```mermaid
 flowchart LR
-    root["All commands<br/>database client + output"]
+    root["Commands<br/>output + scoped services"]
+    setup["setup<br/>placement + migrations + core evaluators"]
     create["run create<br/>placement + creation + DB resilience"]
     coordinator["coordinator<br/>messaging + creation + DB resilience"]
     worker["worker<br/>messaging + Wasm + DB resilience"]
-    evaluator["setup / evaluator publish or test<br/>Wasm"]
+    evaluator["evaluator package, publish or test<br/>Wasm"]
 
+    root --> setup
     root --> create
     root --> coordinator
     root --> worker
@@ -32,9 +39,9 @@ flowchart LR
 ```
 
 `DATABASE_URL`, database-pool settings, `VIGILO_CONTROL_DATABASE_ALIAS`, and
-output settings are root options because every current command uses the control
-database. `MESSAGING_URL` is accepted only by `coordinator` and `worker`.
-Wasm limits are accepted only by `worker`, `setup`, `evaluator publish`, and
+output settings are root options. Registry and runtime commands require a database
+URL; `evaluator package` performs local preparation without one. `MESSAGING_URL` is accepted only by `coordinator` and `worker`.
+Wasm limits are accepted only by `worker`, `evaluator package`, `evaluator publish`, and
 `evaluator test`. Command-scoped CLI flags follow their owning command, while
 the existing environment-variable names remain compatible.
 
@@ -193,7 +200,7 @@ table, instance, timeout, and logging limits.
 use. Workers also use a process-wide
 <GlossaryTerm term="evaluator-semaphore">evaluator semaphore</GlossaryTerm> so
 valid evaluators cannot exhaust host resources. These flags are scoped to
-`worker`, `setup`, `evaluator publish`, and `evaluator test`.
+`worker`, `evaluator package`, `evaluator publish`, and `evaluator test`.
 
 | Flag | Environment | Default | Purpose |
 | --- | --- | ---: | --- |
