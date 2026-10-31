@@ -11,7 +11,7 @@ maturity = "basic"
 intended_use = "example_only"
 
 [wit]
-path = "../../wit/evaluator/v1.0.0/evaluator.wit"
+path = "../../vigilo/wit/evaluator/v1.0.0/evaluator.wit"
 world = "evaluator-world"
 package = "vigilo:evaluator"
 version = "1.0.0"

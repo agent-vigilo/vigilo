@@ -74,8 +74,8 @@ pub(crate) enum SubCommand {
         #[command(flatten)]
         wasm: WasmOptions,
 
-        /// Path to evaluator crate
-        #[arg(value_parser = parse_dir)]
+        /// Source directory, portable package directory, or .tar.gz archive
+        #[arg(value_parser = parse_package_path)]
         evaluator_path: PathBuf,
 
         /// Publish evaluator built in release mode, with optimizations
@@ -84,6 +84,21 @@ pub(crate) enum SubCommand {
 
         /// Publish evaluator built with the specified profile
         #[arg(long, value_name = "PROFILE", conflicts_with = "release")]
+        profile: Option<String>,
+    },
+    /// Create a portable release archive from a prebuilt source package
+    Package {
+        #[command(flatten)]
+        wasm: WasmOptions,
+        /// Evaluator source directory containing Vigilo.toml
+        #[arg(value_parser = parse_dir)]
+        evaluator_path: PathBuf,
+        /// Destination archive; existing files are never overwritten
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(short, long)]
+        release: bool,
+        #[arg(long, conflicts_with = "release")]
         profile: Option<String>,
     },
     /// Show evaluator details
@@ -164,6 +179,32 @@ impl Executable for SubCommand {
                 release,
                 profile,
             } => publish::exec(context, evaluator_path, release, profile).await,
+            SubCommand::Package {
+                wasm: _,
+                evaluator_path,
+                output,
+                release,
+                profile,
+            } => {
+                let component = context
+                    .wasm()
+                    .await?
+                    .prepare_evaluator(evaluator_path, get_manifest_profile(release, profile))?;
+                crate::evaluator_package::write(
+                    &output,
+                    crate::evaluator_package::PackageInput {
+                        name: component.name,
+                        version: component.version,
+                        description: component.description,
+                        tags: component.tags,
+                        metadata: component.metadata,
+                        abi: component.abi,
+                        wasm: component.wasm_bytes,
+                    },
+                )?;
+                info!("created evaluator package: {}", output.display());
+                Ok(())
+            }
             SubCommand::Show { evaluator } => show::exec(context, evaluator).await,
             SubCommand::Search {
                 namespace,
@@ -188,7 +229,9 @@ impl Executable for SubCommand {
 impl SubCommand {
     pub(crate) fn wasm_options(&self) -> Option<WasmOptions> {
         match self {
-            Self::Publish { wasm, .. } | Self::Test { wasm, .. } => Some(*wasm),
+            Self::Publish { wasm, .. } | Self::Package { wasm, .. } | Self::Test { wasm, .. } => {
+                Some(*wasm)
+            }
             _ => None,
         }
     }
@@ -241,5 +284,15 @@ impl Executable for Command {
             Some(subcommand) => subcommand.exec(context).await,
             None => list(context).await,
         }
+    }
+}
+
+/// Accepts only an existing directory or archive file; package validation follows.
+fn parse_package_path(value: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if path.is_dir() || path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!("'{value}' is not an evaluator package path"))
     }
 }

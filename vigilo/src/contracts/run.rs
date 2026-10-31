@@ -157,6 +157,18 @@ pub(crate) struct AgentHttpConfig {
     /// Optional per-request timeout override. Falls back to profile defaults.
     #[serde(default)]
     pub(crate) timeout_secs: Option<u32>,
+
+    /// Optional serialized request-body limit, bounded by the worker ceiling.
+    #[serde(default)]
+    pub(crate) max_request_bytes: Option<u64>,
+
+    /// Optional response-body limit, bounded by the worker ceiling.
+    #[serde(default)]
+    pub(crate) max_response_bytes: Option<u64>,
+
+    /// Maximum accepted Retry-After delay in seconds (default 600, maximum 86400).
+    #[serde(default)]
+    pub(crate) max_retry_after_secs: Option<u32>,
 }
 
 /// Default execution policy for run processing.

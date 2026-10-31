@@ -53,7 +53,7 @@ fn result_contract(result: &RunResultsSummary) -> Value {
     })
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn results_batch_preserves_partial_unscored_and_unavailable_route_behavior(pool: PgPool) {
     let run = Uuid::now_v7();
@@ -106,7 +106,7 @@ async fn results_batch_preserves_partial_unscored_and_unavailable_route_behavior
     assert_eq!(reads, 1, "same-database results summary reads: {reads}");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn results_batch_preserves_ascending_shard_score_addition_across_aliases(pool: PgPool) {
     let run = Uuid::now_v7();

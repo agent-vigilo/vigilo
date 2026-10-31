@@ -79,6 +79,8 @@ pub(crate) async fn load(db: &PgPool, id: Uuid) -> Result<Option<Plan>> {
 }
 /// Begin atomically with the run row; replay checks all frozen identities and
 /// never re-resolves evaluator artifacts for an already durable creation.
+/// Execution intent commits with identity; a valid creating replay can request
+/// execution, but preparation-only retries never revoke an existing request.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn begin(
     db: &PgPool,
@@ -89,6 +91,7 @@ pub(crate) async fn begin(
     draft: &RunDraft,
     execution: &EvaluatorExecutionPlan,
     assignments: &[run_create::RunShardPlacementAssignment],
+    execute: bool,
 ) -> Result<Plan> {
     limits.validate()?;
     ensure!(
@@ -110,13 +113,13 @@ pub(crate) async fn begin(
             .bind(id.to_string())
             .execute(&mut *tx)
             .await?;
-        if let Some(existing) =
-            sqlx::query_as::<_, (String, String, Json<serde_json::Value>, String)>(
-                queries::SELECT_RUN,
-            )
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?
+        let creating = if let Some(existing) = sqlx::query_as::<
+            _,
+            (String, String, Json<serde_json::Value>, String),
+        >(queries::SELECT_RUN)
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
         {
             ensure!(existing.3 != "cancelled", "run was cancelled");
             ensure!(
@@ -142,6 +145,7 @@ pub(crate) async fn begin(
                     },
                 "run replay changed profile, dataset, or storage owner"
             );
+            existing.3 == "creating"
         } else {
             run_create::insert_run_create(&mut tx, id, draft, "creating").await?;
             sqlx::query(queries::INSERT_PLAN)
@@ -151,11 +155,14 @@ pub(crate) async fn begin(
                 .bind(Json(limits))
                 .bind(Json(execution))
                 .bind(Json(assignments))
+                .bind(execute)
                 .execute(&mut *tx)
                 .await?;
-        }
-        tx.commit().await?;
-        let row = load(db, id)
+            true
+        };
+        let mut row: Plan = sqlx::query_as(queries::SELECT_PLAN)
+            .bind(id)
+            .fetch_optional(&mut *tx)
             .await?
             .ok_or_else(|| anyhow::anyhow!("run ID belongs to another creation workflow"))?;
         ensure!(
@@ -166,6 +173,16 @@ pub(crate) async fn begin(
                 && row.assignments.0 == assignments,
             "run plan replay changed immutable inputs"
         );
+        if execute && creating && !row.execution_requested {
+            let changed = sqlx::query(queries::REQUEST_EXECUTION)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            ensure!(changed == 1, "run is no longer creating");
+            row.execution_requested = true;
+        }
+        tx.commit().await?;
         Ok(row)
     })
     .await
@@ -320,24 +337,20 @@ pub(crate) async fn publish(
         let references=[&manifest.configuration,&manifest.chunks.object]
             .into_iter().chain(manifest.shards.iter().filter_map(|s|s.gate_counts.first.as_ref()))
             .map(|reference|serde_json::json!({"object_key":reference.key,"reference":reference})).collect::<Vec<_>>();
-        let acknowledged:bool=sqlx::query_scalar(queries::HAS_ACKNOWLEDGED_REFERENCES)
-            .bind(lease.run_id).bind(Json(references)).fetch_one(&mut *tx).await?;
-        ensure!(acknowledged,"plan root references an unacknowledged object");
-        let missing: bool = sqlx::query_scalar(queries::HAS_UNACKNOWLEDGED_OBJECTS)
-            .bind(lease.run_id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let (acknowledged, missing, manifest_acknowledged): (bool, bool, bool) =
+            sqlx::query_as(queries::SELECT_PUBLICATION_CHECKS)
+                .bind(lease.run_id)
+                .bind(Json(references))
+                .bind(&root.key)
+                .bind(Json(root))
+                .fetch_one(&mut *tx)
+                .await?;
+        ensure!(acknowledged, "plan root references an unacknowledged object");
         ensure!(
             !missing && row.chunk_cursor == manifest.chunk_count,
             "incomplete run-plan object coverage"
         );
-        let published: bool = sqlx::query_scalar(queries::HAS_MANIFEST)
-            .bind(lease.run_id)
-            .bind(&root.key)
-            .bind(Json(root))
-            .fetch_one(&mut *tx)
-            .await?;
-        ensure!(published, "manifest object not acknowledged");
+        ensure!(manifest_acknowledged, "manifest object not acknowledged");
         let mut total = 0i32;
         for (shard, expected) in shards.iter().zip(&manifest.shards) {
             ensure!(

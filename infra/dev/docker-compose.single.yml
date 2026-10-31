@@ -105,7 +105,7 @@ services:
 
   setup:
     <<: *vigilo-rust-service
-    command: ["cargo", "run", "-p", "vigilo", "--", "setup"]
+    command: ["cargo", "run", "-p", "vigilo", "--", "setup", "--skip-evaluators"]
     environment:
       <<: *vigilo-env
       VIGILO_DEFAULT_SHARD_DATABASE_ALIAS: ${VIGILO_DEFAULT_SHARD_DATABASE_ALIAS:-primary}

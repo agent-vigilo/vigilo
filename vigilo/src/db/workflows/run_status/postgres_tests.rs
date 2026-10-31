@@ -28,7 +28,7 @@ fn database_router_with_control_pool(pool: sqlx::PgPool) -> DatabaseRouter {
     database_router
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx status tests"]
 async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::PgPool) {
     let run_id = Uuid::now_v7();
@@ -103,7 +103,7 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx status tests"]
 async fn status_batches_same_database_shards_and_preserves_partial_progress(pool: sqlx::PgPool) {
     use crate::db::workflows::run_shard_summary::test_support::*;

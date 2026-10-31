@@ -38,6 +38,7 @@ use super::{
 pub(crate) struct CommandContextConfig {
     pub(crate) messaging: Option<crate::mq::Config>,
     pub(crate) wasm: wasm::Config,
+    pub(crate) agent_http: crate::agent_client::limits::Limits,
     pub(crate) circuit_breaker: CircuitBreakerConfig,
     pub(crate) database_operation_timeout:
         Option<crate::context::database::DatabaseOperationTimeoutConfig>,
@@ -49,7 +50,7 @@ pub(crate) struct CommandContextConfig {
 ///
 /// Each variant wraps a subcommand module that implements [`Executable`].
 pub(crate) enum Command {
-    /// Run system setup (install or upgrade)
+    /// Apply database migrations and validate placement configuration
     Setup(setup::Command),
 
     /// Manage system evaluators
@@ -83,11 +84,24 @@ pub(crate) enum Command {
 }
 
 impl Command {
+    /// Packaging is local and does not consume a database connection.
+    pub(crate) fn is_evaluator_package(&self) -> bool {
+        matches!(
+            self,
+            Self::Evaluator(evaluators::CanonicalCommand {
+                command: evaluators::SubCommand::Package { .. }
+            }) | Self::Evaluators(evaluators::Command {
+                command: Some(evaluators::SubCommand::Package { .. })
+            })
+        )
+    }
+
     pub(crate) fn context_config(
         &self,
         control_database_alias: &str,
     ) -> anyhow::Result<CommandContextConfig> {
         let mut messaging = None;
+        let mut agent_http = crate::agent_client::limits::Limits::default();
         let mut wasm = WasmOptions::default();
         let mut circuit_breaker = CircuitBreakerOptions::default();
         let mut database_operation_timeout = None;
@@ -102,12 +116,12 @@ impl Command {
             Self::Worker(command) => {
                 messaging = Some(command.messaging.config()?);
                 wasm = command.wasm;
+                agent_http = command.agent_http.config();
                 circuit_breaker = command.circuit_breaker;
                 database_operation_timeout = Some(command.database_operation_timeout.config()?);
             }
             Self::Setup(command) => {
                 placement = command.placement.clone();
-                wasm = command.wasm;
             }
             Self::Evaluator(command) => {
                 if let Some(options) = command.command.wasm_options() {
@@ -148,6 +162,7 @@ impl Command {
         Ok(CommandContextConfig {
             messaging,
             wasm: wasm.config(),
+            agent_http,
             circuit_breaker: circuit_breaker.config()?,
             database_operation_timeout,
             placement: PlacementConfig::new(
@@ -387,7 +402,15 @@ mod tests {
 
         assert_eq!(
             visible_subcommands(evaluator),
-            ["list", "publish", "show", "search", "test", "set-state"]
+            [
+                "list",
+                "publish",
+                "package",
+                "show",
+                "search",
+                "test",
+                "set-state"
+            ]
         );
         assert_eq!(
             visible_subcommands(run_shard),

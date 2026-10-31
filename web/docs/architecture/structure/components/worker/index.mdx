@@ -68,3 +68,8 @@ Workers settle terminal chunks under the chunk lock, preserve authoritative comm
 - [Vigilo components](../vigilo)
 - [Coordinator components](../coordinator)
 - [Glossary](/docs/glossary)
+
+Agent failure classification stays at the HTTP boundary; the execution workflow
+carries its typed policy into the authoritative batch transition. Retry timing is
+persisted with the execution, and diagnostic categories remain in the attempt
+summary. Terminal invocation failures are operational errors, not quality scores.

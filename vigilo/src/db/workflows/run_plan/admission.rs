@@ -25,18 +25,25 @@ use super::{
 };
 use crate::db::workflows::run_shard_summary::plan::Manifest;
 
-/// Records execution intent independently of immutable preparation. A prepared
-/// run remains held until its caller requests admission; coordinators resume
-/// only requested plans after process failure.
+/// Requests admission for a held plan outside foreground creation. Foreground
+/// creation records intent in `begin`; recovery resumes only requested plans.
 pub(crate) async fn request(db: &PgPool, id: Uuid) -> Result<()> {
     bounded(async {
-        let mut tx=db.begin().await?;
-        sqlx::query(queries::LOCK_RUN).bind(id).fetch_one(&mut *tx).await?;
-        let n=sqlx::query("UPDATE run_plans SET execution_requested=true WHERE run_id=$1 AND EXISTS(SELECT 1 FROM runs WHERE id=$1 AND status='creating')")
-            .bind(id).execute(&mut *tx).await?.rows_affected();
-        ensure!(n == 1,"run is no longer creating");
-        tx.commit().await?;Ok(())
-    }).await
+        let mut tx = db.begin().await?;
+        sqlx::query(queries::LOCK_RUN)
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let n = sqlx::query(queries::REQUEST_EXECUTION)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        ensure!(n == 1, "run is no longer creating");
+        tx.commit().await?;
+        Ok(())
+    })
+    .await
 }
 pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
     bounded(async {
@@ -130,10 +137,12 @@ pub(crate) async fn activate(
             .bind(lease.run_id).fetch_one(&mut *tx).await?;
         let actual: BTreeMap<i16,Manifest>=serde_json::from_value(state)?;
         ensure!(cursor == total && total > 0 && actual == *expected, "execution placements are not fully admitted");
-        let rows:Vec<(i16,i32,i32,String)>=sqlx::query_as("SELECT run_shard,case_count,chunk_count,planned_chunk_hash FROM run_plan_shards WHERE run_id=$1 ORDER BY run_shard")
+        let rows:Vec<(i16,i32,i32,String,String)>=sqlx::query_as("SELECT run_shard,case_count,chunk_count,planned_chunk_hash,database_alias FROM run_plan_shards WHERE run_id=$1 ORDER BY run_shard")
             .bind(lease.run_id).fetch_all(&mut *tx).await?;
-        ensure!(rows.len() == actual.len() && rows.iter().all(|(s,c,n,h)| actual.get(s).is_some_and(|p| p.case_count == *c && p.chunk_count == *n && p.hash == *h)), "admission differs from published plan");
-        let assignments:Vec<super::run_create::RunShardPlacementAssignment>=sqlx::query_as::<_,(i16,String)>("SELECT run_shard,database_alias FROM run_plan_shards WHERE run_id=$1 ORDER BY run_shard").bind(lease.run_id).fetch_all(&mut *tx).await?.into_iter().map(|(run_shard,database_alias)|super::run_create::RunShardPlacementAssignment{run_shard,database_alias}).collect();
+        ensure!(rows.len() == actual.len() && rows.iter().all(|(s,c,n,h,_)| actual.get(s).is_some_and(|p| p.case_count == *c && p.chunk_count == *n && p.hash == *h)), "admission differs from published plan");
+        // Install routes from the same bounded shard rows whose identities passed
+        // validation, preserving their published order and database aliases.
+        let assignments=rows.into_iter().map(|(run_shard,_,_,_,database_alias)|super::run_create::RunShardPlacementAssignment{run_shard,database_alias}).collect::<Vec<_>>();
         super::run_create::bulk_insert_shard_placements(&mut tx,lease.run_id,&assignments).await?;
         let representatives=expected.values().map(|m|{
             let c=m.last.as_ref().expect("nonempty verified shard");

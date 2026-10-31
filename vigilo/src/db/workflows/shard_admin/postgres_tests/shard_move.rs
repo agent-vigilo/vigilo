@@ -1,5 +1,5 @@
 use super::*;
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn move_table_progress_is_compact_and_idempotent(pool: PgPool) {
     sqlx::query(             "INSERT INTO database_placements (alias, database_url_env, role, status) VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')",         )         .execute(&pool)         .await         .unwrap();
@@ -55,7 +55,7 @@ async fn move_table_progress_is_compact_and_idempotent(pool: PgPool) {
     assert_eq!(copied_rows, 2);
     assert_eq!(operation_rows, 2);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn move_capture_coalesces_repeated_shard_mutations(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -153,7 +153,7 @@ async fn move_capture_coalesces_repeated_shard_mutations(pool: PgPool) {
     .unwrap();
     assert_eq!(dirty_count, 0);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn abort_fences_a_prepared_move_before_copying_starts(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
@@ -182,7 +182,7 @@ async fn abort_fences_a_prepared_move_before_copying_starts(pool: PgPool) {
     assert_eq!(operation_status, "aborted");
     assert!(             shard_placements::mark_shard_placement_copying(                 &pool,                 run_id,                 3,                 "primary",                 1,                 "shard_001",             )             .await             .unwrap()             .is_none()         );
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn completed_route_retry_settles_ambiguous_cutover_state(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
@@ -214,7 +214,7 @@ async fn completed_route_retry_settles_ambiguous_cutover_state(pool: PgPool) {
     assert_eq!(operation_status, "completed");
     assert_eq!(capture_count, 0);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn move_to_current_database_is_not_treated_as_a_completed_retry(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -239,7 +239,7 @@ async fn move_to_current_database_is_not_treated_as_a_completed_retry(pool: PgPo
             .contains("already routes to database placement primary")
     );
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn move_activation_rejects_target_changed_outside_lifecycle_workflow(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
@@ -264,7 +264,7 @@ async fn move_activation_rejects_target_changed_outside_lifecycle_workflow(pool:
     assert_eq!(route.status, SHARD_PLACEMENT_STATUS_MOVING);
     assert_eq!(route.route_version, 3);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn abort_draining_shard_move_restores_source_route_idempotently(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
@@ -297,7 +297,7 @@ async fn abort_draining_shard_move_restores_source_route_idempotently(pool: PgPo
     assert!(!repeated.aborted);
     assert_eq!(repeated.placement.route_version, 3);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn abort_moving_shard_move_restores_source_route(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
@@ -319,7 +319,7 @@ async fn abort_moving_shard_move_restores_source_route(pool: PgPool) {
     assert!(outcome.placement.move_target_database_alias.is_none());
     assert_eq!(outcome.placement.route_version, 4);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn abort_rejects_route_that_completed_on_target(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
@@ -342,7 +342,7 @@ async fn abort_rejects_route_that_completed_on_target(pool: PgPool) {
         "{error:#}"
     );
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn stale_mover_cannot_restart_after_abort_advances_route_fence(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
@@ -396,7 +396,7 @@ async fn stale_mover_cannot_restart_after_abort_advances_route_fence(pool: PgPoo
     assert!(route.move_target_database_alias.is_none());
     assert_eq!(route.route_version, 3);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn stale_abort_cannot_cancel_newer_move_route_version(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
@@ -444,7 +444,7 @@ async fn stale_abort_cannot_cancel_newer_move_route_version(pool: PgPool) {
     assert_eq!(route.status, SHARD_PLACEMENT_STATUS_MOVING);
     assert_eq!(route.route_version, 3);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn move_shard_placement_switches_alias_after_verification(pool: PgPool) {
     let database_url = isolated_database_url(&pool).await;
@@ -498,7 +498,7 @@ async fn move_shard_placement_switches_alias_after_verification(pool: PgPool) {
     assert_eq!(retried.placement.database_alias, "shard_001");
     assert_eq!(retried.placement.route_version, 5);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn force_cannot_move_a_shard_with_active_work(pool: PgPool) {
     let database_url = isolated_database_url(&pool).await;
@@ -555,7 +555,7 @@ async fn force_cannot_move_a_shard_with_active_work(pool: PgPool) {
             .contains("retry with the persisted target")
     );
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn prerequisite_fingerprints_ignore_local_timestamps_and_run_lifecycle(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -588,7 +588,7 @@ fn target_fence(
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn move_reclaim_increments_control_generation(pool: PgPool) {
     sqlx::query(
@@ -631,7 +631,7 @@ async fn move_reclaim_increments_control_generation(pool: PgPool) {
     assert_eq!(second.claim_token, Some(second_token));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn target_takeover_waits_for_in_flight_mover_write(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -676,7 +676,7 @@ async fn target_takeover_waits_for_in_flight_mover_write(pool: PgPool) {
         .unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn stale_target_fence_cannot_advance_valid_control_checkpoint(pool: PgPool) {
     sqlx::query(
@@ -756,7 +756,7 @@ async fn stale_target_fence_cannot_advance_valid_control_checkpoint(pool: PgPool
     assert_eq!(checkpoint_count, 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn target_activation_clears_mover_authority(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -793,7 +793,7 @@ async fn target_activation_clears_mover_authority(pool: PgPool) {
     assert!(stale_write.is_err());
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn stale_move_claim_cannot_overwrite_newer_target_data(pool: PgPool) {
     sqlx::query("CREATE TABLE stale_move_target (run_id UUID, run_shard SMALLINT, id UUID, value INTEGER, PRIMARY KEY (run_id, run_shard, id))")
@@ -841,7 +841,7 @@ async fn stale_move_claim_cannot_overwrite_newer_target_data(pool: PgPool) {
     assert_eq!(value, 2);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn wrong_token_for_current_generation_cannot_write_target(pool: PgPool) {
     let run_id = Uuid::now_v7();

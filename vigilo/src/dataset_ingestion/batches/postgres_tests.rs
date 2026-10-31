@@ -1,6 +1,6 @@
 //! Elapsed-time renewal and stale-authority checks against PostgreSQL.
 use super::*;
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn verification_reads_renew_by_time_and_expired_authority_is_not_resurrected(db: PgPool) {
     let identity = crate::contracts::case_storage::identity::DatasetIdentity {

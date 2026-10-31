@@ -85,7 +85,7 @@ mod tests {
         ResolvedEvaluator,
     };
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx snapshot tests"]
     async fn select_worker_run_snapshot_verifies_execution_plan(pool: PgPool) {
         let run_id = Uuid::now_v7();

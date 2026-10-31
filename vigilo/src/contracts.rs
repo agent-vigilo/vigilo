@@ -2,7 +2,7 @@
 //!
 //! Contracts describe payloads and policies that cross execution boundaries:
 //! run profiles/datasets, evaluator inputs/outputs, evaluator references, and
-//! aggregation behavior. Treat versioned contracts under `wit/evaluator/` as
+//! aggregation behavior. Treat versioned contracts under `vigilo/wit/evaluator/` as
 //! evaluator ABI sources of truth and keep host-side execution contracts here
 //! rather than in persistence models.
 //!

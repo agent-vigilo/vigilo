@@ -9,7 +9,7 @@ use super::{
     *,
 };
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn aggregation_rejects_missing_frozen_plan(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 1).await;
@@ -34,7 +34,7 @@ async fn aggregation_rejects_missing_frozen_plan(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn progress_includes_later_receipts_behind_an_open_chunk(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 2).await;
@@ -68,7 +68,7 @@ async fn progress_includes_later_receipts_behind_an_open_chunk(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 3).await;
@@ -147,6 +147,7 @@ async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool
                 completed: true,
                 error_message: None,
                 requires_worker_lease: false,
+                agent_failure: None,
             },
         ],
     )
@@ -166,7 +167,7 @@ async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn concurrent_workers_settle_without_waiting_for_the_aggregator(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 2).await;
@@ -244,7 +245,7 @@ async fn concurrent_workers_settle_without_waiting_for_the_aggregator(pool: PgPo
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn aggregation_pages_resume_and_failed_consumption_rolls_back(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 257).await;
@@ -314,7 +315,7 @@ async fn aggregation_pages_resume_and_failed_consumption_rolls_back(pool: PgPool
     assert!(error.to_string().contains("immutable"));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn changed_membership_and_stale_ownership_cannot_seal(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 1).await;
@@ -384,7 +385,7 @@ async fn changed_membership_and_stale_ownership_cannot_seal(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx summary tests"]
 async fn failed_evaluation_does_not_settle_a_shard_with_leased_work(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -430,7 +431,7 @@ async fn failed_evaluation_does_not_settle_a_shard_with_leased_work(pool: PgPool
     assert!(!summary.is_terminal());
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx summary tests"]
 async fn settled_missing_executions_keep_configured_scorecard_gates(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -465,7 +466,7 @@ async fn settled_missing_executions_keep_configured_scorecard_gates(pool: PgPool
     assert_eq!(summary.scorecard["entries"][0]["id"], json!("quality"));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx summary tests"]
 async fn refresh_run_shard_summary_counts_terminal_outcomes(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -541,7 +542,7 @@ async fn refresh_run_shard_summary_counts_terminal_outcomes(pool: PgPool) {
     assert_eq!(summary.status, "failed");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx summary tests"]
 async fn refresh_run_shard_summary_builds_bounded_scorecard_gate(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -620,7 +621,7 @@ async fn refresh_run_shard_summary_builds_bounded_scorecard_gate(pool: PgPool) {
     assert_eq!(summary.scorecard["entries"][0]["score_sum"], json!(0.8));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for settlement concurrency tests"]
 async fn terminal_failure_serializes_with_a_waiting_result_writer(pool: PgPool) {
     use crate::db::workflows::execution_processing::{
@@ -659,6 +660,7 @@ async fn terminal_failure_serializes_with_a_waiting_result_writer(pool: PgPool) 
                 completed: true,
                 error_message: None,
                 requires_worker_lease: true,
+                agent_failure: None,
             }],
         )
         .await
@@ -707,7 +709,7 @@ async fn terminal_failure_serializes_with_a_waiting_result_writer(pool: PgPool) 
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for settlement byte-bound tests"]
 async fn receipt_byte_budget_limits_pages_and_resumes_exactly(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 6).await;
@@ -748,7 +750,7 @@ async fn receipt_byte_budget_limits_pages_and_resumes_exactly(pool: PgPool) {
     assert_eq!(summary.settled_chunk_count, 6);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for cancellation settlement tests"]
 async fn undispatched_cancellation_settles_without_promoting_unfinished_evidence(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 2).await;

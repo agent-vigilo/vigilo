@@ -48,6 +48,18 @@ dimension, weight, requiredness, and blocking behavior.
 cargo build --manifest-path evaluators/sentiment-basic-en/Cargo.toml --target wasm32-wasip2 --release
 ```
 
+## Package And Publish
+
+```bash
+vigilo evaluator package evaluators/sentiment-basic-en --release \
+  --output sentiment-basic-en-0.1.0.tar.gz
+vigilo evaluator publish sentiment-basic-en-0.1.0.tar.gz
+```
+
+Packaging uses the source manifest and prebuilt Wasm without a database.
+Publication requires `DATABASE_URL`; the archive requires no source checkout
+or Rust toolchain. See [Publishing Evaluators](https://agentvigilo.com/docs/guides/publishing).
+
 ## Test
 
 ```bash

@@ -74,7 +74,7 @@ async fn insert_minimal_run(pool: &PgPool, run_id: Uuid) {
     .unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn bulk_insert_run_shard_dispatch_cursors_inserts_distinct_open_shards(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -103,7 +103,7 @@ async fn bulk_insert_run_shard_dispatch_cursors_inserts_distinct_open_shards(poo
     assert_eq!(rows, vec![(0, "open".to_string()), (1, "open".to_string())]);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn bulk_insert_run_chunks_is_idempotent(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -134,7 +134,7 @@ async fn bulk_insert_run_chunks_is_idempotent(pool: PgPool) {
     assert_eq!(count, 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn bulk_insert_shard_placements_inserts_distinct_active_shards(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -178,7 +178,7 @@ async fn bulk_insert_shard_placements_inserts_distinct_active_shards(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn bulk_insert_shard_placements_rejects_control_only_alias(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -207,7 +207,7 @@ async fn bulk_insert_shard_placements_rejects_control_only_alias(pool: PgPool) {
     assert!(error.to_string().contains("not shard-capable"));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn execution_seed_reuses_dataset_identity_without_a_write_lock(pool: PgPool) {
     let version = Uuid::now_v7();

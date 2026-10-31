@@ -402,7 +402,7 @@ async fn run_snapshot_count(pool: &PgPool, run_id: Uuid, run_shard: i16) -> i64 
     .unwrap()
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn dispatch_scans_one_run_shard_at_a_time(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 2), (1, 2)]).await;
@@ -416,7 +416,7 @@ async fn dispatch_scans_one_run_shard_at_a_time(pool: PgPool) {
     assert_eq!(cursor_status(&pool, run_id, 0).await, "drained");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn select_next_dispatch_route_skips_moving_shard_placement(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1), (1, 1)]).await;
@@ -433,7 +433,7 @@ async fn select_next_dispatch_route_skips_moving_shard_placement(pool: PgPool) {
     assert_eq!(route.placement_status, "active");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn select_next_dispatch_route_excludes_failed_aliases(pool: PgPool) {
     seed_pending_run(&pool, &[(0, 1)]).await;
@@ -445,7 +445,7 @@ async fn select_next_dispatch_route_excludes_failed_aliases(pool: PgPool) {
     assert!(route.is_none());
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn select_next_dispatch_route_includes_draining_database_owner(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1)]).await;
@@ -481,7 +481,7 @@ async fn select_next_dispatch_route_includes_draining_database_owner(pool: PgPoo
     assert_eq!(count_dispatch_cursor_backlog(&pool).await.unwrap(), 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn count_dispatch_cursor_backlog_matches_dispatchable_routes(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1), (1, 1), (2, 1)]).await;
@@ -497,7 +497,7 @@ async fn count_dispatch_cursor_backlog_matches_dispatchable_routes(pool: PgPool)
     assert_eq!(backlog, 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn dispatch_routed_run_window_dispatches_exact_route(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1), (1, 1)]).await;
@@ -535,7 +535,7 @@ async fn dispatch_routed_run_window_dispatches_exact_route(pool: PgPool) {
     assert_eq!(payload["write_epoch"], 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn failed_execution_write_leaves_control_cursor_open(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1)]).await;
@@ -560,7 +560,7 @@ async fn failed_execution_write_leaves_control_cursor_open(pool: PgPool) {
     assert_eq!(cursor_status(&pool, run_id, 0).await, "open");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn dispatch_releases_open_cursor_when_shard_has_more_chunks(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 3)]).await;
@@ -581,7 +581,7 @@ async fn dispatch_releases_open_cursor_when_shard_has_more_chunks(pool: PgPool) 
     assert_eq!(second.chunks_marked_dispatched, 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn concurrent_dispatchers_claim_distinct_shards_for_same_running_run(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1), (1, 1)]).await;
@@ -598,7 +598,7 @@ async fn concurrent_dispatchers_claim_distinct_shards_for_same_running_run(pool:
     assert_eq!(chunk_ready_event_count(&pool, run_id).await, 2);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn concurrent_dispatchers_do_not_duplicate_one_shard_cursor(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1)]).await;
@@ -617,7 +617,7 @@ async fn concurrent_dispatchers_do_not_duplicate_one_shard_cursor(pool: PgPool) 
     assert_eq!(cursor_status(&pool, run_id, 0).await, "drained");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn concurrent_pending_run_start_emits_one_started_event(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1), (1, 1)]).await;
@@ -635,7 +635,7 @@ async fn concurrent_pending_run_start_emits_one_started_event(pool: PgPool) {
     assert_eq!(chunk_ready_event_count(&pool, run_id).await, 2);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn running_dispatch_does_not_wait_on_parent_run_share_lock(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1)]).await;
@@ -657,7 +657,7 @@ async fn running_dispatch_does_not_wait_on_parent_run_share_lock(pool: PgPool) {
     tx.rollback().await.unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn running_dispatch_waits_on_parent_run_update_lock(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1)]).await;
@@ -676,7 +676,7 @@ async fn running_dispatch_waits_on_parent_run_update_lock(pool: PgPool) {
     tx.rollback().await.unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn cancel_waits_behind_active_dispatch_lifecycle_share_lock(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1)]).await;
@@ -706,7 +706,7 @@ async fn cancel_waits_behind_active_dispatch_lifecycle_share_lock(pool: PgPool) 
     assert_eq!(cursor_status_count(&pool, run_id, "drained").await, 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn finalization_skips_run_with_active_dispatch_lifecycle_share_lock(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1)]).await;

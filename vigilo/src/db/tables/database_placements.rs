@@ -286,7 +286,7 @@ mod tests {
 
     use super::*;
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx placement tests"]
     async fn list_active_database_aliases_filters_disabled(pool: PgPool) {
         sqlx::query(
@@ -311,7 +311,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx placement tests"]
     async fn list_serviceable_database_aliases_includes_draining(pool: PgPool) {
         sqlx::query(
@@ -340,7 +340,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx placement tests"]
     async fn list_serviceable_shard_database_aliases_includes_draining_owners(pool: PgPool) {
         sqlx::query(
@@ -393,7 +393,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx placement tests"]
     async fn list_active_shard_capable_database_aliases_includes_empty_active_shards(pool: PgPool) {
         sqlx::query(
@@ -419,7 +419,7 @@ mod tests {
         );
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx placement tests"]
     async fn count_shard_placements_on_unserviceable_databases_includes_provisioning(pool: PgPool) {
         sqlx::query(

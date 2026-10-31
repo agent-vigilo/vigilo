@@ -63,7 +63,7 @@ async fn route(pool: &PgPool, run: Uuid) {
     .unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for coordinator settlement tests"]
 async fn aggregation_seals_multiple_runs_in_one_pass_independently_of_finalization_limit(
     pool: PgPool,
@@ -122,7 +122,7 @@ async fn aggregation_seals_multiple_runs_in_one_pass_independently_of_finalizati
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for coordinator settlement tests"]
 async fn failed_evaluation_waits_for_live_work_then_finalizes_missing_results(pool: PgPool) {
     let context = context(&pool);
@@ -233,7 +233,7 @@ async fn failed_evaluation_waits_for_live_work_then_finalizes_missing_results(po
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for coordinator settlement tests"]
 async fn invalid_candidate_does_not_block_a_healthy_run(pool: PgPool) {
     let context = context(&pool);
@@ -273,7 +273,7 @@ async fn invalid_candidate_does_not_block_a_healthy_run(pool: PgPool) {
     assert!(rows.contains(&(healthy, "completed".into(), "pass".into())));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for coordinator settlement tests"]
 async fn finalization_summary_collection_does_not_advance_pending_receipts(pool: PgPool) {
     let context = context(&pool);
@@ -339,7 +339,7 @@ async fn finalization_summary_collection_does_not_advance_pending_receipts(pool:
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for coordinator settlement tests"]
 async fn finalization_batches_only_routed_summaries_and_defers_missing_or_moving_shards(
     pool: PgPool,
@@ -399,7 +399,7 @@ async fn finalization_batches_only_routed_summaries_and_defers_missing_or_moving
     assert_eq!(moving.failures.failed_operation_count(), 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for coordinator settlement tests"]
 async fn sealed_summary_finalization_reads_without_local_write_admission(pool: PgPool) {
     let context = context(&pool);

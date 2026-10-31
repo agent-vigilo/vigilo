@@ -27,8 +27,8 @@ How executions and attempts become authoritative work records while workers proc
 - New attempts record the worker id, host label, internal queue message UUID, broker message id, lease expiration, and heartbeat timestamp.
 - A new worker attempt or recovered expired chunk lease marks any previous running attempt `stale`.
 - Terminal transitions first lock the still-live chunk, then require the execution's current attempt id and attempt number to match the worker's transition. Worker-owned transitions also require a live attempt lease for that worker.
-- Completed executions require an aggregate row. Worker failure transitions upsert an error aggregate after retry exhaustion. Chunk settlement instead retires unfinished authority and closes existing unresolved executions without inventing an aggregate; missing executions remain absent.
-- Failed attempts that still have retry budget move the execution to `retry_scheduled` with `retry_after`; the next chunk pass only creates a new attempt once that timestamp is due.
+- Completed executions require an aggregate row. Worker failure transitions upsert an error aggregate when the failure is non-retryable or the attempt budget is exhausted. Chunk settlement instead retires unfinished authority and closes existing unresolved executions without inventing an aggregate; missing executions remain absent.
+- Retryable failed attempts that still have retry budget move the execution to `retry_scheduled` with a durable `retry_after`; the next chunk pass only creates a new attempt once that timestamp is due.
 - `defaults.max_attempts` is the hard execution retry limit. Exhausted open executions are closed as failed instead of being requeued indefinitely.
 
 After chunk settlement, current completed attempts with matching aggregates remain authoritative. Superseded or retired attempts remain stale evidence; unfinished evidence cannot contribute scores. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
@@ -39,3 +39,10 @@ After chunk settlement, current completed attempts with matching aggregates rema
 - [Chunk lifecycle](/docs/architecture/state/chunk-lifecycle/)
 - [Run lifecycle](/docs/architecture/state/run-lifecycle/)
 - [State ownership](/docs/architecture/state/ownership/)
+
+Agent invocation failures carry a typed category, optional HTTP status, retryability,
+and accepted server retry advice. These are retained in the attempt summary. The
+batch transition uses this policy rather than classifying error-message text, and
+preserves the later of bounded local backoff/jitter and server advice. Non-retryable
+failures create an error aggregate immediately; no numerical score is invented.
+See [agent retry policy](/docs/configuration/run-profile#agent-invocation-failures-and-retries).

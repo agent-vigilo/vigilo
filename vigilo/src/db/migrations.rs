@@ -1,77 +1,43 @@
-//! Schema migration runner.
+//! Schema migration runner for database setup.
 //!
-//! The runtime uses this module to apply the SQL migrations in order while
-//! logging skipped and newly applied versions. All schema shape remains in the
-//! migration files; this module only coordinates sqlx migration execution.
+//! Embedded SQL is the default source; an explicit directory replaces it.
+//! SQLx owns migration locking, history/checksum validation, and transactional
+//! application. Setup applies only pending migrations and fails on inconsistent
+//! history or invalid SQL before continuing to placement validation.
 
-use std::{
-    collections::HashSet,
-    path::PathBuf,
-    time::Instant,
-};
+use std::path::PathBuf;
 
+use anyhow::Context;
 use sqlx::{
     PgPool,
-    migrate::{
-        Migrate,
-        Migrator,
-    },
-};
-use tracing::{
-    debug,
-    info,
+    migrate::Migrator,
 };
 
-/// Applies all migrations from `migrations_dir` that are not already recorded.
+static EMBEDDED: Migrator = sqlx::migrate!("./migrations");
+
+/// Applies pending migrations using embedded SQL or an explicit directory.
 ///
-/// The function acquires a database connection, ensures sqlx's migration table
-/// exists, checks applied versions, and applies each missing migration with
-/// per-migration logging.
-pub(crate) async fn migrate(db: &PgPool, migrations_dir: PathBuf) -> anyhow::Result<()> {
-    let migrator = Migrator::new(migrations_dir.as_path()).await?;
-
-    let mut conn = db.acquire().await?;
-
-    debug!("ensuring existence of migrations table");
-    conn.ensure_migrations_table().await?;
-
-    debug!("fetching applied migrations");
-    let applied_migrations = conn.list_applied_migrations().await?;
-    let applied_versions: HashSet<i64> =
-        applied_migrations.into_iter().map(|m| m.version).collect();
-
-    debug!("checking for unapplied migrations");
-    for migration in migrator.iter() {
-        if applied_versions.contains(&migration.version) {
-            info!(
-                "migration {}: \"{}\" already exists, skipping",
-                migration.version, migration.description,
-            );
-        } else {
-            debug!(
-                "applying migration {}: {}",
-                migration.version, migration.description
-            );
-            let start = Instant::now();
-            match conn.apply(migration).await {
-                Ok(_) => {
-                    let elapsed = start.elapsed();
-                    info!(
-                        "migration {}: \"{}\" applied in {:?}",
-                        migration.version, migration.description, elapsed,
-                    );
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!(
-                        "migration {} failed: {}",
-                        migration.version,
-                        e
-                    ));
-                }
-            }
-        }
-    }
-
+/// The directory override never falls back to embedded SQL on failure. Applied
+/// versions and checksums are checked under SQLx's migration lock, and each
+/// pending migration is transactional unless its SQL explicitly opts out.
+pub(crate) async fn migrate(db: &PgPool, migrations_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let directory = match migrations_dir {
+        Some(path) => Some(
+            Migrator::new(path.as_path())
+                .await
+                .with_context(|| format!("load migrations from {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let migrator = directory.as_ref().unwrap_or(&EMBEDDED);
+    let mut connection = db.acquire().await.context("acquire migration connection")?;
+    // SQLx releases its session lock on success only. Never return a session
+    // holding that lock to the pool after an error or cancelled setup.
+    connection.close_on_drop();
+    let result = migrator.run_direct(&mut *connection).await;
+    let close_result = connection.close().await;
+    result.context("apply database migrations")?;
+    close_result.context("close migration connection")?;
     Ok(())
 }
 
@@ -89,7 +55,7 @@ mod tests {
         shard_placement::ShardPlacement,
     };
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
     async fn migrations_seed_primary_database_placement(pool: PgPool) {
         let placement = sqlx::query_as::<_, DatabasePlacement>(
@@ -110,7 +76,7 @@ mod tests {
         assert_eq!(placement.status, "active");
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
     async fn database_placements_allow_only_one_active_control_placement(pool: PgPool) {
         let second_active_control = sqlx::query(
@@ -144,7 +110,7 @@ mod tests {
         .unwrap();
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
     async fn shard_placements_enforce_alias_status_and_shard_range(pool: PgPool) {
         let run_id = Uuid::now_v7();
@@ -274,3 +240,6 @@ mod tests {
         .unwrap();
     }
 }
+
+#[cfg(test)]
+mod setup_tests;

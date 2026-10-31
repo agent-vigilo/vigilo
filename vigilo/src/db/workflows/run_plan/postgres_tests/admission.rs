@@ -21,7 +21,7 @@ async fn allow_ack(db: &PgPool) {
 async fn progress(db: &PgPool, id: Uuid) -> (i32, i64, i64) {
     sqlx::query_as("SELECT admission_cursor,(SELECT count(*) FROM run_chunks WHERE run_id=$1),(SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1) FROM run_plans WHERE run_id=$1").bind(id).fetch_one(db).await.unwrap()
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn grouped_local_commit_survives_lost_control_ack_and_replays_exactly(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -48,7 +48,7 @@ async fn grouped_local_commit_survives_lost_control_ack_and_replays_exactly(db: 
     );
     assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn grouped_replay_rejects_changed_snapshots_and_closed_or_moved_admissions(db: PgPool) {
     for mutation in [
@@ -93,7 +93,7 @@ async fn grouped_replay_rejects_changed_snapshots_and_closed_or_moved_admissions
         assert_eq!(status, "failed");
     }
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn disabled_or_draining_placement_never_activates_until_active(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -139,7 +139,7 @@ async fn disabled_or_draining_placement_never_activates_until_active(db: PgPool)
     );
     assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn snapshot_groups_cross_64_shards_without_per_shard_renewal(db: PgPool) {
     let f = Fixture::with_size(&db, 6500, 100, 256).await;
@@ -174,7 +174,7 @@ async fn snapshot_groups_cross_64_shards_without_per_shard_renewal(db: PgPool) {
     assert_eq!(progress(&db, plan.run_id).await, (65, 65, 65));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn placement_verification_folds_shards_across_256_row_boundaries(db: PgPool) {
     let f = Fixture::with_size(&db, 25701, 100, 256).await;
@@ -204,7 +204,7 @@ async fn wait_for_fence(db: &PgPool) {
         }
     }).await.expect("seed did not wait on shard authority");
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn grouped_seed_checks_cancellation_tombstone_after_waiting_for_shard_fence(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -248,7 +248,7 @@ async fn grouped_seed_checks_cancellation_tombstone_after_waiting_for_shard_fenc
     .unwrap();
     assert_eq!(states, vec![(1, "closed".into())]);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn owner_replaced_during_local_lock_wait_cannot_acknowledge_or_activate(db: PgPool) {
     let (f, plan) = ready(&db).await;
@@ -290,7 +290,7 @@ async fn owner_replaced_during_local_lock_wait_cannot_acknowledge_or_activate(db
     );
     assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn cancelled_or_timed_out_placement_operations_rollback_and_remain_resumable(db: PgPool) {
     for cancel_early in [true, false] {
@@ -342,7 +342,7 @@ async fn cancelled_or_timed_out_placement_operations_rollback_and_remain_resumab
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn snapshot_byte_bounds_split_large_templates_and_preserve_one_admitted_snapshot(db: PgPool) {
     use crate::{
@@ -408,4 +408,162 @@ async fn snapshot_byte_bounds_split_large_templates_and_preserve_one_admitted_sn
         sqlx::raw_sql("DROP TRIGGER observe_sizes ON run_snapshots; DROP FUNCTION observe_sizes(); DROP TABLE sizes;").execute(&db).await.unwrap();
         drop(f);
     }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn activation_rechecks_published_shard_totals_before_installing_exact_routes(db: PgPool) {
+    let (f, plan) = ready(&db).await;
+    sqlx::raw_sql("CREATE FUNCTION stop_activation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status='pending' THEN RAISE EXCEPTION 'activation interrupted'; END IF; RETURN NEW; END $$; CREATE TRIGGER stop_activation BEFORE UPDATE ON runs FOR EACH ROW EXECUTE FUNCTION stop_activation();").execute(&db).await.unwrap();
+    let store: Arc<dyn crate::blob_storage::BlobStorage> = Arc::new(f.store);
+    let error = crate::run_admission::resume(
+        &runtime_context(&db),
+        &plan,
+        store,
+        Default::default(),
+        &f.cancel,
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("activation interrupted"));
+    sqlx::query("DROP TRIGGER stop_activation ON runs")
+        .execute(&db)
+        .await
+        .unwrap();
+    let fresh = load(&db, plan.run_id).await.unwrap().unwrap();
+    let expected = serde_json::from_value(fresh.admission_state.0).unwrap();
+    let lease = admission::claim(&db, plan.run_id).await.unwrap();
+    for field in ["case_count", "chunk_count"] {
+        sqlx::query(&format!(
+            "UPDATE run_plan_shards SET {field}={field}+1 WHERE run_id=$1 AND run_shard=0"
+        ))
+        .bind(plan.run_id)
+        .execute(&db)
+        .await
+        .unwrap();
+        let error = admission::activate(&db, lease, &expected)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("admission differs from published plan"));
+        assert_eq!(progress(&db, plan.run_id).await, (3, 3, 0));
+        sqlx::query(&format!(
+            "UPDATE run_plan_shards SET {field}={field}-1 WHERE run_id=$1 AND run_shard=0"
+        ))
+        .bind(plan.run_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    }
+    let hash: String = sqlx::query_scalar(
+        "SELECT planned_chunk_hash FROM run_plan_shards WHERE run_id=$1 AND run_shard=0",
+    )
+    .bind(plan.run_id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE run_plan_shards SET planned_chunk_hash='wrong' WHERE run_id=$1 AND run_shard=0",
+    )
+    .bind(plan.run_id)
+    .execute(&db)
+    .await
+    .unwrap();
+    let error = admission::activate(&db, lease, &expected)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("admission differs from published plan"));
+    sqlx::query("UPDATE run_plan_shards SET planned_chunk_hash=$2 WHERE run_id=$1 AND run_shard=0")
+        .bind(plan.run_id)
+        .bind(hash)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO run_plan_shards SELECT run_id,127,database_alias,case_count,chunk_count,planned_chunk_hash,case_projection_hash FROM run_plan_shards WHERE run_id=$1 AND run_shard=0")
+        .bind(plan.run_id).execute(&db).await.unwrap();
+    let error = admission::activate(&db, lease, &expected)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("admission differs from published plan"));
+    assert_eq!(progress(&db, plan.run_id).await, (3, 3, 0));
+    sqlx::query("DELETE FROM run_plan_shards WHERE run_id=$1 AND run_shard=127")
+        .bind(plan.run_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    admission::activate(&db, lease, &expected).await.unwrap();
+    let assignments: Vec<(i16, String)> = sqlx::query_as(
+        "SELECT run_shard,database_alias FROM shard_placements WHERE run_id=$1 ORDER BY run_shard",
+    )
+    .bind(plan.run_id)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        assignments,
+        plan.assignments
+            .iter()
+            .map(|a| (a.run_shard, a.database_alias.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn committed_activation_succeeds_when_subsequent_writes_fail(db: PgPool) {
+    let (f, plan) = ready(&db).await;
+    // Model a database write failure after activation committed. Reporting that
+    // committed success must not depend on another cleanup write succeeding.
+    sqlx::raw_sql("CREATE FUNCTION reject_post_activation_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM runs WHERE status='pending') THEN RAISE EXCEPTION 'post-activation write unavailable'; END IF; RETURN NULL; END $$; CREATE TRIGGER reject_post_activation_write BEFORE UPDATE ON runs FOR EACH STATEMENT EXECUTE FUNCTION reject_post_activation_write();")
+        .execute(&db).await.unwrap();
+    let store: Arc<dyn crate::blob_storage::BlobStorage> = Arc::new(f.store);
+    let result = crate::run_admission::resume(
+        &runtime_context(&db),
+        &plan,
+        store,
+        Default::default(),
+        &f.cancel,
+    )
+    .await;
+    let state: (String,bool) = sqlx::query_as("SELECT status::text,coordinator_id IS NULL AND coordinator_leased_until IS NULL FROM runs WHERE id=$1")
+        .bind(plan.run_id).fetch_one(&db).await.unwrap();
+    assert_eq!(state, ("pending".into(), true));
+    assert!(
+        result.unwrap(),
+        "confirmed activation must remain successful"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn failed_activation_commit_releases_owner_and_retries_exactly(db: PgPool) {
+    let (f, plan) = ready(&db).await;
+    sqlx::raw_sql("CREATE FUNCTION reject_activation_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.status='pending' THEN RAISE EXCEPTION 'activation commit interrupted'; END IF; RETURN NULL; END $$; CREATE CONSTRAINT TRIGGER reject_activation_commit AFTER UPDATE ON runs DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_activation_commit();")
+        .execute(&db).await.unwrap();
+    let context = runtime_context(&db);
+    let store: Arc<dyn crate::blob_storage::BlobStorage> = Arc::new(f.store);
+    let error = crate::run_admission::resume(
+        &context,
+        &plan,
+        store.clone(),
+        Default::default(),
+        &f.cancel,
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{error:#}").contains("activation commit interrupted"));
+    let state: (String,bool) = sqlx::query_as("SELECT status::text,coordinator_id IS NULL AND coordinator_leased_until IS NULL FROM runs WHERE id=$1")
+        .bind(plan.run_id).fetch_one(&db).await.unwrap();
+    assert_eq!(state, ("creating".into(), true));
+    assert_eq!(progress(&db, plan.run_id).await, (3, 3, 0));
+    sqlx::query("DROP TRIGGER reject_activation_commit ON runs")
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(
+        crate::run_admission::resume(&context, &plan, store, Default::default(), &f.cancel)
+            .await
+            .unwrap()
+    );
+    assert_eq!(progress(&db, plan.run_id).await, (3, 3, 3));
 }

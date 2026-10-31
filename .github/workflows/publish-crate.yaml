@@ -1,0 +1,77 @@
+name: Publish Vigilo Crate
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: publish-vigilo-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish Vigilo to crates.io
+    if: startsWith(github.event.release.tag_name, 'vigilo/v')
+    runs-on: ubuntu-latest
+    environment: crates-io
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify release tag matches the crate version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(python3 scripts/releases/crate.py --tag "$RELEASE_TAG")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Require successful CI for the release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          passed="$(gh api --method GET "repos/$GH_REPO/actions/workflows/build.yaml/runs" \
+            -f head_sha="$GITHUB_SHA" -f per_page=100 \
+            --jq '[.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .status == "completed" and .conclusion == "success" and (.event == "push" or .event == "workflow_dispatch"))] | length')"
+          if [[ "$passed" -lt 1 ]]; then
+            echo "The Build workflow must pass for $GITHUB_SHA before publication. Rerun this job after CI succeeds." >&2
+            exit 1
+          fi
+      - name: Check whether the crate version is already published
+        id: registry
+        env:
+          CRATE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          status="$(curl --silent --show-error --retry 3 --retry-max-time 30 \
+            --connect-timeout 10 --max-time 30 --user-agent vigilo-release-workflow \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://crates.io/api/v1/crates/vigilo/$CRATE_VERSION")"
+          case "$status" in
+            200)
+              echo "published=true" >> "$GITHUB_OUTPUT"
+              echo "vigilo $CRATE_VERSION already exists on crates.io; skipping publication." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "Unexpected crates.io response: HTTP $status" >&2; exit 1 ;;
+          esac
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.registry.outputs.published != 'true'
+      - name: Publish to crates.io
+        if: steps.registry.outputs.published != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
+            echo "Configure CARGO_REGISTRY_TOKEN for the crates-io environment." >&2
+            exit 1
+          fi
+          cargo publish -p vigilo --locked

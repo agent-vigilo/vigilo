@@ -62,6 +62,17 @@ docker compose --env-file infra/dev/.env.single \
   up setup
 ```
 
+Compose passes `--skip-evaluators`, so its setup jobs initialize only the database. Before running evaluations, build and publish
+an evaluator separately from the repository root, using the host database URL:
+
+```bash
+cargo build -p sentiment-basic-en --target wasm32-wasip2 --release
+DATABASE_URL=postgresql://postgres:password@localhost:5432/agent_vigilo \
+  cargo run -p vigilo -- evaluator publish evaluators/sentiment-basic-en --release
+```
+
+The same explicit publication step applies to the sharded topology's control database.
+
 Start the full single-database runtime:
 
 ```bash

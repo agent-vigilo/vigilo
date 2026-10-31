@@ -56,6 +56,7 @@ jobs:
           components: clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p vigilo --locked --features blob-storage-services --test blob_storage_services --test dataset_ingestion_services -- -D warnings
+      - run: cargo clippy -p vigilo --locked --features agent-http-services --test agent_http_services -- -D warnings
 
   unit-tests:
     name: Unit and Contract Tests (${{ matrix.os }})
@@ -79,6 +80,8 @@ jobs:
       - name: Install cargo-llvm-cov
         if: matrix.coverage
         uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Test core evaluator release policy
+        run: python3 -m unittest discover -s scripts/releases -p 'test_*.py'
       - name: Run service-free tests
         if: ${{ !matrix.coverage }}
         run: cargo test --workspace --locked --lib --bins --verbose
@@ -158,6 +161,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+          targets: wasm32-wasip2
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Reset coverage data
@@ -172,6 +176,20 @@ jobs:
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
           -- --ignored --nocapture --test-threads=4
+      - name: Build portable evaluator fixture
+        run: cargo build -p sentiment-basic-en --locked --target wasm32-wasip2 --release
+      - name: Verify portable evaluator publication with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
+          --features evaluator-abi-fixtures --
+          evaluators::postgres_tests::portable_publication_matches_source_and_preserves_conflict_guards
+          --ignored --exact --nocapture
+      - name: Verify core collection publication with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
+          --features evaluator-abi-fixtures --
+          core_evaluators::tests::collection_publication_replays_without_download_and_rejects_conflicts
+          --ignored --exact --nocapture
       - name: Generate SQLx coverage report
         run: >-
           cargo llvm-cov report
@@ -306,6 +324,10 @@ jobs:
           --test multi_database_e2e -- --nocapture
         env:
           VIGILO_E2E_MULTI_DATABASE: "1"
+      - name: Run agent HTTP transport tests with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features agent-http-services --test agent_http_services
       - name: Generate end-to-end coverage report
         run: >-
           cargo llvm-cov report
@@ -469,6 +491,12 @@ jobs:
           cargo test -p vigilo --locked --bin vigilo
           --features evaluator-abi-fixtures
           evaluator_abi::tests::all_registered_evaluator_abis_execute_in_one_host
+          -- --exact
+      - name: Verify portable evaluator identity and ABI validation
+        run: >-
+          cargo test -p vigilo --locked --bin vigilo
+          --features evaluator-abi-fixtures
+          context::wasm::tests::portable_artifacts_preserve_exact_bytes_and_verify_embedded_identity_and_host_abi
           -- --exact
 
   documentation-checks:

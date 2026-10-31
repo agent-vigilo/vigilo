@@ -4,7 +4,7 @@ use sqlx::PgPool;
 
 use super::*;
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for local shard admission tests"]
 async fn stale_write_epoch_is_rejected_without_mutating_local_state(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -46,7 +46,7 @@ async fn stale_write_epoch_is_rejected_without_mutating_local_state(pool: PgPool
     ));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for local shard admission tests"]
 async fn draining_allows_settlement_but_rejects_new_work(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -83,7 +83,7 @@ async fn draining_allows_settlement_but_rejects_new_work(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for local shard admission tests"]
 async fn same_epoch_transition_cannot_reopen_closed_owner(pool: PgPool) {
     let run_id = Uuid::now_v7();

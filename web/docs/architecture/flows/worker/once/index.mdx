@@ -43,3 +43,9 @@ Workers acknowledge terminal chunks after their local settlement receipt commits
 - [Run watch flow](/docs/architecture/flows/run/watch/)
 - [Worker component](/docs/architecture/structure/components/worker/)
 - [Container view](/docs/architecture/structure/containers/agent-vigilo/)
+
+Agent calls enforce worker byte ceilings and optional lower profile limits before
+sending requests. Response reads stop on byte-limit overflow, including HTTP error
+responses; typed invocation failures either settle immediately or schedule a durable retry
+with bounded backoff and accepted Retry-After advice. See
+[agent HTTP limits](../../../../configuration/runtime-limits.mdx#agent-http-bodies).

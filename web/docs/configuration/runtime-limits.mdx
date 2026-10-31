@@ -1,6 +1,6 @@
 ---
 title: Runtime Limits
-description: Operational limits for Agent Vigilo database and messaging resilience, Wasm evaluator isolation, and worker concurrency.
+description: Operational limits for Agent Vigilo agent HTTP bodies, database and messaging resilience, Wasm evaluator isolation, and worker concurrency.
 keywords:
   - Agent Vigilo runtime limits
   - Wasm evaluator isolation
@@ -10,21 +10,55 @@ keywords:
 
 # Runtime Limits
 
-These settings bound database, messaging, and evaluator resource use. They can be supplied
+These settings bound agent HTTP bodies, database, messaging, and evaluator resource use. They can be supplied
 as CLI flags or environment variables. Vigilo parses subsystem settings only
 for commands that consume that subsystem; unrelated configuration cannot block
 a database-only command.
+
+`setup --skip-evaluators` does not download or compile evaluators. Default setup
+uses the host's default Wasm limits when validating downloaded packages. See
+[core evaluator installation](../guides/publishing.mdx#core-evaluators) for download
+limits, collection pins, and GitHub authentication.
+
+## Agent HTTP Bodies
+
+Worker commands accept these process-local ceilings:
+
+| Flag | Environment variable | Default |
+| --- | --- | --- |
+| `--agent-max-request-bytes` | `VIGILO_AGENT_MAX_REQUEST_BYTES` | 4 MiB (4,194,304 bytes) |
+| `--agent-max-response-bytes` | `VIGILO_AGENT_MAX_RESPONSE_BYTES` | 4 MiB (4,194,304 bytes) |
+
+Values must be between 1 byte and 1 GiB. A run profile can request lower limits
+through `agent.http.max_request_bytes` and `agent.http.max_response_bytes`.
+Omitted values use the executing worker's ceilings. A worker rejects zero or
+above-ceiling overrides before sending a request; it does not silently clamp them.
+Use consistent ceilings across workers serving the same workload.
+
+Request limits count serialized JSON body bytes, including escaping and UTF-8,
+but not HTTP headers. Responses are bounded while reading, including non-success
+responses, without relying on Content-Length. Transfer framing is not counted.
+The client does not enable automatic content decompression. Oversized bodies
+produce terminal invocation-limit errors without retrying the same body; they
+are not evaluator scores. Error excerpts remain limited to 512 characters.
+
+Existing request timeouts still apply. These byte ceilings do not bound the whole
+process: concurrent calls, request construction, parsed output, and evaluator copies
+consume additional memory. Select ceilings alongside worker concurrency. See
+[run profiles](./run-profile.mdx) for endpoint configuration.
 
 ## Command Scope
 
 ```mermaid
 flowchart LR
-    root["All commands<br/>database client + output"]
+    root["Commands<br/>output + scoped services"]
+    setup["setup<br/>placement + migrations + core evaluators"]
     create["run create<br/>placement + creation + DB resilience"]
     coordinator["coordinator<br/>messaging + creation + DB resilience"]
     worker["worker<br/>messaging + Wasm + DB resilience"]
-    evaluator["setup / evaluator publish or test<br/>Wasm"]
+    evaluator["evaluator package, publish or test<br/>Wasm"]
 
+    root --> setup
     root --> create
     root --> coordinator
     root --> worker
@@ -32,9 +66,9 @@ flowchart LR
 ```
 
 `DATABASE_URL`, database-pool settings, `VIGILO_CONTROL_DATABASE_ALIAS`, and
-output settings are root options because every current command uses the control
-database. `MESSAGING_URL` is accepted only by `coordinator` and `worker`.
-Wasm limits are accepted only by `worker`, `setup`, `evaluator publish`, and
+output settings are root options. Registry and runtime commands require a database
+URL; `evaluator package` performs local preparation without one. `MESSAGING_URL` is accepted only by `coordinator` and `worker`.
+Wasm limits are accepted only by `worker`, `evaluator package`, `evaluator publish`, and
 `evaluator test`. Command-scoped CLI flags follow their owning command, while
 the existing environment-variable names remain compatible.
 
@@ -193,7 +227,7 @@ table, instance, timeout, and logging limits.
 use. Workers also use a process-wide
 <GlossaryTerm term="evaluator-semaphore">evaluator semaphore</GlossaryTerm> so
 valid evaluators cannot exhaust host resources. These flags are scoped to
-`worker`, `setup`, `evaluator publish`, and `evaluator test`.
+`worker`, `evaluator package`, `evaluator publish`, and `evaluator test`.
 
 | Flag | Environment | Default | Purpose |
 | --- | --- | ---: | --- |

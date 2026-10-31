@@ -1,0 +1,26 @@
+sequenceDiagram
+    actor Operator
+    participant CLI as Vigilo Setup
+    participant DB as Control Database
+    participant GitHub as Official GitHub Releases
+    participant Host as Evaluator Host
+    Operator->>CLI: setup [--evaluators ID | --skip-evaluators]
+    CLI->>DB: Apply pending migrations and validate placement
+    opt Evaluators enabled
+        CLI->>GitHub: Discover published collection and read bounded catalog
+        CLI->>CLI: Validate catalog and select exact compatible ABI set
+        loop Each evaluator (sequential)
+            CLI->>DB: Read existing version
+            alt Matching identity already installed
+                DB-->>CLI: Skip download and preserve lifecycle state
+            else Version absent
+                CLI->>GitHub: Stream archive into owned temporary file
+                CLI->>CLI: Verify size and SHA-256
+                CLI->>Host: Validate portable package, compile, typed-link ABI
+                Host-->>CLI: Prepared artifact
+                CLI->>CLI: Match prepared artifact to catalog
+                CLI->>DB: Insert missing version; retain all existing versions
+            end
+        end
+    end
+    CLI-->>Operator: Success or contextual error; completed work retained

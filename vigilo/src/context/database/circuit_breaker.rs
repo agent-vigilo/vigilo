@@ -127,7 +127,7 @@ mod tests {
         }
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
     async fn open_database_circuit_does_not_block_healthy_database_work(pool: PgPool) {
         let breakers = DatabaseCircuitBreakers::new(config());
@@ -146,7 +146,7 @@ mod tests {
         assert!(breakers.acquire("primary", now).is_ok());
     }
 
-    #[sqlx::test(migrations = "../migrations")]
+    #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
     async fn successful_database_probe_restores_normal_admission(pool: PgPool) {
         let breakers = DatabaseCircuitBreakers::new(config());

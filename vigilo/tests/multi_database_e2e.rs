@@ -855,7 +855,7 @@ async fn connect(url: &str) -> anyhow::Result<PgPool> {
 }
 
 async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
-    sqlx::migrate!("../migrations").run(pool).await?;
+    sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
 }
 
@@ -870,10 +870,9 @@ async fn seed_sentiment_evaluator(primary: &PgPool) -> anyhow::Result<()> {
     })?;
     let wasm_size_bytes = wasm_bytes.len() as i64;
     let content_hash = blake3::hash(&wasm_bytes).to_hex().to_string();
-    let abi_contract_hash =
-        blake3::hash(include_bytes!("../../wit/evaluator/v1.0.0/evaluator.wit"))
-            .to_hex()
-            .to_string();
+    let abi_contract_hash = blake3::hash(include_bytes!("../wit/evaluator/v1.0.0/evaluator.wit"))
+        .to_hex()
+        .to_string();
 
     sqlx::query(
         r#"

@@ -757,7 +757,7 @@ fn validate_bootstrap_delta(root: &Path, base: &str) -> Result<()> {
     for path in changed {
         let path = path.replace('\\', "/");
         if path.starts_with("vigilo/src/")
-            || path.starts_with("migrations/")
+            || path.starts_with("vigilo/migrations/")
             || path == "vigilo/Cargo.toml"
         {
             bail!("bootstrap harness delta changes production path: {path}");

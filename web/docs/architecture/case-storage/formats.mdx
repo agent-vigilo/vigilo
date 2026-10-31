@@ -169,7 +169,7 @@ Use compact JSON containing exactly `schema`, `run_id`, `chunk_index_start`,
 - `chunk_index`, `chunk_id`, `run_shard`, `ordinal_start`, `ordinal_end`, and
   `profile_group_id`, identifying the scheduling unit and its assigned range.
 - `case_projection_hash`, using the
-  [`update_projection_hash`](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/db/workflows/case_projection.rs) binary encoding over
+  [`update_projection_hash`](https://github.com/agent-vigilo/vigilo/blob/main/vigilo/src/db/workflows/case_projection.rs) binary encoding over
   the chunk's assigned cases in ordinal order.
 
 Do not embed case payloads or per-case assignment lists. Chunk ranges resolve
@@ -310,7 +310,7 @@ have separate costs. Record requests and bytes before claiming an improvement.
 The [small dataset example](/docs/architecture/case-storage/examples/) contains a
 complete case batch, source fields, leaf index, and dataset root with exact byte
 counts and BLAKE3 references. It shares its logical identities with the
-[identity fixtures](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/cli/commands/run/fixtures/README.md).
+[identity fixtures](https://github.com/agent-vigilo/vigilo/blob/main/vigilo/src/cli/commands/run/fixtures/README.md).
 
 ## Validation Boundaries
 
@@ -325,7 +325,7 @@ Cancellation and operation deadlines apply to queued requests, transfers,
 backoff, and verification. Unfinished cleanup retains durable ownership so a
 process restart can resume it.
 
-The [Rust case-storage contracts](https://github.com/gregl83/agent-vigilo/blob/main/vigilo/src/contracts/case_storage.rs)
+The [Rust case-storage contracts](https://github.com/agent-vigilo/vigilo/blob/main/vigilo/src/contracts/case_storage.rs)
 provide the service-free encoding and validation boundary.
 `ObjectRef::verify` checks reference limits and byte integrity and returns
 `VerifiedObject`. `decode` requires that proof and parses typed metadata; callers

@@ -117,10 +117,10 @@ pub fn execute(args: BuildArgs) -> Result<u8> {
     let capabilities = verify_capabilities(&executable)?;
 
     let assets = output.join("setup-assets");
-    let migrations_source = source.join("migrations");
-    let wit_source = source.join("wit");
+    let migrations_source = source.join("vigilo/migrations");
+    let wit_source = source.join("vigilo/wit");
     copy_tree(&migrations_source, &assets.join("migrations"))?;
-    copy_tree(&wit_source, &assets.join("wit"))?;
+    copy_tree(&wit_source, &assets.join("vigilo/wit"))?;
     let evaluator_source = source.join("evaluators/sentiment-basic-en");
     let evaluator_target = output.join("evaluator-target");
     let evaluator_status = Command::new("cargo")
@@ -157,7 +157,7 @@ pub fn execute(args: BuildArgs) -> Result<u8> {
     let evaluator_abi_digest = digest_tree(&wit_source)?;
     let evaluator_fixture_digest = setup_asset_digest("evaluator-fixture", &evaluator_asset)?;
     if migrations_digest != digest_tree(&assets.join("migrations"))?
-        || evaluator_abi_digest != digest_tree(&assets.join("wit"))?
+        || evaluator_abi_digest != digest_tree(&assets.join("vigilo/wit"))?
     {
         bail!("setup asset snapshot verification failed");
     }
@@ -214,7 +214,7 @@ pub fn execute(args: BuildArgs) -> Result<u8> {
             },
             SetupAsset {
                 name: "evaluator-wit".into(),
-                relative_path: "setup-assets/wit".into(),
+                relative_path: "setup-assets/vigilo/wit".into(),
                 digest: evaluator_abi_digest,
             },
             SetupAsset {

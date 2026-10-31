@@ -369,6 +369,7 @@ pub(crate) struct ExecutionTerminalTransition {
     pub(crate) completed: bool,
     pub(crate) error_message: Option<String>,
     pub(crate) requires_worker_lease: bool,
+    pub(crate) agent_failure: Option<crate::agent_client::failure::Failure>,
 }
 
 /// Worker ownership attached to newly allocated execution attempts.
@@ -503,6 +504,7 @@ fn processed_terminal_failure(
             completed: false,
             error_message: Some(error_message),
             requires_worker_lease: true,
+            agent_failure: None,
         },
     }
 }
@@ -524,6 +526,7 @@ fn processed_terminal_failure_without_worker_lease(
             completed: false,
             error_message: Some(error_message),
             requires_worker_lease: false,
+            agent_failure: None,
         },
     }
 }
@@ -890,6 +893,7 @@ async fn evaluate_case_execution(
         let http = context.http().await?;
         let agent_output = agent_client::invoke(
             http,
+            context.agent_http_limits(),
             run_id,
             execution_id,
             attempt_id,
@@ -897,7 +901,7 @@ async fn evaluate_case_execution(
             &test_case,
         )
         .await
-        .map_err(|err| anyhow::anyhow!("agent invocation failed: {}", err))?;
+        .map_err(|err| err.context("agent invocation failed"))?;
 
         let aggregation_bindings = evaluator_bindings
             .iter()
@@ -1301,6 +1305,7 @@ async fn evaluate_case_execution(
                     completed: true,
                     error_message: None,
                     requires_worker_lease: true,
+                    agent_failure: None,
                 },
             };
 
@@ -1321,19 +1326,19 @@ async fn evaluate_case_execution(
             }
         }
         Err(err) => {
-            let error_message = err.to_string();
-            let failure_message = if error_message.starts_with("agent invocation failed:") {
-                error_message
+            let agent_failure = err
+                .downcast_ref::<crate::agent_client::failure::Failure>()
+                .cloned();
+            let failure_message = if agent_failure.is_some() {
+                format!("{err:#}")
             } else {
-                format!("case execution processing failed: {}", error_message)
+                format!("case execution processing failed: {err:#}")
             };
+            let mut processed =
+                processed_terminal_failure(execution_id, attempt_id, attempt_no, failure_message);
+            processed.terminal_transition.agent_failure = agent_failure;
             CaseExecutionOutcome {
-                processed: Some(processed_terminal_failure(
-                    execution_id,
-                    attempt_id,
-                    attempt_no,
-                    failure_message,
-                )),
+                processed: Some(processed),
                 persistence: None,
             }
         }
@@ -1743,6 +1748,9 @@ mod tests {
                     method: "POST".to_string(),
                     headers: Default::default(),
                     timeout_secs: None,
+                    max_request_bytes: None,
+                    max_response_bytes: None,
+                    max_retry_after_secs: None,
                 },
                 config: json!({}),
             },

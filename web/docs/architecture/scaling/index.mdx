@@ -329,7 +329,7 @@ var to every Vigilo process, registering it, and then activating it:
 
 ```bash
 export VIGILO_SHARD_001_DATABASE_URL=postgres://...
-DATABASE_URL="$VIGILO_SHARD_001_DATABASE_URL" vigilo setup --skip-evaluators
+DATABASE_URL="$VIGILO_SHARD_001_DATABASE_URL" vigilo setup
 vigilo database register shard_001 --database-url-env VIGILO_SHARD_001_DATABASE_URL
 vigilo database activate shard_001
 ```

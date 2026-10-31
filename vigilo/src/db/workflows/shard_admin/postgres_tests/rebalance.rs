@@ -1,5 +1,5 @@
 use super::*;
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn rebalance_defers_a_draining_shard_until_active_work_drains(pool: PgPool) {
     let database_url = isolated_database_url(&pool).await;
@@ -35,7 +35,7 @@ async fn rebalance_defers_a_draining_shard_until_active_work_drains(pool: PgPool
         Some("shard_001")
     );
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn rebalance_claims_pending_and_expired_items_but_skips_fresh_claims(pool: PgPool) {
     let (operation_id, items) = seed_rebalance_operation(&pool, 3).await;
@@ -66,7 +66,7 @@ async fn rebalance_claims_pending_and_expired_items_but_skips_fresh_claims(pool:
     assert_eq!(fresh.claim_token, Some(fresh_token));
     assert_eq!(fresh.claimed_by, Some(fresh_owner));
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn expired_rebalance_claim_can_be_reclaimed_and_fences_stale_settlement(pool: PgPool) {
     let (operation_id, _) = seed_rebalance_operation(&pool, 1).await;
@@ -96,7 +96,7 @@ async fn expired_rebalance_claim_can_be_reclaimed_and_fences_stale_settlement(po
     assert!(completed.claimed_by.is_none());
     assert!(completed.claimed_until.is_none());
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn rebalance_cancellation_preserves_fresh_claim_and_fences_claimed_cancel(pool: PgPool) {
     let database_url = isolated_database_url(&pool).await;
@@ -131,7 +131,7 @@ async fn rebalance_cancellation_preserves_fresh_claim_and_fences_claimed_cancel(
     assert_eq!(operation.status, REBALANCE_OPERATION_STATUS_CANCELLED);
     assert_eq!(operation.cancelled_item_count, 3);
 }
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn concurrent_rebalance_apply_workers_move_each_item_once(pool: PgPool) {
     let database_url = isolated_database_url(&pool).await;

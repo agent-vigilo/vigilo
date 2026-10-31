@@ -28,7 +28,7 @@ struct ContextInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct Context(Arc<ContextInner>);
+pub(crate) struct Context(Arc<ContextInner>, crate::agent_client::limits::Limits);
 
 impl Context {
     pub fn new(
@@ -37,31 +37,47 @@ impl Context {
         wasm_config: wasm::Config,
         output_format: output::OutputFormat,
     ) -> Self {
-        Self(Arc::new(ContextInner {
-            storage: storage::Context::default(),
-            dbr: database::Context {
-                config: database_config,
-                cell: Default::default(),
-            },
-            http: http::Context {
-                cell: Default::default(),
-            },
-            mq: messaging::Context {
-                config: messaging_config,
-                cell: Default::default(),
-            },
-            out: output::Context {
-                cell: Default::default(),
-                format: output_format,
-            },
-            reg: registry::Context {
-                cell: Default::default(),
-            },
-            wasm: wasm::Context {
-                cell: Default::default(),
-                config: wasm_config,
-            },
-        }))
+        Self(
+            Arc::new(ContextInner {
+                storage: storage::Context::default(),
+                dbr: database::Context {
+                    config: database_config,
+                    cell: Default::default(),
+                },
+                http: http::Context {
+                    cell: Default::default(),
+                },
+                mq: messaging::Context {
+                    config: messaging_config,
+                    cell: Default::default(),
+                },
+                out: output::Context {
+                    cell: Default::default(),
+                    format: output_format,
+                },
+                reg: registry::Context {
+                    cell: Default::default(),
+                },
+                wasm: wasm::Context {
+                    cell: Default::default(),
+                    config: wasm_config,
+                },
+            }),
+            crate::agent_client::limits::Limits::default(),
+        )
+    }
+
+    /// Set process-local agent HTTP ceilings before dispatching the command.
+    pub(crate) fn with_agent_http_limits(
+        mut self,
+        limits: crate::agent_client::limits::Limits,
+    ) -> Self {
+        self.1 = limits;
+        self
+    }
+
+    pub(crate) fn agent_http_limits(&self) -> crate::agent_client::limits::Limits {
+        self.1
     }
 
     pub(crate) async fn storage(

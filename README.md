@@ -1,8 +1,8 @@
-[![Build](https://github.com/gregl83/agent-vigilo/actions/workflows/build.yaml/badge.svg?branch=main)](https://github.com/gregl83/agent-vigilo/actions/workflows/build.yaml)
-[![Coverage Status](https://codecov.io/gh/gregl83/agent-vigilo/graph/badge.svg?token=CL93O7DW9C)](https://codecov.io/gh/gregl83/agent-vigilo)
+[![Build](https://github.com/agent-vigilo/vigilo/actions/workflows/build.yaml/badge.svg?branch=main)](https://github.com/agent-vigilo/vigilo/actions/workflows/build.yaml)
+[![Coverage Status](https://codecov.io/gh/agent-vigilo/vigilo/graph/badge.svg?token=CL93O7DW9C)](https://codecov.io/gh/agent-vigilo/vigilo)
 [![Crates.io](https://img.shields.io/crates/v/vigilo.svg)](https://crates.io/crates/vigilo)
 [![Documentation](https://img.shields.io/badge/docs-agentvigilo.com-blue.svg)](https://agentvigilo.com/docs/guides/getting-started)
-[![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Apache-2.0 licensed](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 <p align="center">
   <picture>
@@ -67,12 +67,12 @@ git config core.hooksPath scripts/hooks
 | Tier | Scope | Required services | GitHub Actions job |
 | --- | --- | --- | --- |
 | Unit and contract | Service-free Rust behavior across the workspace | None | `Unit and Contract Tests` |
-| Database integration | SQL, migrations, transactions, advisory locks, leases, and concurrency | One PostgreSQL server; `DATABASE_URL` must use a role that can create test databases | `Database Integration Tests` |
+| Database integration | SQL, migrations, transactions, advisory locks, leases, concurrency, and portable evaluator publication | One PostgreSQL server; `DATABASE_URL` must use a role that can create test databases. Portable publication also uses the built evaluator Wasm fixture | `Database Integration Tests` |
 | Migration | Greenfield schema application through the CLI setup path | One fresh PostgreSQL database | `Migration Tests` |
 | End-to-end | Routing and the real distributed runtime across process and protocol boundaries | Two PostgreSQL servers, RabbitMQ, S3-compatible object storage, evaluator Wasm, and the test HTTP agent | `End-to-End Tests` |
 | Blob storage integration | Signed object I/O, transport faults, upload/run-plan recovery, and exact cleanup | PostgreSQL and disposable Ceph Object Gateway | `Blob Storage Integration Tests` |
 | Performance service integration | Perf topology ownership, collector reset, and cleanup integration | Docker Engine with Compose; images are declared in `infra/performance/compose.yml` | `Performance Service Integration Tests` |
-| Evaluator compatibility | Fixture-backed evaluator ABI compatibility | Built Wasm fixtures; no live services | `Evaluator Compatibility Tests` |
+| Evaluator compatibility | Fixture-backed evaluator ABI and portable artifact compatibility | Built Wasm fixtures; no live services | `Evaluator Compatibility Tests` |
 | Documentation | Website typecheck and production build | Node.js and installed website dependencies | `Documentation Checks` |
 
 Run the service-free tier with:
@@ -118,6 +118,15 @@ checks frozen inputs and finalized reuse, verifies the dispatch boundary, and
 checks exact cleanup. Both storage tiers contribute to the same aggregate
 coverage report and 80% gate.
 
+Agent HTTP transport tests use a disposable loopback server and run separately
+from service-free tests:
+
+```bash
+cargo test -p vigilo --locked --features agent-http-services --test agent_http_services
+```
+
+CI includes these transport tests in the end-to-end coverage report.
+
 After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:
 
 ```bash
@@ -150,7 +159,7 @@ which clones PostgreSQL's built-in `template1` database. The PostgreSQL coverage
 job migrates `template1` once, so each test validates the recorded migrations
 instead of rebuilding every partition and index. The separate migration job
 applies the complete migration set to an empty database. The
-[migration layout](migrations/README.md) documents dependency order and file ownership.
+[migration layout](vigilo/migrations/README.md) documents dependency order and file ownership.
 
 Accumulate the same reports locally after starting the services and setting the
 environment variables required by each tier:
@@ -162,6 +171,7 @@ cargo llvm-cov run --no-report -p xtask --locked -- perf check
 cargo llvm-cov --no-report -p xtask --locked --features performance-services --test performance_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
+cargo llvm-cov --no-report -p vigilo --locked --features agent-http-services --test agent_http_services
 cargo llvm-cov --no-report -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_routing -- --nocapture
 VIGILO_E2E_MULTI_DATABASE=1 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e -- --nocapture
@@ -172,6 +182,36 @@ The integration commands require the database, messaging, evaluator Wasm, and
 test agent dependencies described above. Configure the repository secret
 `CODECOV_TOKEN` for the aggregate CI upload.
 
+## Crate Releases
+
+Publishing a GitHub release tagged `vigilo/vX.Y.Z` runs **Publish Vigilo Crate**.
+The workflow checks out the release commit, verifies the tag against
+`vigilo/Cargo.toml`, and requires a successful **Build** workflow for that exact
+commit (a push or manual run). It publishes only the `vigilo` crate with Cargo's
+package verification enabled. Evaluator collection releases do not trigger crate
+publication.
+
+Configure the GitHub environment `crates-io` with the required reviewers and
+release-tag deployment restrictions for your repository. Add the secret
+`CARGO_REGISTRY_TOKEN` with a crates.io token authorized to publish `vigilo`.
+The token is exposed only to the publish step. Referencing an environment in the
+workflow does not configure its protection rules.
+
+Release procedure:
+
+1. Commit and push the release changes, including the crate version and lockfile.
+2. Wait for **Build** to pass for the commit being released.
+3. Tag that commit as `vigilo/vX.Y.Z` and publish its GitHub release.
+4. Approve the `crates-io` environment deployment when required, then check the
+   publish job's result.
+
+Rerunning the job skips a version already present on crates.io. Registry errors
+fail the job instead of being treated as an absent version. To verify locally
+without uploading, run `cargo publish -p vigilo --dry-run --locked`.
+
+Official evaluator collections have their own **Release Core Evaluators** workflow;
+see [Publishing Evaluators](https://agentvigilo.com/docs/guides/publishing#core-evaluators).
+
 ## Project Status
 
 Agent Vigilo is an active systems project focused on reliable AI evaluation, LLM evaluation workflows, agent testing, and deployment gates. The implementation favors explicit contracts, durable state transitions, and operational diagrams over black-box orchestration.
@@ -179,3 +219,7 @@ Agent Vigilo is an active systems project focused on reliable AI evaluation, LLM
 ## License
 
 [Apache 2.0](LICENSE)
+
+The root `LICENSE` is authoritative. Crate-local copies are included in published
+packages and checked against it in CI. Keep those copies identical when updating
+the license.

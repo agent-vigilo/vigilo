@@ -48,7 +48,7 @@ async fn initialized_chunk(pool: &PgPool, status: &str) -> (Uuid, Uuid) {
     (run, chunk)
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn initialized_aggregation_has_bounded_query_cost(pool: PgPool) {
     let (run, _) = initialized_chunk(&pool, "failed").await;
@@ -78,7 +78,7 @@ async fn initialized_aggregation_has_bounded_query_cost(pool: PgPool) {
     eprintln!("progress/final/sealed aggregation SQL submissions: {query_counts:?}");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn ready_work_skips_idle_shards_and_finishes_consumed_receipts(pool: PgPool) {
     let (idle, _) = initialized_chunk(&pool, "pending").await;
@@ -146,7 +146,7 @@ async fn ready_work_skips_idle_shards_and_finishes_consumed_receipts(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn unavailable_ready_shards_rotate_without_starving_progress(pool: PgPool) {
     let (busy, _) = initialized_chunk(&pool, "failed").await;
@@ -214,7 +214,7 @@ async fn unavailable_ready_shards_rotate_without_starving_progress(pool: PgPool)
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn compact_receipts_use_bounded_256_row_pages_for_both_folds(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 257).await;
@@ -271,7 +271,7 @@ async fn compact_receipts_use_bounded_256_row_pages_for_both_folds(pool: PgPool)
     assert_eq!(summary.aggregate_count, 0);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn gated_receipts_keep_64_row_pages_and_exact_missing_case_populations(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 65).await;
@@ -325,7 +325,7 @@ async fn gated_receipts_keep_64_row_pages_and_exact_missing_case_populations(poo
     assert_eq!(summary.scorecard["entries"][0]["scored_count"], json!(0));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn aggregation_scheduling_accepts_draining_and_excludes_closed_shards(pool: PgPool) {
     let (draining, _) = initialized_chunk(&pool, "failed").await;
@@ -376,7 +376,7 @@ async fn aggregation_scheduling_accepts_draining_and_excludes_closed_shards(pool
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn aggregation_page_budget_visits_ready_shards_before_revisiting_and_resumes(pool: PgPool) {
     let mut runs = Vec::new();
@@ -429,7 +429,7 @@ async fn aggregation_page_budget_visits_ready_shards_before_revisiting_and_resum
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn aggregation_progresses_other_shards_while_one_waits_for_movement(pool: PgPool) {
     let (blocked, _) = initialized_chunk(&pool, "failed").await;
@@ -480,7 +480,7 @@ async fn aggregation_progresses_other_shards_while_one_waits_for_movement(pool: 
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn concurrent_aggregation_drains_publish_each_receipt_once(pool: PgPool) {
     let mut runs = Vec::new();
@@ -514,7 +514,7 @@ async fn concurrent_aggregation_drains_publish_each_receipt_once(pool: PgPool) {
     assert_eq!((receipts, consumed), (3, 3));
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn slow_discovery_does_not_exhaust_the_page_scheduling_window(pool: PgPool) {
     let (run, _) = initialized_chunk(&pool, "failed").await;
@@ -572,7 +572,7 @@ async fn slow_discovery_does_not_exhaust_the_page_scheduling_window(pool: PgPool
     );
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn aggregation_does_not_probe_again_when_available_progress_is_consumed(pool: PgPool) {
     for ready_count in [1, 256] {
@@ -612,7 +612,7 @@ async fn aggregation_does_not_probe_again_when_available_progress_is_consumed(po
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn aggregation_drains_receipts_across_byte_limited_pages(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 6).await;

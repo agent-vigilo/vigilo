@@ -134,3 +134,9 @@ Each Wasm evaluator invocation runs in a fresh Wasmtime store with memory, table
 - [State ownership](/docs/architecture/state/ownership/)
 - [Outbox lifecycle](/docs/architecture/state/outbox-lifecycle/)
 - [Glossary](/docs/glossary)
+
+Agent invocation failures use a typed retry policy. Authentication, body-limit,
+configuration and response-format failures are terminal; selected transient HTTP
+statuses and transport failures use durable, attempt-bounded retries. Retry-After
+advice exceeding the profile limit fails explicitly rather than being shortened.
+See [agent retry policy](/docs/configuration/run-profile#agent-invocation-failures-and-retries).

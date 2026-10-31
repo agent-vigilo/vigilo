@@ -45,7 +45,7 @@ async fn settle(pool: &PgPool, chunk: &RunChunk, failed: bool) -> anyhow::Result
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn worker_settlement_preserves_mixed_outcomes_and_stored_chunk_identity(pool: PgPool) {
     for (failed, gates) in [(false, false), (true, false), (false, true), (true, true)] {
@@ -182,7 +182,7 @@ async fn worker_settlement_preserves_mixed_outcomes_and_stored_chunk_identity(po
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn worker_settlement_observes_a_writer_committed_while_waiting_for_chunk(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 1).await;
@@ -239,7 +239,7 @@ async fn worker_settlement_observes_a_writer_committed_while_waiting_for_chunk(p
     assert_eq!(result["unresolved_execution_count"], 0);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn settlement_replay_checks_policy_and_preserves_evidence(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 1).await;
@@ -266,7 +266,7 @@ async fn settlement_replay_checks_policy_and_preserves_evidence(pool: PgPool) {
     assert_eq!(receipt(&pool, run, chunk_id).await, expected);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn worker_settlement_rejects_lost_lease_and_placement_authority(pool: PgPool) {
     for failed in [false, true] {
@@ -318,7 +318,7 @@ async fn worker_settlement_rejects_lost_lease_and_placement_authority(pool: PgPo
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn worker_settlement_rolls_back_when_local_snapshot_is_missing(pool: PgPool) {
     for failed in [false, true] {
@@ -353,7 +353,7 @@ async fn worker_settlement_rolls_back_when_local_snapshot_is_missing(pool: PgPoo
     }
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn missing_gate_counts_roll_back_worker_and_attempt_retirement(pool: PgPool) {
     let (run, dataset) = fixture(&pool, 2).await;

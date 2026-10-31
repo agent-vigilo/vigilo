@@ -28,11 +28,14 @@ The profile is YAML or JSON, supplied through `--profile` or `--profile-file`,
 with an 8 MiB input and encoded limit. Storage configuration resolves the same
 recorded physical owner as the dataset; credentials remain outside SQL and files.
 
-Creation admits the published plan to execution storage and returns `pending`
-after exact placement verification. `--prepare-only` holds a run in `creating`
-with `plan_status: ready` and `dispatchable: false`. Repeat the same command
-without that flag to request execution. Coordinators resume requested admission
-after the foreground process stops; they leave preparation-only runs held.
+Creation records execution intent atomically with the validated run identity,
+admits the published plan to execution storage, and returns `pending` after
+exact placement verification. On initial creation, `--prepare-only` holds a run
+in `creating` with `plan_status: ready` and `dispatchable: false`. Repeat the same
+command without that flag to request execution. Replay validates immutable inputs
+before recording intent under the run lock; a preparation-only retry does not
+revoke an existing request. Coordinators resume requested admission after the
+foreground process stops; they leave preparation-only runs held.
 Inline and file YAML/JSON inputs use the same ingestion and preparation path.
 Set `VIGILO_STORAGE_CONFIG` for creators, coordinators, and workers, or supply
 `--storage-config` to creation. Runtime credentials need read access to the
@@ -120,11 +123,22 @@ reads for the same live lease. Adapter initialization and root reads share a
 120-second deadline minted before the claim; the complete gate traversal has
 its own 120-second deadline. Returned errors and cancellation release ownership
 when control storage is reachable; process death falls back to lease expiry.
+Confirmed publication and activation release ownership in their commit, so their
+callers need no subsequent release write. Deferred admission and commit errors,
+including uncertain outcomes, still attempt cleanup with the same owner and
+generation fence; an old caller cannot release a replacement owner's lease.
 Each coordinator processes recovery candidates sequentially. A failed candidate
 is deferred and the next candidate can proceed, but slow reads delay later
 candidates until the bounded read finishes or fails.
 The foreground creator reuses its already verified roots and claims authority
 before gate reads and local admission. Preparation-only runs remain held.
+
+Inline and file creation pass finalized dataset metadata and any already frozen
+plan inputs directly into preparation. A missing plan is checked again after
+ingestion because another creator may have published its identity meanwhile.
+Run status, publication progress, lease authority, and placement availability
+remain live database checks. The creation response reads final run status,
+error, and placement progress together in one database snapshot.
 
 `run status` and `run watch` expose `creation_progress.plan_status` and
 `creation_progress.plan_chunk_cursor`. The cursor counts contiguous acknowledged
@@ -133,10 +147,16 @@ configuration and the manifest finish; `plan_status: ready` indicates complete
 verified publication. Preparation-only runs expose these fields while held.
 
 Publication atomically records the verified root reference and compact shard
-metadata. Missing/corrupt objects, changed identity, incomplete coverage, stale
-leases, or cancelled runs cannot publish.
+metadata. One validation query independently checks acknowledged root references,
+outstanding objects, and the exact acknowledged manifest. Each failed condition
+retains its specific error. Missing/corrupt objects, changed identity, incomplete
+coverage, stale leases, or cancelled runs cannot publish.
 
 ## Execution Admission and Worker Reads
+
+Activation reads published shard totals, membership hashes, and database aliases
+together. It validates the totals and hashes against admitted work and installs
+routes from those same rows under the live creation lease.
 
 Admission reads bounded chunk pages and the linked gate counts. It stores only
 execution-local chunk scheduling rows, immutable plan references, frozen gate

@@ -1,0 +1,34 @@
+name: Release Core Evaluators
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-core-evaluators
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and Publish Core Evaluator Collection
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Test release policy
+        run: python3 -m unittest discover -s scripts/releases -p 'test_*.py'
+      - name: Build evaluator packager
+        run: cargo build -p vigilo --locked --release
+      - name: Build, verify, and publish changed collection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/releases/core_evaluators.py --output "${RUNNER_TEMP}/core-evaluators"

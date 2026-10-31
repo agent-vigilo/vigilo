@@ -209,12 +209,16 @@ execution.status = completed | failed | timed_out
 
 ### 6. Retry Flow
 
-If an execution fails but is retryable:
+If an execution fails, its failure policy permits retries, and attempts remain:
 
 ```text
 execution.status = retry_scheduled
-execution.retry_after = now() + bounded exponential backoff
+execution.retry_after = latest(local backoff with bounded jitter, accepted server retry advice)
 ```
+
+Agent invocation failures carry typed retry policy and retain diagnostics in the
+attempt summary. Non-retryable or exhausted failures become terminal operational
+errors without a numeric score. See [agent retry policy](/docs/configuration/run-profile#agent-invocation-failures-and-retries).
 
 The worker finishes the current chunk pass, summarizes the chunk's execution state from the database, and releases the chunk back to `pending` when any cases are still waiting for retry. The chunk-ready broker message is delayed until the next retry window instead of being treated as a worker failure.
 

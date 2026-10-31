@@ -14,6 +14,16 @@
 //!   `messages`, `stream: false`, and selected generation options from
 //!   `agent.config`.
 
+#[path = "agent_client/failure.rs"]
+pub(crate) mod failure;
+use failure::{
+    Failure,
+    Kind,
+};
+
+#[path = "agent_client/limits.rs"]
+pub(crate) mod limits;
+
 use std::time::{
     Duration,
     Instant,
@@ -394,6 +404,7 @@ fn attach_invocation_metadata(
 
 pub(crate) async fn invoke(
     client: &reqwest::Client,
+    ceilings: limits::Limits,
     run_id: Uuid,
     execution_id: Uuid,
     attempt_id: Uuid,
@@ -401,52 +412,101 @@ pub(crate) async fn invoke(
     test_case: &TestCase,
 ) -> anyhow::Result<AgentOutput> {
     let http = &run_profile.agent.http;
+    let limits = ceilings
+        .resolve(http)
+        .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
+    let max_retry_after = http
+        .max_retry_after_secs
+        .unwrap_or(failure::DEFAULT_MAX_RETRY_AFTER_SECS);
+    if max_retry_after == 0 || max_retry_after > failure::MAX_RETRY_AFTER_SECS {
+        return Err(Failure::terminal(
+            Kind::Configuration,
+            "agent.http.max_retry_after_secs must be between 1 and 86400",
+        )
+        .into());
+    }
     let timeout_secs = http
         .timeout_secs
         .unwrap_or(run_profile.defaults.request_timeout_secs);
     if timeout_secs == 0 {
-        anyhow::bail!("agent HTTP timeout_secs must be greater than zero");
+        return Err(Failure::terminal(
+            Kind::Configuration,
+            "agent HTTP timeout_secs must be greater than zero",
+        )
+        .into());
     }
 
-    let method = http
-        .method
-        .parse::<reqwest::Method>()
-        .map_err(|err| anyhow::anyhow!("invalid agent HTTP method '{}': {}", http.method, err))?;
+    let method = http.method.parse::<reqwest::Method>().map_err(|err| {
+        Failure::terminal(
+            Kind::Configuration,
+            format!("invalid agent HTTP method: {err}"),
+        )
+    })?;
 
-    let request_body =
-        build_request_body(run_id, execution_id, attempt_id, run_profile, test_case)?;
+    let request_body = build_request_body(run_id, execution_id, attempt_id, run_profile, test_case)
+        .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
     let mut request = client
         .request(method, &http.url)
         .timeout(Duration::from_secs(u64::from(timeout_secs)))
-        .json(&request_body);
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(
+            limits::serialize(&request_body, limits.max_request_bytes)
+                .map_err(|err| Failure::terminal(Kind::BodyLimit, err))?,
+        );
     for (name, value) in &http.headers {
         request = request.header(name, value);
     }
 
     let started = Instant::now();
-    let response = request.send().await.map_err(|err| {
-        anyhow::anyhow!(
-            "agent HTTP request failed for '{}': {}",
-            run_profile.agent.name,
-            err
-        )
-    })?;
-    let status = response.status();
-    let body = response
-        .text()
+    let mut response = request
+        .send()
         .await
-        .map_err(|err| anyhow::anyhow!("failed to read agent HTTP response body: {}", err))?;
-
-    if !status.is_success() {
-        anyhow::bail!(
-            "agent HTTP request failed with status {}: {}",
+        .map_err(|err| Failure::transport(err, "agent HTTP request failed", None))?;
+    let status = response.status();
+    let http_failure = (!status.is_success()).then(|| {
+        Failure::http(
             status.as_u16(),
-            response_body_excerpt(&body)
-        );
+            response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            chrono::Utc::now(),
+            max_retry_after,
+        )
+    });
+    let mut body = limits::Body::new(limits.max_response_bytes);
+    while let Some(chunk) = response.chunk().await.map_err(|err| {
+        http_failure.clone().unwrap_or_else(|| {
+            Failure::transport(
+                err,
+                "failed to read agent HTTP response body",
+                Some(status.as_u16()),
+            )
+        })
+    })? {
+        body.append(&chunk).map_err(|err| {
+            Failure::terminal(
+                Kind::BodyLimit,
+                format!("agent HTTP response limit exceeded: {err}"),
+            )
+            .with_status(status.as_u16())
+        })?;
+    }
+    let bytes = body.finish();
+    // Match reqwest text decoding: strip a UTF-8 BOM and replace invalid UTF-8.
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let body = String::from_utf8_lossy(bytes);
+
+    if let Some(failure) = http_failure {
+        return Err(failure.with_excerpt(&response_body_excerpt(&body)).into());
     }
 
-    let response_json = parse_response_body(&body)?;
-    let output = output_from_response_json(response_json)?;
+    let response_json = parse_response_body(&body).map_err(|err| {
+        Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
+    })?;
+    let output = output_from_response_json(response_json).map_err(|err| {
+        Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
+    })?;
 
     Ok(attach_invocation_metadata(
         output,

@@ -318,3 +318,23 @@ pub mod parsers {
         }
     }
 }
+
+/// Process-local byte ceilings for calls to agents under test.
+#[derive(Debug, Clone, Copy, Args)]
+pub(crate) struct AgentHttpOptions {
+    /// Maximum serialized agent request body in bytes
+    #[arg(long, env = "VIGILO_AGENT_MAX_REQUEST_BYTES", default_value_t = crate::agent_client::limits::DEFAULT_BODY_BYTES, value_parser = clap::value_parser!(u64).range(1..=1_073_741_824))]
+    agent_max_request_bytes: u64,
+    /// Maximum agent response body in bytes, including error responses
+    #[arg(long, env = "VIGILO_AGENT_MAX_RESPONSE_BYTES", default_value_t = crate::agent_client::limits::DEFAULT_BODY_BYTES, value_parser = clap::value_parser!(u64).range(1..=1_073_741_824))]
+    agent_max_response_bytes: u64,
+}
+
+impl AgentHttpOptions {
+    pub(crate) fn config(self) -> crate::agent_client::limits::Limits {
+        crate::agent_client::limits::Limits {
+            max_request_bytes: self.agent_max_request_bytes,
+            max_response_bytes: self.agent_max_response_bytes,
+        }
+    }
+}

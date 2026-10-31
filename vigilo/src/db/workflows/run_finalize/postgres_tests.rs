@@ -21,7 +21,7 @@ struct PersistedRun {
     summary: Value,
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
 async fn finalization_rejects_missing_frozen_plan(pool: PgPool) {
     let run = Uuid::now_v7();
@@ -47,7 +47,7 @@ async fn finalization_rejects_missing_frozen_plan(pool: PgPool) {
         .bind(run).fetch_one(&pool).await.unwrap(), 0);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx finalization tests"]
 async fn finalize_claimed_run_from_summaries_combines_terminal_shards(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -163,7 +163,7 @@ async fn finalize_claimed_run_from_summaries_combines_terminal_shards(pool: PgPo
     assert_eq!(event_count, 1);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx finalization tests"]
 async fn finalize_claimed_run_from_summaries_waits_for_running_summary(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -204,7 +204,7 @@ async fn finalize_claimed_run_from_summaries_waits_for_running_summary(pool: PgP
     assert_eq!(status, "finalizing");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx finalization tests"]
 async fn stale_or_expired_finalization_owner_cannot_commit(pool: PgPool) {
     let run_id = Uuid::now_v7();
@@ -253,7 +253,7 @@ async fn stale_or_expired_finalization_owner_cannot_commit(pool: PgPool) {
     assert_eq!(status, "finalizing");
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx finalization tests"]
 async fn select_finalization_candidate_backlog_matches_control_cursor_gate(pool: PgPool) {
     let ready_run_id = Uuid::now_v7();
@@ -307,7 +307,7 @@ async fn select_finalization_candidate_backlog_matches_control_cursor_gate(pool:
     assert!(backlog.oldest_candidate_lag_seconds.unwrap() >= 0);
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx finalization tests"]
 async fn checked_finalization_candidate_rotates_behind_unchecked_candidate(pool: PgPool) {
     let older_run_id = Uuid::now_v7();
@@ -473,7 +473,7 @@ async fn set_finalization_lease(
     .unwrap();
 }
 
-#[sqlx::test(migrations = "../migrations")]
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for finalization membership tests"]
 async fn finalization_requires_exact_control_membership_and_frozen_plan(pool: PgPool) {
     let run = Uuid::now_v7();
