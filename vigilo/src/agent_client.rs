@@ -14,6 +14,9 @@
 //!   `messages`, `stream: false`, and selected generation options from
 //!   `agent.config`.
 
+#[path = "agent_client/limits.rs"]
+pub(crate) mod limits;
+
 use std::time::{
     Duration,
     Instant,
@@ -394,6 +397,7 @@ fn attach_invocation_metadata(
 
 pub(crate) async fn invoke(
     client: &reqwest::Client,
+    ceilings: limits::Limits,
     run_id: Uuid,
     execution_id: Uuid,
     attempt_id: Uuid,
@@ -401,6 +405,7 @@ pub(crate) async fn invoke(
     test_case: &TestCase,
 ) -> anyhow::Result<AgentOutput> {
     let http = &run_profile.agent.http;
+    let limits = ceilings.resolve(http)?;
     let timeout_secs = http
         .timeout_secs
         .unwrap_or(run_profile.defaults.request_timeout_secs);
@@ -418,13 +423,14 @@ pub(crate) async fn invoke(
     let mut request = client
         .request(method, &http.url)
         .timeout(Duration::from_secs(u64::from(timeout_secs)))
-        .json(&request_body);
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(limits::serialize(&request_body, limits.max_request_bytes)?);
     for (name, value) in &http.headers {
         request = request.header(name, value);
     }
 
     let started = Instant::now();
-    let response = request.send().await.map_err(|err| {
+    let mut response = request.send().await.map_err(|err| {
         anyhow::anyhow!(
             "agent HTTP request failed for '{}': {}",
             run_profile.agent.name,
@@ -432,10 +438,19 @@ pub(crate) async fn invoke(
         )
     })?;
     let status = response.status();
-    let body = response
-        .text()
+    let mut body = limits::Body::new(limits.max_response_bytes);
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|err| anyhow::anyhow!("failed to read agent HTTP response body: {}", err))?;
+        .map_err(|err| anyhow::anyhow!("failed to read agent HTTP response body: {err}"))?
+    {
+        body.append(&chunk)
+            .map_err(|err| anyhow::anyhow!("agent HTTP response limit exceeded: {err}"))?;
+    }
+    let bytes = body.finish();
+    // Match reqwest text decoding: strip a UTF-8 BOM and replace invalid UTF-8.
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let body = String::from_utf8_lossy(bytes);
 
     if !status.is_success() {
         anyhow::bail!(

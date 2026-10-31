@@ -118,6 +118,15 @@ checks frozen inputs and finalized reuse, verifies the dispatch boundary, and
 checks exact cleanup. Both storage tiers contribute to the same aggregate
 coverage report and 80% gate.
 
+Agent HTTP transport tests use a disposable loopback server and run separately
+from service-free tests:
+
+```bash
+cargo test -p vigilo --locked --features agent-http-services --test agent_http_services
+```
+
+CI includes these transport tests in the end-to-end coverage report.
+
 After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:
 
 ```bash
@@ -162,6 +171,7 @@ cargo llvm-cov run --no-report -p xtask --locked -- perf check
 cargo llvm-cov --no-report -p xtask --locked --features performance-services --test performance_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
+cargo llvm-cov --no-report -p vigilo --locked --features agent-http-services --test agent_http_services
 cargo llvm-cov --no-report -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_routing -- --nocapture
 VIGILO_E2E_MULTI_DATABASE=1 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e -- --nocapture

@@ -20,6 +20,7 @@ flowchart TD
     Context[Load run context]
     Warm[Warm evaluator components]
     Cases[Read exact immutable bytes from bounded cache or storage; verify complete files and membership]
+    Http[Validate byte ceilings and invoke agent with bounded request and response bodies]
     Permit[Acquire Wasm evaluation permits]
     Execute[Execute case evaluations in sandboxed stores]
     Persist[Persist terminal transitions]
@@ -71,7 +72,9 @@ flowchart TD
     Warm --> Cases
     Warm -. Warmup fails .-> Release
 
-    Cases --> Permit
+    Cases --> Http
+    Http --> Permit
+    Http -. Invocation or body limit error .-> Persist
     Cases -. Load fails .-> Release
 
     Permit --> Execute

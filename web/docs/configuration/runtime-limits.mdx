@@ -1,6 +1,6 @@
 ---
 title: Runtime Limits
-description: Operational limits for Agent Vigilo database and messaging resilience, Wasm evaluator isolation, and worker concurrency.
+description: Operational limits for Agent Vigilo agent HTTP bodies, database and messaging resilience, Wasm evaluator isolation, and worker concurrency.
 keywords:
   - Agent Vigilo runtime limits
   - Wasm evaluator isolation
@@ -10,7 +10,7 @@ keywords:
 
 # Runtime Limits
 
-These settings bound database, messaging, and evaluator resource use. They can be supplied
+These settings bound agent HTTP bodies, database, messaging, and evaluator resource use. They can be supplied
 as CLI flags or environment variables. Vigilo parses subsystem settings only
 for commands that consume that subsystem; unrelated configuration cannot block
 a database-only command.
@@ -19,6 +19,33 @@ a database-only command.
 uses the host's default Wasm limits when validating downloaded packages. See
 [core evaluator installation](../guides/publishing.mdx#core-evaluators) for download
 limits, collection pins, and GitHub authentication.
+
+## Agent HTTP Bodies
+
+Worker commands accept these process-local ceilings:
+
+| Flag | Environment variable | Default |
+| --- | --- | --- |
+| `--agent-max-request-bytes` | `VIGILO_AGENT_MAX_REQUEST_BYTES` | 4 MiB (4,194,304 bytes) |
+| `--agent-max-response-bytes` | `VIGILO_AGENT_MAX_RESPONSE_BYTES` | 4 MiB (4,194,304 bytes) |
+
+Values must be between 1 byte and 1 GiB. A run profile can request lower limits
+through `agent.http.max_request_bytes` and `agent.http.max_response_bytes`.
+Omitted values use the executing worker's ceilings. A worker rejects zero or
+above-ceiling overrides before sending a request; it does not silently clamp them.
+Use consistent ceilings across workers serving the same workload.
+
+Request limits count serialized JSON body bytes, including escaping and UTF-8,
+but not HTTP headers. Responses are bounded while reading, including non-success
+responses, without relying on Content-Length. Transfer framing is not counted.
+The client does not enable automatic content decompression. Oversized bodies
+produce invocation errors and follow the existing execution retry policy; they
+are not evaluator scores. Error excerpts remain limited to 512 characters.
+
+Existing request timeouts still apply. These byte ceilings do not bound the whole
+process: concurrent calls, request construction, parsed output, and evaluator copies
+consume additional memory. Select ceilings alongside worker concurrency. See
+[run profiles](./run-profile.mdx) for endpoint configuration.
 
 ## Command Scope
 

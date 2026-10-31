@@ -56,6 +56,7 @@ jobs:
           components: clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p vigilo --locked --features blob-storage-services --test blob_storage_services --test dataset_ingestion_services -- -D warnings
+      - run: cargo clippy -p vigilo --locked --features agent-http-services --test agent_http_services -- -D warnings
 
   unit-tests:
     name: Unit and Contract Tests (${{ matrix.os }})
@@ -323,6 +324,10 @@ jobs:
           --test multi_database_e2e -- --nocapture
         env:
           VIGILO_E2E_MULTI_DATABASE: "1"
+      - name: Run agent HTTP transport tests with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features agent-http-services --test agent_http_services
       - name: Generate end-to-end coverage report
         run: >-
           cargo llvm-cov report

@@ -169,6 +169,25 @@ agent:
 - `http` (object): required worker invocation endpoint.
 - `config` (object, optional): unstructured agent configuration included in invocation metadata. Set `request_format: openai_compatible_chat_completions` for OpenAI-compatible servers such as llama.cpp.
 
+Agent HTTP body limits are optional positive byte counts:
+
+```yaml
+agent:
+  provider: example
+  name: agent
+  http:
+    url: http://agent:8080/invoke
+    timeout_secs: 30
+    max_request_bytes: 1048576
+    max_response_bytes: 2097152
+```
+
+These fields limit the serialized request and received response bodies. Omission
+uses the worker ceiling. Zero is invalid; a value above the executing worker's
+ceiling fails before HTTP invocation. Run validation cannot determine every worker's
+local ceiling. See [runtime limits](./runtime-limits.mdx#agent-http-bodies) for flags,
+defaults, and failure behavior.
+
 By default, workers send a Vigilo case request containing `run_id`, `execution_id`, `attempt_id`, `agent`, `input`, and non-oracle case metadata. With `request_format: openai_compatible_chat_completions`, workers send an OpenAI-compatible `model` and `messages` payload.
 
 The response may be either plain text or JSON. JSON responses can return the evaluator-ready output directly, or under `actual`/`output`:

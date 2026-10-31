@@ -890,6 +890,7 @@ async fn evaluate_case_execution(
         let http = context.http().await?;
         let agent_output = agent_client::invoke(
             http,
+            context.agent_http_limits(),
             run_id,
             execution_id,
             attempt_id,
@@ -1743,6 +1744,8 @@ mod tests {
                     method: "POST".to_string(),
                     headers: Default::default(),
                     timeout_secs: None,
+                    max_request_bytes: None,
+                    max_response_bytes: None,
                 },
                 config: json!({}),
             },

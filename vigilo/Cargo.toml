@@ -63,6 +63,7 @@ url = "2.5.8"
 default = []
 evaluator-abi-fixtures = []
 blob-storage-services = []
+agent-http-services = []
 
 [[test]]
 name = "blob_storage_services"
@@ -73,3 +74,8 @@ required-features = ["blob-storage-services"]
 name = "dataset_ingestion_services"
 path = "tests/dataset_ingestion_services.rs"
 required-features = ["blob-storage-services"]
+
+[[test]]
+name = "agent_http_services"
+path = "tests/agent_http_services.rs"
+required-features = ["agent-http-services"]

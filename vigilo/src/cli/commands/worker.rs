@@ -535,6 +535,9 @@ pub(crate) struct Command {
     #[command(flatten)]
     pub(crate) wasm: WasmOptions,
 
+    #[command(flatten)]
+    pub(crate) agent_http: crate::cli::args::AgentHttpOptions,
+
     #[command(subcommand)]
     pub command: Option<SubCommand>,
 }

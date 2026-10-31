@@ -110,7 +110,8 @@ async fn main() -> ExitCode {
                 command_context.messaging,
                 command_context.wasm,
                 app.output_format,
-            );
+            )
+            .with_agent_http_limits(command_context.agent_http);
 
             match app.exec(context).await {
                 Err(e) => {

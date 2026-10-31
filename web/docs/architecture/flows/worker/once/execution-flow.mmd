@@ -60,7 +60,9 @@ sequenceDiagram
                 WASM-->>Vigilo: Warmup result
                 Vigilo->>Queue: Hold delivery unacked while chunk is owned
                 par Agent calls
-                    Vigilo->>Agent: Invoke multiple cases with shared HTTP client
+                    Vigilo->>Vigilo: Validate profile byte limits against worker ceilings
+                    Vigilo->>Agent: Invoke cases with bounded JSON request bodies
+                    Agent-->>Vigilo: Read bounded response bodies within request timeout
                 and Evaluator calls
                     Vigilo->>Vigilo: Acquire Wasm evaluation semaphore permits
                     Vigilo->>WASM: Dispatch pinned ABI adapters in sandboxed stores

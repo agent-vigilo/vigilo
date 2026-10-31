@@ -180,6 +180,9 @@ mod tests {
         assert!(has_long(worker, "messaging-url"));
         assert!(has_long(worker, "messaging-circuit-failure-threshold"));
         assert!(has_long(worker, "wasm-timeout-ms"));
+        assert!(has_long(worker, "agent-max-request-bytes"));
+        assert!(has_long(worker, "agent-max-response-bytes"));
+        assert!(!has_long(coordinator, "agent-max-request-bytes"));
         assert!(has_long(worker, "database-circuit-failure-threshold"));
         assert!(has_long(worker, "database-operation-timeout-seconds"));
 

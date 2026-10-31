@@ -38,6 +38,7 @@ use super::{
 pub(crate) struct CommandContextConfig {
     pub(crate) messaging: Option<crate::mq::Config>,
     pub(crate) wasm: wasm::Config,
+    pub(crate) agent_http: crate::agent_client::limits::Limits,
     pub(crate) circuit_breaker: CircuitBreakerConfig,
     pub(crate) database_operation_timeout:
         Option<crate::context::database::DatabaseOperationTimeoutConfig>,
@@ -100,6 +101,7 @@ impl Command {
         control_database_alias: &str,
     ) -> anyhow::Result<CommandContextConfig> {
         let mut messaging = None;
+        let mut agent_http = crate::agent_client::limits::Limits::default();
         let mut wasm = WasmOptions::default();
         let mut circuit_breaker = CircuitBreakerOptions::default();
         let mut database_operation_timeout = None;
@@ -114,6 +116,7 @@ impl Command {
             Self::Worker(command) => {
                 messaging = Some(command.messaging.config()?);
                 wasm = command.wasm;
+                agent_http = command.agent_http.config();
                 circuit_breaker = command.circuit_breaker;
                 database_operation_timeout = Some(command.database_operation_timeout.config()?);
             }
@@ -159,6 +162,7 @@ impl Command {
         Ok(CommandContextConfig {
             messaging,
             wasm: wasm.config(),
+            agent_http,
             circuit_breaker: circuit_breaker.config()?,
             database_operation_timeout,
             placement: PlacementConfig::new(

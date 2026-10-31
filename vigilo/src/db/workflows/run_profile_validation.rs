@@ -454,6 +454,15 @@ fn collect_static_profile_config_issues(profile: &RunProfile) -> Vec<String> {
         ));
     }
 
+    for (name, value) in [
+        ("max_request_bytes", profile.agent.http.max_request_bytes),
+        ("max_response_bytes", profile.agent.http.max_response_bytes),
+    ] {
+        if value == Some(0) {
+            issues.push(format!("agent.http.{name} must be greater than zero"));
+        }
+    }
+
     if profile.agent.http.timeout_secs == Some(0) {
         issues.push("agent.http.timeout_secs must be greater than zero".to_string());
     }
@@ -668,6 +677,8 @@ mod tests {
                     method: "POST".to_string(),
                     headers: Default::default(),
                     timeout_secs: Some(30),
+                    max_request_bytes: None,
+                    max_response_bytes: None,
                 },
                 config: serde_json::json!({}),
             },
@@ -772,6 +783,8 @@ mod tests {
         profile.agent.http.url = "not a url".to_string();
         profile.agent.http.method = "not a method".to_string();
         profile.agent.http.timeout_secs = Some(0);
+        profile.agent.http.max_request_bytes = Some(0);
+        profile.agent.http.max_response_bytes = Some(0);
         profile.defaults.max_attempts = 0;
         profile.defaults.min_execution_score = f64::NAN;
 
@@ -783,6 +796,8 @@ mod tests {
             "agent.http.url",
             "agent.http.method",
             "agent.http.timeout_secs",
+            "agent.http.max_request_bytes",
+            "agent.http.max_response_bytes",
             "defaults.max_attempts",
             "defaults.min_execution_score",
         ] {
