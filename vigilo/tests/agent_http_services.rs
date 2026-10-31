@@ -196,10 +196,62 @@ async fn response_timeout_remains_enforced_during_body_read() {
     .await;
     server.abort();
     let _ = server.await;
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("read agent HTTP response body")
-    );
+    let error = result.unwrap_err();
+    assert!(error.to_string().contains("read agent HTTP response body"));
+    let failure = error
+        .downcast_ref::<agent_client::failure::Failure>()
+        .unwrap();
+    assert_eq!(failure.kind, agent_client::failure::Kind::Timeout);
+    assert!(failure.retryable);
+}
+
+#[tokio::test]
+async fn failures_preserve_type_and_retry_advice_without_client_retries() {
+    use agent_client::failure::{
+        Failure,
+        Kind,
+    };
+    for (response, kind, retryable) in [
+        (
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 3\r\n\r\nbad",
+            Kind::Authentication,
+            false,
+        ),
+        (
+            "HTTP/1.1 429 Busy\r\nRetry-After: 60\r\nContent-Length: 3\r\n\r\nbad",
+            Kind::RateLimited,
+            true,
+        ),
+        (
+            "HTTP/1.1 503 Busy\r\nRetry-After: 601\r\nContent-Length: 3\r\n\r\nbad",
+            Kind::RetryDelayExceeded,
+            false,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n{",
+            Kind::InvalidResponse,
+            false,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nshort",
+            Kind::Transport,
+            true,
+        ),
+        (
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\n\r\nshort",
+            Kind::Authentication,
+            false,
+        ),
+    ] {
+        let before = chrono::Utc::now();
+        let error = call(response, 10).await.unwrap_err();
+        let failure = error
+            .downcast_ref::<Failure>()
+            .expect("typed invocation failure");
+        assert_eq!(failure.kind, kind);
+        assert_eq!(failure.retryable, retryable);
+        if kind == Kind::RateLimited {
+            assert!(failure.retry_not_before.unwrap() >= before + chrono::Duration::seconds(60));
+        }
+    }
 }

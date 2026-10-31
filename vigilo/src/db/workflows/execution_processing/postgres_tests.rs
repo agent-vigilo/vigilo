@@ -592,6 +592,7 @@ async fn terminal_transition_rejects_expired_attempt_lease(pool: PgPool) {
             completed: true,
             error_message: None,
             requires_worker_lease: true,
+            agent_failure: None,
         }],
     )
     .await;
@@ -889,4 +890,123 @@ async fn chunk_heartbeat_preserves_claim_token(pool: PgPool) {
 
     assert_eq!(renewed.lease_token, seed.chunk.lease_token);
     assert!(renewed.leased_until > seed.chunk.leased_until);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn authentication_failure_is_terminal_before_attempt_budget_exhaustion(pool: PgPool) {
+    let seed = seed_running_attempt(&pool, 120, 120).await;
+    finalize_execution_terminal_transitions(
+        &pool,
+        seed.run_id,
+        seed.run_shard,
+        seed.worker_id,
+        3,
+        &[ExecutionTerminalTransition {
+            execution_id: seed.execution_id,
+            attempt_id: seed.attempt_id,
+            attempt_no: 1,
+            completed: false,
+            error_message: Some(
+                "agent invocation failed: agent HTTP request failed with status 401".into(),
+            ),
+            requires_worker_lease: true,
+            agent_failure: Some(crate::agent_client::failure::Failure::http(
+                401,
+                None,
+                chrono::Utc::now(),
+                600,
+            )),
+        }],
+    )
+    .await
+    .unwrap();
+    let (status, retry_after, score): (String, Option<chrono::DateTime<chrono::Utc>>, Option<f64>) = sqlx::query_as(
+        "SELECT e.status::text, e.retry_after, a.aggregate_score FROM executions e LEFT JOIN execution_aggregates a ON a.run_id=e.run_id AND a.run_shard=e.run_shard AND a.execution_id=e.id WHERE e.id=$1"
+    ).bind(seed.execution_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(status, "failed");
+    assert!(retry_after.is_none());
+    assert!(score.is_none(), "invocation failures are not zero scores");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_failures(
+    pool: PgPool,
+) {
+    use crate::agent_client::failure::{
+        Failure,
+        Kind,
+    };
+    for (failure, max_attempts, expected) in [
+        (
+            Some(Failure::http(429, Some("120"), chrono::Utc::now(), 600)),
+            3,
+            "retry_scheduled",
+        ),
+        (
+            Some(Failure::http(503, None, chrono::Utc::now(), 600)),
+            1,
+            "failed",
+        ),
+        (
+            Some(Failure::terminal(Kind::BodyLimit, "oversized")),
+            3,
+            "failed",
+        ),
+        (
+            Some(Failure::http(503, Some("601"), chrono::Utc::now(), 600)),
+            3,
+            "failed",
+        ),
+        (None, 3, "retry_scheduled"),
+    ] {
+        let seed = seed_running_attempt(&pool, 120, 120).await;
+        let floor = failure.as_ref().and_then(|f| f.retry_not_before);
+        let transition = ExecutionTerminalTransition {
+            execution_id: seed.execution_id,
+            attempt_id: seed.attempt_id,
+            attempt_no: 1,
+            completed: false,
+            error_message: Some("opaque diagnostic; do not classify this text".into()),
+            requires_worker_lease: true,
+            agent_failure: failure.clone(),
+        };
+        finalize_execution_terminal_transitions(
+            &pool,
+            seed.run_id,
+            seed.run_shard,
+            seed.worker_id,
+            max_attempts,
+            &[transition],
+        )
+        .await
+        .unwrap();
+        // Read persisted scheduling and diagnostics through another connection: no
+        // worker-local timer or error object is needed for subsequent processing.
+        let mut connection = pool.acquire().await.unwrap();
+        let (status, retry_after, summary, attempt_status): (String, Option<chrono::DateTime<chrono::Utc>>, serde_json::Value, String) = sqlx::query_as(
+            "SELECT e.status::text, e.retry_after, a.outcome_summary, a.status::text FROM executions e JOIN execution_attempts a ON a.run_id=e.run_id AND a.run_shard=e.run_shard AND a.id=e.current_attempt_id WHERE e.id=$1"
+        ).bind(seed.execution_id).fetch_one(&mut *connection).await.unwrap();
+        assert_eq!(status, expected);
+        if let Some(floor) = floor {
+            assert!(retry_after.unwrap() >= floor);
+        }
+        if let Some(failure) = failure {
+            assert_eq!(
+                summary["agent_failure"]["kind"],
+                serde_json::to_value(failure.kind).unwrap()
+            );
+            assert_eq!(attempt_status, "failed_agent_call");
+        } else {
+            assert_eq!(attempt_status, "failed_evaluation");
+            assert!(retry_after.is_some());
+        }
+        if expected == "failed" {
+            assert!(retry_after.is_none());
+            let (outcome, score): (String,Option<f64>) = sqlx::query_as("SELECT overall_status::text,aggregate_score FROM execution_aggregates WHERE execution_id=$1").bind(seed.execution_id).fetch_one(&pool).await.unwrap();
+            assert_eq!(outcome, "error");
+            assert!(score.is_none());
+        }
+    }
 }

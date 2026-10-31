@@ -56,9 +56,9 @@ pub(in crate::db::workflows::execution_processing) async fn heartbeat_running_at
 /// - Re-checks the run is still `running` and every transition still owns the
 ///   execution's current attempt id and attempt number.
 /// - Requires completed transitions to have an aggregate for the same attempt.
-/// - Marks failed attempts retryable when `attempt_no < max_attempts`, using a
-///   bounded exponential `retry_after`.
-/// - Writes terminal failed aggregates only when retry budget is exhausted.
+/// - Retries eligible failures within the attempt budget, respecting persisted
+///   server not-before advice and bounded local backoff/jitter.
+/// - Writes terminal error aggregates when a failure is non-retryable or exhausted.
 pub(crate) async fn finalize_execution_terminal_transitions(
     db: &PgPool,
     run_id: Uuid,
@@ -96,6 +96,48 @@ pub(crate) async fn finalize_execution_terminal_transitions(
         .map(|transition| transition.requires_worker_lease)
         .collect::<Vec<_>>();
 
+    let agent_failures = transitions
+        .iter()
+        .map(|t| {
+            t.agent_failure
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let retryable = transitions
+        .iter()
+        .map(|t| t.agent_failure.as_ref().is_none_or(|f| f.retryable))
+        .collect::<Vec<_>>();
+    let retry_not_before = transitions
+        .iter()
+        .map(|t| t.agent_failure.as_ref().and_then(|f| f.retry_not_before))
+        .collect::<Vec<_>>();
+    // Attempt IDs supply stable jitter across persistence retries without a global RNG.
+    let jitter_ms = transitions
+        .iter()
+        .map(|t| {
+            if t.agent_failure.is_some() {
+                i32::from(u16::from_be_bytes([
+                    t.attempt_id.as_bytes()[14],
+                    t.attempt_id.as_bytes()[15],
+                ])) % 1001
+            } else {
+                0
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let retry_delay_secs = transitions
+        .iter()
+        .map(|t| {
+            t.agent_failure
+                .as_ref()
+                .and_then(|f| f.retry_delay_secs)
+                .map(i64::from)
+        })
+        .collect::<Vec<_>>();
+
     // Query outline:
     //
     // transition_input       - worker-produced terminal transitions.
@@ -128,8 +170,13 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 $3::int4[],
                 $4::bool[],
                 $5::text[],
-                $6::bool[]
-            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease)
+                $6::bool[],
+                $13::jsonb[],
+                $14::bool[],
+                $15::timestamptz[],
+                $16::int4[],
+                $17::int8[]
+            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs)
         ),
         transition_count AS (
             SELECT COUNT(*) AS expected_count
@@ -243,7 +290,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
             UPDATE execution_attempts
             SET status = CASE
                     WHEN terminal_input.completed THEN 'completed'::attempt_status
-                    WHEN terminal_input.error_message LIKE 'agent invocation failed:%'
+                    WHEN terminal_input.agent_failure IS NOT NULL
                         THEN 'failed_agent_call'::attempt_status
                     ELSE 'failed_evaluation'::attempt_status
                 END,
@@ -251,6 +298,9 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                     WHEN terminal_input.completed THEN NULL
                     ELSE terminal_input.error_message
                 END,
+                outcome_summary = CASE WHEN terminal_input.agent_failure IS NOT NULL
+                    THEN execution_attempts.outcome_summary || jsonb_build_object('agent_failure', terminal_input.agent_failure)
+                    ELSE execution_attempts.outcome_summary END,
                 completed_at = now(),
                 updated_at = now()
             FROM terminal_input, terminal_input_check
@@ -267,8 +317,12 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 terminal_input.completed,
                 terminal_input.error_message,
                 terminal_input.overall_status,
+                terminal_input.retry_not_before,
+                terminal_input.jitter_ms,
+                terminal_input.retry_delay_secs,
                 (
                     NOT terminal_input.completed
+                    AND terminal_input.retryable
                     AND terminal_input.attempt_no < $10::int
                 ) AS retry_scheduled
         ),
@@ -335,11 +389,12 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 END,
                 retry_after = CASE
                     WHEN attempt_update.retry_scheduled THEN
-                        now() + (
-                            LEAST(
-                                $11::int * POWER(3::numeric, GREATEST(attempt_update.attempt_no - 1, 0)),
-                                $12::int::numeric
-                            )::int * interval '1 second'
+                        GREATEST(
+                            now() + (LEAST($12::int * 1000,
+                                LEAST($11::int * POWER(3::numeric, LEAST(GREATEST(attempt_update.attempt_no - 1, 0), 5)), $12::int::numeric)::int * 1000
+                                + attempt_update.jitter_ms) * interval '1 millisecond'),
+                            attempt_update.retry_not_before,
+                            now() + attempt_update.retry_delay_secs * interval '1 second'
                         )
                     ELSE NULL
                 END,
@@ -383,6 +438,11 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     .bind(max_attempts)
     .bind(EXECUTION_RETRY_BASE_SECONDS)
     .bind(EXECUTION_RETRY_MAX_SECONDS)
+    .bind(agent_failures)
+    .bind(retryable)
+    .bind(retry_not_before)
+    .bind(jitter_ms)
+    .bind(retry_delay_secs)
     .fetch_one(&mut *tx)
     .await?;
 

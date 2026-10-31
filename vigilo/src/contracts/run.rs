@@ -165,6 +165,10 @@ pub(crate) struct AgentHttpConfig {
     /// Optional response-body limit, bounded by the worker ceiling.
     #[serde(default)]
     pub(crate) max_response_bytes: Option<u64>,
+
+    /// Maximum accepted Retry-After delay in seconds (default 600, maximum 86400).
+    #[serde(default)]
+    pub(crate) max_retry_after_secs: Option<u32>,
 }
 
 /// Default execution policy for run processing.

@@ -5130,6 +5130,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "http 1.4.0",
+ "httpdate",
  "lapin",
  "moka",
  "rand 0.9.4",

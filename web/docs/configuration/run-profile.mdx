@@ -188,6 +188,47 @@ ceiling fails before HTTP invocation. Run validation cannot determine every work
 local ceiling. See [runtime limits](./runtime-limits.mdx#agent-http-bodies) for flags,
 defaults, and failure behavior.
 
+### Agent invocation failures and retries
+
+`agent.http.max_retry_after_secs` bounds accepted server retry advice. It defaults
+to `600`; configured values must be between `1` and `86400` seconds. It is a
+per-attempt scheduling bound, not a total run deadline. `defaults.max_attempts`
+remains the maximum number of attempts, including the initial attempt.
+
+| Failure | Execution policy |
+| --- | --- |
+| Timeout or transport failure | Retry while attempts remain |
+| HTTP 408, 425, 429, 500, 502, 503, 504 | Retry while attempts remain |
+| HTTP 401 or 403 | Terminal authentication failure |
+| Other non-success HTTP status | Terminal HTTP failure |
+| Invalid invocation configuration, oversized body, or response parsing failure | Terminal invocation failure |
+| Retry-After beyond the configured maximum | Terminal retry-delay failure |
+
+For retryable HTTP statuses, `Retry-After` accepts delta-seconds or an HTTP date.
+Malformed advice is ignored in favor of local backoff; past dates add no extra
+wait. Valid advice beyond the configured maximum is not shortened into an early
+retry. Local backoff is 5 seconds multiplied by 3 per subsequent attempt, capped
+at 600 seconds; agent failures add deterministic attempt-specific jitter of up to
+1 second within that cap. Scheduling uses the latest of local backoff and accepted
+server advice. Delta-seconds advice is also applied against database time when the
+transition is persisted, so persistence delays cannot shorten the requested wait.
+
+Retry timing and failure details are persisted in execution state and the attempt's
+`outcome_summary.agent_failure`: `kind`, `http_status`, `retryable`,
+`retry_not_before`, `retry_delay_secs`, and a diagnostic `message`. Here `retryable`
+means the failure is eligible; the execution state also accounts for exhausted
+attempts. Workers do not sleep or retry inside the HTTP
+client. Each allocated attempt counts toward the budget, including a rejected
+request; non-retryable failures stop immediately. Existing non-agent processing
+failures retain their retry policy. HTTP failures retain their status classification
+if reading their error body fails; exceeding the body cap is terminal regardless
+of status.
+
+Operational failures produce an error outcome with no aggregate score, not a zero
+quality score. A valid answer that fails evaluation is scored normally. A timeout
+does not prove the remote agent stopped; retries can repeat external effects.
+These policies do not change the supported response mapping.
+
 By default, workers send a Vigilo case request containing `run_id`, `execution_id`, `attempt_id`, `agent`, `input`, and non-oracle case metadata. With `request_format: openai_compatible_chat_completions`, workers send an OpenAI-compatible `model` and `messages` payload.
 
 The response may be either plain text or JSON. JSON responses can return the evaluator-ready output directly, or under `actual`/`output`:

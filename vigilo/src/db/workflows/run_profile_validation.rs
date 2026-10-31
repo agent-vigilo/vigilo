@@ -463,6 +463,16 @@ fn collect_static_profile_config_issues(profile: &RunProfile) -> Vec<String> {
         }
     }
 
+    if profile
+        .agent
+        .http
+        .max_retry_after_secs
+        .is_some_and(|value| {
+            value == 0 || value > crate::agent_client::failure::MAX_RETRY_AFTER_SECS
+        })
+    {
+        issues.push("agent.http.max_retry_after_secs must be between 1 and 86400".to_string());
+    }
     if profile.agent.http.timeout_secs == Some(0) {
         issues.push("agent.http.timeout_secs must be greater than zero".to_string());
     }
@@ -679,6 +689,7 @@ mod tests {
                     timeout_secs: Some(30),
                     max_request_bytes: None,
                     max_response_bytes: None,
+                    max_retry_after_secs: None,
                 },
                 config: serde_json::json!({}),
             },
@@ -785,6 +796,7 @@ mod tests {
         profile.agent.http.timeout_secs = Some(0);
         profile.agent.http.max_request_bytes = Some(0);
         profile.agent.http.max_response_bytes = Some(0);
+        profile.agent.http.max_retry_after_secs = Some(86401);
         profile.defaults.max_attempts = 0;
         profile.defaults.min_execution_score = f64::NAN;
 
@@ -798,6 +810,7 @@ mod tests {
             "agent.http.timeout_secs",
             "agent.http.max_request_bytes",
             "agent.http.max_response_bytes",
+            "agent.http.max_retry_after_secs",
             "defaults.max_attempts",
             "defaults.min_execution_score",
         ] {

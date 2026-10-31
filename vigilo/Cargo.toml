@@ -23,6 +23,7 @@ aws-config = { version = "1.13.0", default-features = false, features = ["rt-tok
 aws-sdk-s3 = { version = "1.155.0", default-features = false, features = ["rt-tokio", "rustls", "default-https-client"] }
 sha2 = "0.10"
 blake3 = "1.8.5"
+httpdate = "1.0.3"
 cargo_metadata = { version = "0.23.1" }
 cargo_toml = { version = "0.22.3" }
 chrono = { version = "0.4", features = ["serde"] }

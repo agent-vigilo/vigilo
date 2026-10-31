@@ -39,7 +39,7 @@ Request limits count serialized JSON body bytes, including escaping and UTF-8,
 but not HTTP headers. Responses are bounded while reading, including non-success
 responses, without relying on Content-Length. Transfer framing is not counted.
 The client does not enable automatic content decompression. Oversized bodies
-produce invocation errors and follow the existing execution retry policy; they
+produce terminal invocation-limit errors without retrying the same body; they
 are not evaluator scores. Error excerpts remain limited to 512 characters.
 
 Existing request timeouts still apply. These byte ceilings do not bound the whole

@@ -20,7 +20,7 @@ flowchart TD
     Http[Validate byte ceilings and invoke agent with bounded request and response bodies]
     Permit[Acquire Wasm evaluation permits]
     Execute[Dispatch pinned ABI adapters in sandboxed stores]
-    Persist[Persist terminal transitions]
+    Persist[Persist terminal transitions with typed failure and retry policy]
     CheckRetry{Open retry work?}
     Delay[Release chunk and delay message until retry window]
     Complete[Commit terminal chunk and immutable receipt]

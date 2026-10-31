@@ -24,7 +24,8 @@ flowchart TD
     Cancel([run cancel])
     ExecutionCancelled[Execution cancelled]
     AttemptCancelled[Attempt cancelled]
-    RetryScheduled[Execution retry scheduled]
+    RetryEligible{Failure retryable and attempt budget remains?}
+    RetryScheduled[Persist retry_after using backoff and accepted server advice]
     RetryDue{Retry window due and attempts remain?}
     TimedOut[Timed out]
     Awaiting[Awaiting evaluators]
@@ -43,9 +44,11 @@ flowchart TD
     TerminalGuard -- No --> Stale
 
     AggregateGuard -- Completed with aggregate --> AttemptCompleted --> ExecutionCompleted
-    AggregateGuard -- Agent invocation failed --> AttemptAgentFail --> RetryScheduled
-    AggregateGuard -- Evaluation or persistence failed --> AttemptEvalFail --> RetryScheduled
+    AggregateGuard -- Agent invocation failed --> AttemptAgentFail --> RetryEligible
+    AggregateGuard -- Evaluation or persistence failed --> AttemptEvalFail --> RetryEligible
     AggregateGuard -- Missing required aggregate --> Reject
+    RetryEligible -- Yes --> RetryScheduled
+    RetryEligible -- No --> ExecutionFailed
     RetryScheduled --> RetryDue
     RetryDue -- Yes --> Supersede
     RetryDue -- No attempts remain --> ExecutionFailed
@@ -66,7 +69,7 @@ flowchart TD
     AttemptRunning -. Reserved timeout path .-> TimedOut
 
     class Worker,Cancel command
-    class RunGuard,Pending,Supersede,Running,AttemptRunning,AgentAndEvaluators,TerminalGuard,AggregateGuard,Awaiting,RetryScheduled,RetryDue system
+    class RunGuard,Pending,Supersede,Running,AttemptRunning,AgentAndEvaluators,TerminalGuard,AggregateGuard,Awaiting,RetryEligible,RetryScheduled,RetryDue system
     class AttemptCompleted,ExecutionCompleted success
     class AttemptAgentFail,AttemptEvalFail,ExecutionFailed,ExecutionCancelled,AttemptCancelled,TimedOut,Reject error
     class Stale component
