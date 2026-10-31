@@ -43,7 +43,10 @@ rejected.
 
 The registry also records the publishing host's Wasmtime version. Vigilo embeds
 the exact resolved runtime version during compilation; reporting it does not
-require Cargo or a lockfile at runtime.
+require Cargo or a lockfile at runtime. Build-time discovery reads dependency-free
+workspace metadata and the direct Wasmtime entry in `Cargo.lock`, without
+downloading unrelated dependency sources. Missing or ambiguous runtime identity
+fails the build.
 
 ## Run Pinning
 
