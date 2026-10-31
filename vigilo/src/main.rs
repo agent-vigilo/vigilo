@@ -113,6 +113,18 @@ async fn main() -> ExitCode {
             )
             .with_agent_http_limits(command_context.agent_http);
 
+            let context = if let Some(path) = command_context.agent_credentials {
+                match agent_client::credentials::Provider::load(&path).await {
+                    Ok(provider) => context.with_agent_credentials(provider),
+                    Err(error) => {
+                        error!(%error, "invalid worker credential configuration");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                context
+            };
+
             match app.exec(context).await {
                 Err(e) => {
                     error!(error = %format!("{e:#}"), "command execution failed");

@@ -24,6 +24,16 @@ use failure::{
 #[path = "agent_client/limits.rs"]
 pub(crate) mod limits;
 
+#[path = "agent_client/credentials.rs"]
+pub(crate) mod credentials;
+
+/// Process services used for one invocation; contains no resolved secrets.
+pub(crate) struct Services<'a> {
+    pub(crate) client: &'a reqwest::Client,
+    pub(crate) limits: limits::Limits,
+    pub(crate) credentials: &'a credentials::Provider,
+}
+
 use std::time::{
     Duration,
     Instant,
@@ -403,8 +413,7 @@ fn attach_invocation_metadata(
 }
 
 pub(crate) async fn invoke(
-    client: &reqwest::Client,
-    ceilings: limits::Limits,
+    services: Services<'_>,
     run_id: Uuid,
     execution_id: Uuid,
     attempt_id: Uuid,
@@ -412,7 +421,8 @@ pub(crate) async fn invoke(
     test_case: &TestCase,
 ) -> anyhow::Result<AgentOutput> {
     let http = &run_profile.agent.http;
-    let limits = ceilings
+    let limits = services
+        .limits
         .resolve(http)
         .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
     let max_retry_after = http
@@ -445,18 +455,46 @@ pub(crate) async fn invoke(
 
     let request_body = build_request_body(run_id, execution_id, attempt_id, run_profile, test_case)
         .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
+    // Resolve only after the request is serialized and bounded. Credentials are
+    // added to transport headers, never the profile or evaluator payload.
+    let request_body = limits::serialize(&request_body, limits.max_request_bytes)
+        .map_err(|err| Failure::terminal(Kind::BodyLimit, err))?;
+    let resolved = match http.credential.as_deref() {
+        Some(reference) => Some(
+            services
+                .credentials
+                .resolve(
+                    reference,
+                    &http.url,
+                    &http.headers,
+                    credentials::Execution {
+                        run_id,
+                        execution_id,
+                        attempt_id,
+                    },
+                )
+                .await?,
+        ),
+        None => None,
+    };
+    let client = if resolved.is_some() {
+        services.credentials.client().await?
+    } else {
+        services.client
+    };
     let mut request = client
         .request(method, &http.url)
         .timeout(Duration::from_secs(u64::from(timeout_secs)))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(
-            limits::serialize(&request_body, limits.max_request_bytes)
-                .map_err(|err| Failure::terminal(Kind::BodyLimit, err))?,
-        );
+        .body(request_body);
     for (name, value) in &http.headers {
         request = request.header(name, value);
     }
 
+    if let Some(resolved) = resolved {
+        resolved.check_validity()?;
+        request = request.header(resolved.name, resolved.value);
+    }
     let started = Instant::now();
     let mut response = request
         .send()
@@ -498,7 +536,13 @@ pub(crate) async fn invoke(
     let body = String::from_utf8_lossy(bytes);
 
     if let Some(failure) = http_failure {
-        return Err(failure.with_excerpt(&response_body_excerpt(&body)).into());
+        return Err(if http.credential.is_some() {
+            // Authenticated endpoints may echo credentials in error bodies.
+            failure
+        } else {
+            failure.with_excerpt(&response_body_excerpt(&body))
+        }
+        .into());
     }
 
     let response_json = parse_response_body(&body).map_err(|err| {

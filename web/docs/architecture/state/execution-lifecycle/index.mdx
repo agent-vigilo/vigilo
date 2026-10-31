@@ -46,3 +46,9 @@ batch transition uses this policy rather than classifying error-message text, an
 preserves the later of bounded local backoff/jitter and server advice. Non-retryable
 failures create an error aggregate immediately; no numerical score is invented.
 See [agent retry policy](/docs/configuration/run-profile#agent-invocation-failures-and-retries).
+
+Credential resolution happens inside the allocated attempt. Transient resolver
+failures use the same durable retry budget; invalid bindings and authorization
+denials are terminal. Each retry resolves the current credential value again.
+Only the typed failure is persisted, not the credential or its grant. See
+[Agent Credentials](/docs/configuration/agent-credentials).

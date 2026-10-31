@@ -36,6 +36,9 @@ flowchart TD
     ResultPersistence["fa:fa-database <br/> <b>Result Persistence Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Appends evaluator results and upserts aggregates with child-row authority checks.</small>"]:::component
     TerminalTransitions["fa:fa-shield-halved <br/> <b>Terminal Transition Guard</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Marks attempts completed, retry-scheduled, or terminal only when chunk, current-attempt, and live-lease authority still match.</small>"]:::component
 
+    Credentials["Credential Provider<br/>Trusted local sources or external service protocol<br/>Transient headers, bounded resolution"]:::component
+    AgentClient --> Credentials
+
     %% worker boundary
     subgraph WorkerRuntime["&nbsp;"]
         CommandFacade
@@ -53,6 +56,7 @@ flowchart TD
         InputByteCache
         ExecutionProcessor
         AgentClient
+        Credentials
         WasmSemaphore
         EvaluatorExecutor
         CompletenessAggregator
@@ -66,6 +70,11 @@ flowchart TD
     Queue[("<b>Queue</b> <br/> <small>[Container: RabbitMQ]</small> <br/> <small>Delivers run.chunk.ready broker messages to workers.</small>")]:::component
     TargetAgent["fa:fa-brain <br/> <b>Agent / AI Provider</b> <br/> <small>[External System]</small> <br/> <small>The model, agent wrapper, or HTTP endpoint being evaluated.</small>"]:::external
 
+    CredentialSources["<b>Operator Secret Sources</b><br/>Environment or mounted files"]:::external
+    CredentialService["<b>Credential Service</b><br/>External authorization and secret management"]:::external
+    Credentials -->|"Local provider"| CredentialSources
+    Credentials -->|"Service provider: authenticated versioned HTTP"| CredentialService
+
     %% edges
     Vigilo -->|"Runs worker start or once through"| CommandFacade
     CommandFacade -->|"Starts continuous mode with"| ServiceLoop
@@ -75,7 +84,7 @@ flowchart TD
     CommandFacade -->|"Creates shared access through"| RuntimeContext
     WorkerConsumer -->|"Uses messaging client from"| RuntimeContext
     MessageHandler -->|"Uses database and messaging clients from"| RuntimeContext
-    AgentClient -->|"Uses shared HTTP client from"| RuntimeContext
+    AgentClient -->|"Uses ordinary HTTP client from"| RuntimeContext
     EvaluatorLoader -->|"Uses registry cache and Wasm runtime from"| RuntimeContext
     EvaluatorExecutor -->|"Uses Wasm runtime from"| RuntimeContext
 

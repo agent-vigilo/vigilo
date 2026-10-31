@@ -940,6 +940,20 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
     };
     for (failure, max_attempts, expected) in [
         (
+            Some(Failure::credential_unavailable()),
+            3,
+            "retry_scheduled",
+        ),
+        (Some(Failure::credential_unavailable()), 1, "failed"),
+        (
+            Some(Failure::terminal(
+                Kind::Configuration,
+                "credential binding unavailable",
+            )),
+            3,
+            "failed",
+        ),
+        (
             Some(Failure::http(429, Some("120"), chrono::Utc::now(), 600)),
             3,
             "retry_scheduled",

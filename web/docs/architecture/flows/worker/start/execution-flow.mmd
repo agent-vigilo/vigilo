@@ -13,6 +13,7 @@ sequenceDiagram
     participant ControlDB as Control DB
     participant Objects as Object Storage
     participant ExecutionDB as Execution DB
+    participant Credentials as Credential Provider
     participant Agent as Agent Target
     participant WASM as Wasm Runtime
 
@@ -62,8 +63,16 @@ sequenceDiagram
                 Vigilo->>Queue: Hold delivery unacked while chunk is owned
                 par Agent calls
                     Vigilo->>Vigilo: Validate profile byte limits against worker ceilings
-                    Vigilo->>Agent: Invoke cases with bounded JSON request bodies
-                    Agent-->>Vigilo: Read bounded responses; capture HTTP status and Retry-After
+                    opt Profile references a credential
+                        Vigilo->>Credentials: Resolve trusted binding with runtime IDs and destination
+                        Credentials-->>Vigilo: Transient header or typed failure
+                    end
+                    alt Request and credential validation succeed
+                        Vigilo->>Agent: Invoke bounded request; inject authorized header without redirects
+                        Agent-->>Vigilo: Read bounded responses; capture HTTP status and Retry-After
+                    else Validation or credential resolution fails
+                        Vigilo->>Vigilo: Preserve typed failure and skip the agent call
+                    end
                 and Evaluator calls
                     Vigilo->>Vigilo: Acquire Wasm evaluation semaphore permits
                     Vigilo->>WASM: Dispatch pinned ABI adapters in sandboxed stores

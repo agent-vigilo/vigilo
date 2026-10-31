@@ -32,7 +32,7 @@ futures-util = "0.3"
 moka = { version = "0.12.15", features = ["future"] }
 lapin = { version = "2.5.5" }
 rand = "0.9.4"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 sqlx = { version = "0.8.6", features = ["chrono", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
 tempfile = "3.23.0"

@@ -182,6 +182,8 @@ mod tests {
         assert!(has_long(worker, "wasm-timeout-ms"));
         assert!(has_long(worker, "agent-max-request-bytes"));
         assert!(has_long(worker, "agent-max-response-bytes"));
+        assert!(has_long(worker, "agent-credentials"));
+        assert!(!has_long(coordinator, "agent-credentials"));
         assert!(!has_long(coordinator, "agent-max-request-bytes"));
         assert!(has_long(worker, "database-circuit-failure-threshold"));
         assert!(has_long(worker, "database-operation-timeout-seconds"));
@@ -240,6 +242,46 @@ mod tests {
             .messaging
             .unwrap();
         assert_eq!(messaging.uri, "amqp://broker");
+    }
+
+    #[test]
+    fn credential_configuration_is_operator_owned_and_worker_only() {
+        let worker = App::try_parse_from([
+            "vigilo",
+            "--database-url",
+            "postgres://control",
+            "worker",
+            "--messaging-url",
+            "amqp://broker",
+            "--agent-credentials",
+            "operator.json",
+            "once",
+        ])
+        .unwrap();
+        assert_eq!(
+            worker
+                .command
+                .context_config("primary")
+                .unwrap()
+                .agent_credentials,
+            Some(std::path::PathBuf::from("operator.json"))
+        );
+        let database = App::try_parse_from([
+            "vigilo",
+            "--database-url",
+            "postgres://control",
+            "database",
+            "list",
+        ])
+        .unwrap();
+        assert!(
+            database
+                .command
+                .context_config("primary")
+                .unwrap()
+                .agent_credentials
+                .is_none()
+        );
     }
 
     #[test]

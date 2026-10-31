@@ -150,7 +150,11 @@ pub(crate) struct AgentHttpConfig {
     #[serde(default = "default_post_method")]
     pub(crate) method: String,
 
-    /// Static headers to attach to every invocation.
+    /// Opaque name resolved through trusted worker credential configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) credential: Option<String>,
+
+    /// Static nonsecret headers to attach to every invocation.
     #[serde(default)]
     pub(crate) headers: BTreeMap<String, String>,
 

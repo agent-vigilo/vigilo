@@ -67,10 +67,13 @@ async fn call(
         let _ = stream.write_all(response.as_bytes()).await;
     });
     let result = agent_client::invoke(
-        &reqwest::Client::new(),
-        Limits {
-            max_request_bytes: 4096,
-            max_response_bytes: limit,
+        agent_client::Services {
+            client: &reqwest::Client::new(),
+            credentials: &agent_client::credentials::Provider::default(),
+            limits: Limits {
+                max_request_bytes: 4096,
+                max_response_bytes: limit,
+            },
         },
         Uuid::nil(),
         Uuid::nil(),
@@ -135,8 +138,11 @@ async fn oversized_request_and_profile_fail_before_connection() {
         max_response_bytes: 10,
     };
     let result = agent_client::invoke(
-        &reqwest::Client::new(),
-        limits,
+        agent_client::Services {
+            client: &reqwest::Client::new(),
+            limits,
+            credentials: &agent_client::credentials::Provider::default(),
+        },
         Uuid::nil(),
         Uuid::nil(),
         Uuid::nil(),
@@ -152,8 +158,11 @@ async fn oversized_request_and_profile_fail_before_connection() {
     );
     p.agent.http.max_response_bytes = Some(11);
     let result = agent_client::invoke(
-        &reqwest::Client::new(),
-        limits,
+        agent_client::Services {
+            client: &reqwest::Client::new(),
+            limits,
+            credentials: &agent_client::credentials::Provider::default(),
+        },
         Uuid::nil(),
         Uuid::nil(),
         Uuid::nil(),
@@ -185,8 +194,11 @@ async fn response_timeout_remains_enforced_during_body_read() {
         std::future::pending::<()>().await;
     });
     let result = agent_client::invoke(
-        &reqwest::Client::new(),
-        Limits::default(),
+        agent_client::Services {
+            client: &reqwest::Client::new(),
+            limits: Limits::default(),
+            credentials: &agent_client::credentials::Provider::default(),
+        },
         Uuid::nil(),
         Uuid::nil(),
         Uuid::nil(),
@@ -255,3 +267,32 @@ async fn failures_preserve_type_and_retry_advice_without_client_retries() {
         }
     }
 }
+
+#[tokio::test]
+async fn credential_reference_without_provider_fails_closed() {
+    let mut value = serde_json::to_value(profile("http://127.0.0.1:1")).unwrap();
+    value["agent"]["http"]["credential"] = serde_json::json!("agent-api");
+    let profile = serde_json::from_value(value).unwrap();
+    let err = agent_client::invoke(
+        agent_client::Services {
+            client: &reqwest::Client::new(),
+            limits: Limits::default(),
+            credentials: &agent_client::credentials::Provider::default(),
+        },
+        Uuid::nil(),
+        Uuid::nil(),
+        Uuid::nil(),
+        &profile,
+        &case(),
+    )
+    .await
+    .unwrap_err();
+    let failure = err
+        .downcast_ref::<agent_client::failure::Failure>()
+        .unwrap();
+    assert_eq!(failure.kind, agent_client::failure::Kind::Configuration);
+    assert!(!failure.retryable);
+}
+
+#[path = "support/credential_services.rs"]
+mod credential_services;

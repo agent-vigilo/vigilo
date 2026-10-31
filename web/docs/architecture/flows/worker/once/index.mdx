@@ -49,3 +49,8 @@ sending requests. Response reads stop on byte-limit overflow, including HTTP err
 responses; typed invocation failures either settle immediately or schedule a durable retry
 with bounded backoff and accepted Retry-After advice. See
 [agent HTTP limits](../../../../configuration/runtime-limits.mdx#agent-http-bodies).
+
+Credential references resolve through the operator-configured local or service
+provider before the agent call. Resolved headers are transient; provider failures
+follow typed terminal or durable retry policy. Credential-bearing calls disable
+redirects. See [Agent Credentials](/docs/configuration/agent-credentials).

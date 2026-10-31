@@ -132,11 +132,16 @@ persistence:
 
 These settings affect execution/result artifact retention. Dataset case blobs and dataset-version membership remain durable so workers can execute retries and runs remain reproducible by content hash. The run profile snapshot is also retained because workers load it to invoke the configured agent and evaluators.
 
-Do not put long-lived secrets directly in `agent.http.headers` in shared storage. Header values are retained in the immutable run configuration used at runtime. Use local development values or short-lived tokens appropriate to the run.
+Use `agent.http.credential` with [worker credential bindings](./agent-credentials.mdx) for authentication. Static `agent.http.headers` values are retained in the immutable run configuration and must contain only nonsecret values.
 
 ## `agent`
 
 The agent block identifies the target under evaluation and provides the HTTP endpoint workers call before running evaluators.
+
+`agent.http.credential` optionally names an operator-authorized credential binding.
+The worker resolves and injects its value without storing it in the run profile.
+See [Agent Credentials](./agent-credentials.mdx) for standalone and service providers.
+
 
 ```yaml
 agent:

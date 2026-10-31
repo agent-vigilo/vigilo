@@ -892,8 +892,11 @@ async fn evaluate_case_execution(
         let test_case = make_test_case(case)?;
         let http = context.http().await?;
         let agent_output = agent_client::invoke(
-            http,
-            context.agent_http_limits(),
+            agent_client::Services {
+                client: http,
+                limits: context.agent_http_limits(),
+                credentials: context.agent_credentials(),
+            },
             run_id,
             execution_id,
             attempt_id,
@@ -1744,6 +1747,7 @@ mod tests {
                 prompt_config_id: None,
                 prompt_config_version: None,
                 http: AgentHttpConfig {
+                    credential: None,
                     url: "http://127.0.0.1:8787/v1/agent/invoke".to_string(),
                     method: "POST".to_string(),
                     headers: Default::default(),

@@ -443,6 +443,12 @@ fn collect_static_profile_config_issues(profile: &RunProfile) -> Vec<String> {
         issues.push("agent.name must not be empty".to_string());
     }
 
+    if let Some(reference) = &profile.agent.http.credential
+        && let Err(err) = agent_client::credentials::validate_reference(reference)
+    {
+        issues.push(err.to_string());
+    }
+
     if let Err(err) = reqwest::Url::parse(&profile.agent.http.url) {
         issues.push(format!("agent.http.url is invalid: {}", err));
     }
@@ -658,6 +664,29 @@ mod tests {
         models::evaluator::EvaluatorState,
     };
 
+    #[test]
+    fn credential_references_are_validated_without_resolving_operator_secrets() {
+        let mut profile = profile();
+        profile.agent.http.credential = Some("agent-api".into());
+        assert!(
+            !super::collect_static_profile_config_issues(&profile)
+                .iter()
+                .any(|issue| issue.contains("credential"))
+        );
+        assert_eq!(
+            serde_json::to_value(&profile).unwrap()["agent"]["http"]["credential"],
+            "agent-api"
+        );
+        for reference in ["", "../secret", "env:TOKEN"] {
+            profile.agent.http.credential = Some(reference.into());
+            assert!(
+                super::collect_static_profile_config_issues(&profile)
+                    .iter()
+                    .any(|issue| issue.contains("credential"))
+            );
+        }
+    }
+
     fn profile() -> RunProfile {
         RunProfile {
             profile_id: "p".to_string(),
@@ -683,6 +712,7 @@ mod tests {
                 prompt_config_id: Some("test-prompt".to_string()),
                 prompt_config_version: Some("1.0.0".to_string()),
                 http: AgentHttpConfig {
+                    credential: None,
                     url: "http://127.0.0.1:8787/v1/agent/invoke".to_string(),
                     method: "POST".to_string(),
                     headers: Default::default(),

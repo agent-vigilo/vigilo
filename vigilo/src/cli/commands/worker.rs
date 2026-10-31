@@ -538,6 +538,10 @@ pub(crate) struct Command {
     #[command(flatten)]
     pub(crate) agent_http: crate::cli::args::AgentHttpOptions,
 
+    /// Trusted JSON credential provider configuration (never a run-profile input)
+    #[arg(long, env = "VIGILO_AGENT_CREDENTIALS")]
+    pub(crate) agent_credentials: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<SubCommand>,
 }

@@ -2,7 +2,8 @@
 //!
 //! Commands receive a cloned [`Context`] and request configured services on demand:
 //! database router, HTTP client, message queue client, output buffer,
-//! evaluator registry cache, and Wasm runtime. Service modules in `context::*`
+//! evaluator registry cache, and Wasm runtime. Worker credentials remain in a
+//! separate process-local provider shared by context clones. Service modules in `context::*`
 //! should remain thin initialization boundaries; domain behavior belongs in
 //! runtime, db, mq, or command modules. Message-queue configuration is present
 //! only for coordinator and worker commands.
@@ -28,7 +29,11 @@ struct ContextInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct Context(Arc<ContextInner>, crate::agent_client::limits::Limits);
+pub(crate) struct Context(
+    Arc<ContextInner>,
+    crate::agent_client::limits::Limits,
+    Arc<crate::agent_client::credentials::Provider>,
+);
 
 impl Context {
     pub fn new(
@@ -64,6 +69,7 @@ impl Context {
                 },
             }),
             crate::agent_client::limits::Limits::default(),
+            Arc::new(crate::agent_client::credentials::Provider::default()),
         )
     }
 
@@ -74,6 +80,19 @@ impl Context {
     ) -> Self {
         self.1 = limits;
         self
+    }
+
+    /// Attach operator-owned credential resolution without changing run profiles.
+    pub(crate) fn with_agent_credentials(
+        mut self,
+        provider: crate::agent_client::credentials::Provider,
+    ) -> Self {
+        self.2 = Arc::new(provider);
+        self
+    }
+
+    pub(crate) fn agent_credentials(&self) -> &crate::agent_client::credentials::Provider {
+        &self.2
     }
 
     pub(crate) fn agent_http_limits(&self) -> crate::agent_client::limits::Limits {

@@ -40,12 +40,16 @@ but not HTTP headers. Responses are bounded while reading, including non-success
 responses, without relying on Content-Length. Transfer framing is not counted.
 The client does not enable automatic content decompression. Oversized bodies
 produce terminal invocation-limit errors without retrying the same body; they
-are not evaluator scores. Error excerpts remain limited to 512 characters.
+are not evaluator scores. Unauthenticated error excerpts remain limited to 512 characters; credential-bearing
+requests omit them.
 
 Existing request timeouts still apply. These byte ceilings do not bound the whole
 process: concurrent calls, request construction, parsed output, and evaluator copies
 consume additional memory. Select ceilings alongside worker concurrency. See
 [run profiles](./run-profile.mdx) for endpoint configuration.
+
+Worker credential resolution has separate source, response, concurrency, and deadline
+limits. See [Agent Credentials](./agent-credentials.mdx).
 
 ## Command Scope
 

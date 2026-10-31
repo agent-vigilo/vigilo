@@ -17,7 +17,9 @@ flowchart TD
     Context[Load and verify pinned run context]
     Warm[Warm evaluator components]
     Cases[Read exact immutable bytes from bounded cache or storage; verify complete files and membership]
-    Http[Validate byte ceilings and invoke agent with bounded request and response bodies]
+    Limits[Validate and serialize request within byte ceilings]
+    Credentials{Credential absent or trusted resolution succeeds?}
+    Http[Invoke bounded agent request with authorized header; bound response reads]
     Permit[Acquire Wasm evaluation permits]
     Execute[Dispatch pinned ABI adapters in sandboxed stores]
     Persist[Persist terminal transitions with typed failure and retry policy]
@@ -55,7 +57,11 @@ flowchart TD
     Warm --> Cases
     Warm -. Warmup fails .-> Release
 
-    Cases --> Http
+    Cases --> Limits
+    Limits --> Credentials
+    Limits -. Invalid request or byte limit .-> Persist
+    Credentials -- Yes --> Http
+    Credentials -- No --> Persist
     Http --> Permit
     Http -. Invocation or body limit error .-> Persist
     Cases -. Load fails .-> Release

@@ -73,3 +73,9 @@ Agent failure classification stays at the HTTP boundary; the execution workflow
 carries its typed policy into the authoritative batch transition. Retry timing is
 persisted with the execution, and diagnostic categories remain in the attempt
 summary. Terminal invocation failures are operational errors, not quality scores.
+
+The agent client resolves credential references through a process-local provider.
+Local bindings use operator-supplied environment variables or secret files; the
+service provider uses a versioned HTTP contract and per-run grants. External
+authorization and secret management remain outside the core worker. See
+[Agent Credentials](/docs/configuration/agent-credentials) for the trust boundary.
