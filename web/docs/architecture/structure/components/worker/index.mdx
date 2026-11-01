@@ -79,3 +79,8 @@ Local bindings use operator-supplied environment variables or secret files; the
 service provider uses a versioned HTTP contract and per-run grants. External
 authorization and secret management remain outside the core worker. See
 [Agent Credentials](/docs/configuration/agent-credentials) for the trust boundary.
+
+Agent invocation returns bounded operational evidence separately from evaluator
+output. Execution processing carries it through both successful and failed
+evaluation paths into the existing batched attempt update. No diagnostic query or
+transaction is added. See [invocation diagnostics](/docs/configuration/run-profile#agent-invocation-diagnostics).

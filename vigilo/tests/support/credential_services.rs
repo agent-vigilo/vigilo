@@ -132,6 +132,7 @@ async fn invoke(
         &case(),
     )
     .await
+    .map(|invocation| invocation.output)
 }
 
 #[tokio::test]
@@ -401,4 +402,57 @@ async fn service_resolution_bounds_concurrency_and_cancellation_releases_capacit
         .0;
     calls.abort_all();
     while calls.join_next().await.is_some() {}
+}
+
+#[tokio::test]
+async fn usage_is_adapter_specific_and_correlation_cannot_be_overridden() {
+    let body = serde_json::json!({"choices":[{"message":{"content":"hello"}}],"usage":{"prompt_tokens":2,"completion_tokens":0,"total_tokens":2},"secret":"response-canary"}).to_string();
+    for chat in [false, true] {
+        let mut server = Server::new(
+            200,
+            body.clone(),
+            "x-request-id: untrusted-canary\r\n",
+            false,
+        )
+        .await;
+        let mut p = profile(&server.url);
+        if chat {
+            p.agent.model = Some("fixture".into());
+            p.agent.config =
+                serde_json::json!({"request_format":"openai_compatible_chat_completions"});
+        }
+        let invocation = agent_client::invoke(
+            agent_client::Services {
+                client: &reqwest::Client::new(),
+                limits: Limits::default(),
+                credentials: &Provider::default(),
+            },
+            Uuid::nil(),
+            Uuid::nil(),
+            Uuid::nil(),
+            &p,
+            &case(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(invocation.diagnostics.usage.is_some(), chat);
+        if let Some(usage) = &invocation.diagnostics.usage {
+            assert_eq!(usage.completion_tokens, Some(0));
+        }
+        let safe = serde_json::to_string(&invocation.diagnostics).unwrap();
+        assert!(!safe.contains("canary"));
+        assert!(safe.len() < 1024);
+        assert!(server.request().await.contains("x-vigilo-attempt-id:"));
+    }
+    let mut p = profile("http://127.0.0.1:1");
+    p.agent
+        .http
+        .headers
+        .insert("X-Vigilo-Attempt-Id".into(), "forged".into());
+    let error = invoke(&Provider::default(), &p).await.unwrap_err();
+    let failure = error
+        .downcast_ref::<agent_client::failure::Failure>()
+        .unwrap();
+    assert_eq!(failure.kind, agent_client::failure::Kind::Configuration);
+    assert!(failure.invocation.as_ref().unwrap().latency_ms.is_none());
 }

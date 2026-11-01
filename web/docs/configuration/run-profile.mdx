@@ -193,6 +193,51 @@ ceiling fails before HTTP invocation. Run validation cannot determine every work
 local ceiling. See [runtime limits](./runtime-limits.mdx#agent-http-bodies) for flags,
 defaults, and failure behavior.
 
+### Agent invocation diagnostics
+
+When an attempt's authoritative terminal update commits, its available diagnostics
+are merged into `execution_attempts.outcome_summary.agent_invocation` in the same
+batch. Calls interrupted before the commit may have no diagnostic record; there is
+no extra pre-call or mid-call write. Successful agent calls also expose these
+bounded fields in `actual.metadata.vigilo_invocation`. The attempt summary is
+independent of evaluator evidence/raw-output retention and remains available when
+an evaluator fails after a successful agent call.
+
+| Field | Meaning |
+| --- | --- |
+| `run_id`, `execution_id`, `attempt_id` | Runtime identities for this call |
+| `endpoint_ref` | Fixed-size BLAKE3 fingerprint of the exact configured URL; no URL text is copied |
+| `elapsed_ms` | Total invocation time, including preparation and credential resolution |
+| `latency_ms` | End-to-end HTTP send and body-read time; `null` when HTTP was not started |
+| `http_status` | Response status when received, otherwise `null` |
+| `failure_category` | Structured agent failure category, or `null` for a successful agent call |
+| `usage` | Supported returned token counters, otherwise `null` |
+
+HTTP latency includes network and server time; it is not model inference time.
+Parsing/normalization is included in total elapsed time, not successful HTTP latency.
+An HTTP status of 200 can accompany a body-limit or response-validation failure.
+Preflight and credential-resolution failures have no HTTP status or latency.
+Evaluator failures and low scores do not change a successful agent call's category.
+
+Workers send `X-Vigilo-Attempt-Id` with the allocated attempt UUID so agent logs can
+correlate the request. Profiles and credential bindings cannot override this header.
+It is a correlation identifier, not an idempotency guarantee. Arbitrary response
+request-ID headers are not copied into operational diagnostics.
+
+Only `openai_compatible_chat_completions` interprets response `usage.prompt_tokens`,
+`usage.completion_tokens`, and `usage.total_tokens`. Counters must be unsigned
+integers; missing/null counters stay `null`, while an explicitly returned zero stays
+zero. Malformed supported counters discard the usage observation. Unknown fields
+are ignored, and native-agent usage objects are not guessed. Usage is neither a
+quality score nor an inferred cost.
+
+The operational record contains fixed fields and bounded values, without bodies,
+headers, credentials, or arbitrary agent configuration. IDs and endpoint fingerprints
+are attempt evidence, not metric labels. Successful evaluator-visible metadata also
+includes agent identity/configuration fields; these are not copied into
+the bounded operational record. Diagnostics share the batched terminal update, with no separate SQL query or
+transaction.
+
 ### Agent invocation failures and retries
 
 `agent.http.max_retry_after_secs` bounds accepted server retry advice. It defaults

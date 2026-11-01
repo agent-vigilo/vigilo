@@ -1,7 +1,9 @@
 //! Worker-side client for invoking the configured agent endpoint.
 //!
 //! This module owns request-format adaptation, HTTP transport, and response
-//! normalization into the evaluator `AgentOutput` contract.
+//! normalization into the evaluator `AgentOutput` contract. It returns bounded
+//! operational diagnostics separately so the workflow can retain HTTP outcomes
+//! even when later evaluator processing fails, without additional database calls.
 //!
 //! Supported request formats:
 //!
@@ -27,6 +29,16 @@ pub(crate) mod limits;
 #[path = "agent_client/credentials.rs"]
 pub(crate) mod credentials;
 
+#[path = "agent_client/diagnostics.rs"]
+pub(crate) mod diagnostics;
+
+/// Successful output plus bounded evidence retained independently of evaluator results.
+#[derive(Debug)]
+pub(crate) struct Invocation {
+    pub(crate) output: AgentOutput,
+    pub(crate) diagnostics: diagnostics::Diagnostics,
+}
+
 /// Process services used for one invocation; contains no resolved secrets.
 pub(crate) struct Services<'a> {
     pub(crate) client: &'a reqwest::Client,
@@ -34,10 +46,7 @@ pub(crate) struct Services<'a> {
     pub(crate) credentials: &'a credentials::Provider,
 }
 
-use std::time::{
-    Duration,
-    Instant,
-};
+use std::time::Duration;
 
 use serde_json::{
     Value,
@@ -412,6 +421,7 @@ fn attach_invocation_metadata(
     output
 }
 
+/// Attach bounded evidence to every typed outcome without changing retry policy.
 pub(crate) async fn invoke(
     services: Services<'_>,
     run_id: Uuid,
@@ -419,8 +429,71 @@ pub(crate) async fn invoke(
     attempt_id: Uuid,
     run_profile: &RunProfile,
     test_case: &TestCase,
+) -> anyhow::Result<Invocation> {
+    let mut observation = diagnostics::Observation::new(
+        run_id,
+        execution_id,
+        attempt_id,
+        &run_profile.agent.http.url,
+    );
+    let result = invoke_inner(
+        services,
+        run_id,
+        execution_id,
+        attempt_id,
+        run_profile,
+        test_case,
+        &mut observation,
+    )
+    .await;
+    match result {
+        Ok(mut output) => {
+            let diagnostics = observation.finish(None);
+            let metadata = output
+                .metadata
+                .get_mut("vigilo_invocation")
+                .and_then(Value::as_object_mut)
+                .expect("host invocation metadata is an object");
+            let Value::Object(fields) = serde_json::to_value(&diagnostics)? else {
+                unreachable!()
+            };
+            metadata.extend(fields);
+            Ok(Invocation {
+                output,
+                diagnostics,
+            })
+        }
+        Err(error) => match error.downcast::<Failure>() {
+            Ok(mut failure) => {
+                failure.invocation = Some(Box::new(observation.finish(Some(failure.kind))));
+                Err(failure.into())
+            }
+            Err(error) => Err(error),
+        },
+    }
+}
+
+async fn invoke_inner(
+    services: Services<'_>,
+    run_id: Uuid,
+    execution_id: Uuid,
+    attempt_id: Uuid,
+    run_profile: &RunProfile,
+    test_case: &TestCase,
+    observation: &mut diagnostics::Observation,
 ) -> anyhow::Result<AgentOutput> {
     let http = &run_profile.agent.http;
+    if http
+        .headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(diagnostics::REQUEST_ID_HEADER))
+    {
+        return Err(Failure::terminal(
+            Kind::Configuration,
+            "profile overrides the host attempt correlation header",
+        )
+        .into());
+    }
     let limits = services
         .limits
         .resolve(http)
@@ -493,14 +566,26 @@ pub(crate) async fn invoke(
 
     if let Some(resolved) = resolved {
         resolved.check_validity()?;
+        if resolved.name.as_str() == diagnostics::REQUEST_ID_HEADER {
+            return Err(Failure::terminal(
+                Kind::Configuration,
+                "credential binding overrides the host attempt correlation header",
+            )
+            .into());
+        }
         request = request.header(resolved.name, resolved.value);
     }
-    let started = Instant::now();
-    let mut response = request
-        .send()
+    request = request.header(diagnostics::REQUEST_ID_HEADER, attempt_id.to_string());
+    let request = request
+        .build()
+        .map_err(|err| Failure::transport(err, "invalid agent HTTP request", None))?;
+    observation.start_http();
+    let mut response = client
+        .execute(request)
         .await
         .map_err(|err| Failure::transport(err, "agent HTTP request failed", None))?;
     let status = response.status();
+    observation.data.http_status = Some(status.as_u16());
     let http_failure = (!status.is_success()).then(|| {
         Failure::http(
             status.as_u16(),
@@ -531,6 +616,7 @@ pub(crate) async fn invoke(
         })?;
     }
     let bytes = body.finish();
+    observation.finish_http();
     // Match reqwest text decoding: strip a UTF-8 BOM and replace invalid UTF-8.
     let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
     let body = String::from_utf8_lossy(bytes);
@@ -548,6 +634,11 @@ pub(crate) async fn invoke(
     let response_json = parse_response_body(&body).map_err(|err| {
         Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
     })?;
+    if AgentRequestFormat::from_profile(run_profile)?
+        == AgentRequestFormat::OpenAiCompatibleChatCompletions
+    {
+        observation.data.usage = diagnostics::chat_usage(&response_json);
+    }
     let output = output_from_response_json(response_json).map_err(|err| {
         Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
     })?;
@@ -556,7 +647,7 @@ pub(crate) async fn invoke(
         output,
         run_profile,
         Some(status.as_u16()),
-        started.elapsed().as_millis() as u64,
+        observation.data.latency_ms.unwrap_or(0),
     ))
 }
 

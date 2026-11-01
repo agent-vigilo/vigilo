@@ -196,7 +196,10 @@ fn header(name: &str) -> Result<HeaderName, Failure> {
             "credential header must be Authorization, api-key, or an x- header",
         ));
     }
-    if name.as_str().starts_with("x-forwarded-") || name.as_str() == "x-http-method-override" {
+    if name.as_str().starts_with("x-forwarded-")
+        || name.as_str() == "x-http-method-override"
+        || name.as_str() == super::diagnostics::REQUEST_ID_HEADER
+    {
         return Err(configuration("routing headers cannot carry credentials"));
     }
     Ok(name)

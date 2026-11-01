@@ -29,12 +29,12 @@ flowchart TD
     CaseBatchLoader["fa:fa-table-list <br/> <b>Case Batch Loader</b> <br/> <small>[Component: Rust / Storage Adapter]</small> <br/> <small>Verifies immutable configuration and assigned case files within byte budgets.</small>"]:::component
 
     ExecutionProcessor["fa:fa-list-check <br/> <b>Execution Processing Workflow</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Allocates due attempts under a shared run-state guard, skips retry waits, and runs chunk cases with bounded parallelism.</small>"]:::component
-    AgentClient["fa:fa-brain <br/> <b>Agent Invocation Client</b> <br/> <small>[Component: Rust / HTTP]</small> <br/> <small>Sends evaluator-safe case input to the configured target and normalizes agent output.</small>"]:::component
+    AgentClient["fa:fa-brain <br/> <b>Agent Invocation Client</b> <br/> <small>[Component: Rust / HTTP]</small> <br/> <small>Sends correlated case requests, normalizes output, and captures bounded invocation diagnostics.</small>"]:::component
     WasmSemaphore["fa:fa-gauge-high <br/> <b>Wasm Evaluation Semaphore</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Caps active evaluator invocations across the worker process.</small>"]:::component
     EvaluatorExecutor["fa:fa-microchip <br/> <b>Evaluator Runtime Executor</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Dispatches versioned ABI adapters in fresh stores with memory, fuel, timeout, and log limits.</small>"]:::component
     CompletenessAggregator["fa:fa-list-check <br/> <b>Completeness & Aggregation</b> <br/> <small>[Component: Rust]</small> <br/> <small>Verifies required evaluator scores before calculating authoritative dimension and aggregate scores.</small>"]:::component
     ResultPersistence["fa:fa-database <br/> <b>Result Persistence Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Appends evaluator results and upserts aggregates with child-row authority checks.</small>"]:::component
-    TerminalTransitions["fa:fa-shield-halved <br/> <b>Terminal Transition Guard</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Marks attempts completed, retry-scheduled, or terminal only when chunk, current-attempt, and live-lease authority still match.</small>"]:::component
+    TerminalTransitions["fa:fa-shield-halved <br/> <b>Terminal Transition Guard</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Persists invocation diagnostics with terminal state under chunk, current-attempt, and live-lease authority.</small>"]:::component
 
     Credentials["Credential Provider<br/>Trusted local sources or external service protocol<br/>Transient headers, bounded resolution"]:::component
     AgentClient --> Credentials

@@ -29,12 +29,10 @@ fn case() -> TestCase {
     serde_json::from_value(serde_json::json!({"id":"case", "task_type":"text", "input":"hello", "tags":[], "metadata":{}})).unwrap()
 }
 
-async fn call(
-    response: &'static str,
-    limit: u64,
-) -> anyhow::Result<contracts::evaluator::AgentOutput> {
+async fn call(response: &str, limit: u64) -> anyhow::Result<contracts::evaluator::AgentOutput> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
+    let response = response.to_owned();
     let mut server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = Vec::new();
@@ -55,6 +53,7 @@ async fn call(
                     .unwrap();
                 if request.len() >= end + 4 + length {
                     assert!(header.contains("content-type: application/json"));
+                    assert!(header.contains(&format!("x-vigilo-attempt-id: {}", Uuid::nil())));
                     let body: serde_json::Value =
                         serde_json::from_slice(&request[end + 4..]).unwrap();
                     assert_eq!(body["input"], "hello");
@@ -81,7 +80,8 @@ async fn call(
         &profile(&url),
         &case(),
     )
-    .await;
+    .await
+    .map(|invocation| invocation.output);
     match tokio::time::timeout(std::time::Duration::from_secs(3), &mut server).await {
         Ok(joined) => joined.expect("HTTP fixture failed"),
         Err(_) => {
@@ -149,7 +149,8 @@ async fn oversized_request_and_profile_fail_before_connection() {
         &p,
         &case(),
     )
-    .await;
+    .await
+    .map(|invocation| invocation.output);
     assert!(
         result
             .unwrap_err()
@@ -169,7 +170,8 @@ async fn oversized_request_and_profile_fail_before_connection() {
         &p,
         &case(),
     )
-    .await;
+    .await
+    .map(|invocation| invocation.output);
     assert!(result.unwrap_err().to_string().contains("worker ceiling"));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
@@ -205,7 +207,8 @@ async fn response_timeout_remains_enforced_during_body_read() {
         &p,
         &case(),
     )
-    .await;
+    .await
+    .map(|invocation| invocation.output);
     server.abort();
     let _ = server.await;
     let error = result.unwrap_err();
@@ -214,6 +217,9 @@ async fn response_timeout_remains_enforced_during_body_read() {
         .downcast_ref::<agent_client::failure::Failure>()
         .unwrap();
     assert_eq!(failure.kind, agent_client::failure::Kind::Timeout);
+    let diagnostics = failure.invocation.as_ref().unwrap();
+    assert!(diagnostics.latency_ms.is_some());
+    assert!(diagnostics.elapsed_ms >= diagnostics.latency_ms.unwrap());
     assert!(failure.retryable);
 }
 
@@ -292,7 +298,84 @@ async fn credential_reference_without_provider_fails_closed() {
         .unwrap();
     assert_eq!(failure.kind, agent_client::failure::Kind::Configuration);
     assert!(!failure.retryable);
+    let diagnostics = failure.invocation.as_ref().unwrap();
+    assert!(diagnostics.latency_ms.is_none());
+    assert!(diagnostics.http_status.is_none());
 }
 
 #[path = "support/credential_services.rs"]
 mod credential_services;
+
+#[tokio::test]
+async fn invocation_diagnostics_identify_success_and_failure_consistently() {
+    let output = call("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 10)
+        .await
+        .unwrap();
+    let data = &output.metadata["vigilo_invocation"];
+    assert_eq!(data["attempt_id"], Uuid::nil().to_string());
+    assert!(
+        data["endpoint_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("blake3:")
+    );
+    assert!(data["elapsed_ms"].is_u64());
+    assert_eq!(data["http_status"], 200);
+    assert!(data["failure_category"].is_null());
+    let body = serde_json::json!({"text":"ok", "metadata":{"vigilo_invocation":{"attempt_id":"forged", "endpoint_ref":"forged"}}}).to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let output = call(&response, 1024).await.unwrap();
+    assert_eq!(
+        output.metadata["vigilo_invocation"]["attempt_id"],
+        Uuid::nil().to_string()
+    );
+    assert!(
+        output.metadata["vigilo_invocation"]["endpoint_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("blake3:")
+    );
+}
+
+#[tokio::test]
+async fn failed_http_and_response_validation_retain_safe_timing_and_status() {
+    for (response, limit, status, kind) in [
+        (
+            "HTTP/1.1 503 Busy\r\nContent-Length: 6\r\n\r\ncanary",
+            10,
+            503,
+            agent_client::failure::Kind::HttpStatus,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\ncanary",
+            5,
+            200,
+            agent_client::failure::Kind::BodyLimit,
+        ),
+        (
+            "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n{",
+            10,
+            200,
+            agent_client::failure::Kind::InvalidResponse,
+        ),
+    ] {
+        let err = call(response, limit).await.unwrap_err();
+        let failure = err
+            .downcast_ref::<agent_client::failure::Failure>()
+            .unwrap();
+        let diagnostics = failure.invocation.as_ref().unwrap();
+        assert_eq!(failure.kind, kind);
+        assert_eq!(diagnostics.failure_category, Some(kind));
+        assert_eq!(diagnostics.http_status, Some(status));
+        assert!(diagnostics.latency_ms.is_some());
+        assert!(diagnostics.elapsed_ms >= diagnostics.latency_ms.unwrap());
+        assert!(
+            !serde_json::to_string(diagnostics)
+                .unwrap()
+                .contains("canary")
+        );
+    }
+}

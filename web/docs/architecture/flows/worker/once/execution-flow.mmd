@@ -67,17 +67,17 @@ sequenceDiagram
                         Credentials-->>Vigilo: Transient header or typed failure
                     end
                     alt Request and credential validation succeed
-                        Vigilo->>Agent: Invoke bounded request; inject authorized header without redirects
-                        Agent-->>Vigilo: Read bounded responses; capture HTTP status and Retry-After
+                        Vigilo->>Agent: Invoke bounded request with attempt correlation and authorized credential
+                        Agent-->>Vigilo: Read bounded responses; capture status, HTTP latency, supported usage and Retry-After
                     else Validation or credential resolution fails
-                        Vigilo->>Vigilo: Preserve typed failure and skip the agent call
+                        Vigilo->>Vigilo: Retain bounded failure diagnostics and skip the agent call
                     end
                 and Evaluator calls
                     Vigilo->>Vigilo: Acquire Wasm evaluation semaphore permits
                     Vigilo->>WASM: Dispatch pinned ABI adapters in sandboxed stores
                 end
                 WASM-->>Vigilo: Evaluation outputs
-                Vigilo->>ExecutionDB: Persist batched results and lease-guarded terminal transitions
+                Vigilo->>ExecutionDB: Persist batched results and lease-guarded terminal transitions with invocation diagnostics
                 Vigilo->>ExecutionDB: Read chunk execution retry state
                 ExecutionDB-->>Vigilo: Terminal or retry-waiting chunk state
                 alt Executions still waiting for retry

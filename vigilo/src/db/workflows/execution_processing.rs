@@ -369,6 +369,7 @@ pub(crate) struct ExecutionTerminalTransition {
     pub(crate) completed: bool,
     pub(crate) error_message: Option<String>,
     pub(crate) requires_worker_lease: bool,
+    pub(crate) agent_invocation: Option<crate::agent_client::diagnostics::Diagnostics>,
     pub(crate) agent_failure: Option<crate::agent_client::failure::Failure>,
 }
 
@@ -504,6 +505,7 @@ fn processed_terminal_failure(
             completed: false,
             error_message: Some(error_message),
             requires_worker_lease: true,
+            agent_invocation: None,
             agent_failure: None,
         },
     }
@@ -526,6 +528,7 @@ fn processed_terminal_failure_without_worker_lease(
             completed: false,
             error_message: Some(error_message),
             requires_worker_lease: false,
+            agent_invocation: None,
             agent_failure: None,
         },
     }
@@ -883,6 +886,7 @@ async fn evaluate_case_execution(
         };
     };
     let attempt_no = allocation.attempt_no;
+    let mut agent_invocation = None;
 
     let evaluation_result: anyhow::Result<(
         Vec<AggregationBinding>,
@@ -891,7 +895,7 @@ async fn evaluate_case_execution(
     )> = async {
         let test_case = make_test_case(case)?;
         let http = context.http().await?;
-        let agent_output = agent_client::invoke(
+        let invocation = agent_client::invoke(
             agent_client::Services {
                 client: http,
                 limits: context.agent_http_limits(),
@@ -905,6 +909,8 @@ async fn evaluate_case_execution(
         )
         .await
         .map_err(|err| err.context("agent invocation failed"))?;
+        agent_invocation = Some(invocation.diagnostics);
+        let agent_output = invocation.output;
 
         let aggregation_bindings = evaluator_bindings
             .iter()
@@ -1276,12 +1282,16 @@ async fn evaluate_case_execution(
                 Err(err) => {
                     let failure_message = format!("case execution result count overflow: {}", err);
                     return CaseExecutionOutcome {
-                        processed: Some(processed_terminal_failure(
-                            execution_id,
-                            attempt_id,
-                            attempt_no,
-                            failure_message,
-                        )),
+                        processed: Some({
+                            let mut processed = processed_terminal_failure(
+                                execution_id,
+                                attempt_id,
+                                attempt_no,
+                                failure_message,
+                            );
+                            processed.terminal_transition.agent_invocation = agent_invocation;
+                            processed
+                        }),
                         persistence: None,
                     };
                 }
@@ -1308,6 +1318,7 @@ async fn evaluate_case_execution(
                     completed: true,
                     error_message: None,
                     requires_worker_lease: true,
+                    agent_invocation: agent_invocation.clone(),
                     agent_failure: None,
                 },
             };
@@ -1339,6 +1350,10 @@ async fn evaluate_case_execution(
             };
             let mut processed =
                 processed_terminal_failure(execution_id, attempt_id, attempt_no, failure_message);
+            processed.terminal_transition.agent_invocation = agent_failure
+                .as_ref()
+                .and_then(|failure| failure.invocation.as_deref().cloned())
+                .or(agent_invocation);
             processed.terminal_transition.agent_failure = agent_failure;
             CaseExecutionOutcome {
                 processed: Some(processed),

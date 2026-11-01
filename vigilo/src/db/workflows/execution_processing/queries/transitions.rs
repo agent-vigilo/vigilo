@@ -1,4 +1,9 @@
-//! transitions queries for execution processing.
+//! Lease renewal and authoritative batched attempt settlement.
+//!
+//! These queries fence shard/chunk ownership and current-attempt authority before
+//! committing results, retries, and terminal state. Bounded invocation evidence is
+//! merged into the existing attempt update; it has no independent write path and
+//! cannot bypass the same ownership checks. Other chunks retain shared run access.
 
 use super::super::*;
 
@@ -96,6 +101,15 @@ pub(crate) async fn finalize_execution_terminal_transitions(
         .map(|transition| transition.requires_worker_lease)
         .collect::<Vec<_>>();
 
+    let agent_invocations = transitions
+        .iter()
+        .map(|t| {
+            t.agent_invocation
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let agent_failures = transitions
         .iter()
         .map(|t| {
@@ -175,8 +189,9 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 $14::bool[],
                 $15::timestamptz[],
                 $16::int4[],
-                $17::int8[]
-            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs)
+                $17::int8[],
+                $18::jsonb[]
+            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs, agent_invocation)
         ),
         transition_count AS (
             SELECT COUNT(*) AS expected_count
@@ -298,9 +313,13 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                     WHEN terminal_input.completed THEN NULL
                     ELSE terminal_input.error_message
                 END,
-                outcome_summary = CASE WHEN terminal_input.agent_failure IS NOT NULL
-                    THEN execution_attempts.outcome_summary || jsonb_build_object('agent_failure', terminal_input.agent_failure)
-                    ELSE execution_attempts.outcome_summary END,
+                outcome_summary = execution_attempts.outcome_summary
+                    || CASE WHEN terminal_input.agent_failure IS NOT NULL
+                        THEN jsonb_build_object('agent_failure', terminal_input.agent_failure)
+                        ELSE '{}'::jsonb END
+                    || CASE WHEN terminal_input.agent_invocation IS NOT NULL
+                        THEN jsonb_build_object('agent_invocation', terminal_input.agent_invocation)
+                        ELSE '{}'::jsonb END,
                 completed_at = now(),
                 updated_at = now()
             FROM terminal_input, terminal_input_check
@@ -443,6 +462,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     .bind(retry_not_before)
     .bind(jitter_ms)
     .bind(retry_delay_secs)
+    .bind(agent_invocations)
     .fetch_one(&mut *tx)
     .await?;
 

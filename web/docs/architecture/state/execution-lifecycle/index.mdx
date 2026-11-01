@@ -52,3 +52,9 @@ failures use the same durable retry budget; invalid bindings and authorization
 denials are terminal. Each retry resolves the current credential value again.
 Only the typed failure is persisted, not the credential or its grant. See
 [Agent Credentials](/docs/configuration/agent-credentials).
+
+Each invocation's bounded timing, identity, status, failure category, and supported
+usage counters are merged into `outcome_summary.agent_invocation` by the same
+authoritative terminal statement. A successful HTTP record survives a subsequent
+evaluator failure. This adds no query or transaction. See
+[invocation diagnostics](/docs/configuration/run-profile#agent-invocation-diagnostics).

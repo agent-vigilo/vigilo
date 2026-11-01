@@ -22,7 +22,7 @@ flowchart TD
     Http[Invoke bounded agent request with authorized header; bound response reads]
     Permit[Acquire Wasm evaluation permits]
     Execute[Dispatch pinned ABI adapters in sandboxed stores]
-    Persist[Persist terminal transitions with typed failure and retry policy]
+    Persist[Persist terminal transitions with bounded invocation diagnostics and retry policy]
     CheckRetry{Open retry work?}
     Delay[Release chunk and delay message until retry window]
     Complete[Commit terminal chunk and immutable receipt]

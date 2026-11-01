@@ -592,6 +592,7 @@ async fn terminal_transition_rejects_expired_attempt_lease(pool: PgPool) {
             completed: true,
             error_message: None,
             requires_worker_lease: true,
+            agent_invocation: None,
             agent_failure: None,
         }],
     )
@@ -911,6 +912,7 @@ async fn authentication_failure_is_terminal_before_attempt_budget_exhaustion(poo
                 "agent invocation failed: agent HTTP request failed with status 401".into(),
             ),
             requires_worker_lease: true,
+            agent_invocation: None,
             agent_failure: Some(crate::agent_client::failure::Failure::http(
                 401,
                 None,
@@ -984,6 +986,7 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
             completed: false,
             error_message: Some("opaque diagnostic; do not classify this text".into()),
             requires_worker_lease: true,
+            agent_invocation: None,
             agent_failure: failure.clone(),
         };
         finalize_execution_terminal_transitions(
@@ -1022,5 +1025,66 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
             assert_eq!(outcome, "error");
             assert!(score.is_none());
         }
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn invocation_diagnostics_use_existing_terminal_summary_for_every_outcome(pool: PgPool) {
+    use crate::agent_client::{
+        diagnostics::Observation,
+        failure::{
+            Failure,
+            Kind,
+        },
+    };
+    for (completed, agent_failed) in [(true, false), (false, true), (false, false)] {
+        let seed = seed_running_attempt(&pool, 120, 120).await;
+        if completed {
+            insert_passing_aggregate(&pool, &seed).await;
+        }
+        let mut observation = Observation::new(
+            seed.run_id,
+            seed.execution_id,
+            seed.attempt_id,
+            "https://example.com/?secret=canary",
+        );
+        observation.data.http_status = Some(if agent_failed { 503 } else { 200 });
+        observation.data.latency_ms = Some(12);
+        let diagnostics = observation.finish(agent_failed.then_some(Kind::HttpStatus));
+        sqlx::query("UPDATE execution_attempts SET outcome_summary = '{\"existing\":true}'::jsonb WHERE id=$1").bind(seed.attempt_id).execute(&pool).await.unwrap();
+        finalize_execution_terminal_transitions(
+            &pool,
+            seed.run_id,
+            seed.run_shard,
+            seed.worker_id,
+            2,
+            &[ExecutionTerminalTransition {
+                execution_id: seed.execution_id,
+                attempt_id: seed.attempt_id,
+                attempt_no: 1,
+                completed,
+                error_message: (!completed).then(|| "safe error".into()),
+                requires_worker_lease: true,
+                agent_invocation: Some(diagnostics.clone()),
+                agent_failure: agent_failed
+                    .then(|| Failure::http(503, None, chrono::Utc::now(), 600)),
+            }],
+        )
+        .await
+        .unwrap();
+        let summary: serde_json::Value =
+            sqlx::query_scalar("SELECT outcome_summary FROM execution_attempts WHERE id=$1")
+                .bind(seed.attempt_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(summary["existing"], true);
+        assert_eq!(
+            summary["agent_invocation"],
+            serde_json::to_value(diagnostics).unwrap()
+        );
+        assert_eq!(summary.get("agent_failure").is_some(), agent_failed);
+        assert!(!summary.to_string().contains("canary"));
     }
 }
