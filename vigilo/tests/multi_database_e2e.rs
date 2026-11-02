@@ -181,6 +181,11 @@ async fn cross_shard_run_completes_and_exports_results() -> anyhow::Result<()> {
     assert_eq!(status["data"]["gate_status"].as_str(), Some("pass"));
     assert_eq!(status["data"]["expected_execution_count"], 101);
     assert_eq!(status["data"]["terminal_execution_count"], 101);
+    for (database, count) in [(&fixture.primary, 100_i64), (&fixture.shard, 1)] {
+        let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM execution_attempts WHERE run_id=$1 AND response_evidence IS NOT NULL AND octet_length(response_evidence_bytes)>0 AND response_evidence->'items' IS NOT NULL")
+            .bind(completed_run_id).fetch_one(database).await?;
+        assert_eq!(retained, count);
+    }
 
     let results = run_vigilo_json(
         &fixture.config,
@@ -395,6 +400,58 @@ async fn older_nonterminal_run_does_not_block_newer_terminal_run() -> anyhow::Re
     )?;
     assert_eq!(blocked_status["data"]["status"], "running");
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn mapping_failure_retains_original_and_fails_required_gate_without_retry()
+-> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let files = write_run_inputs(
+        "mapping_failure",
+        &fixture.agent.url,
+        SENTIMENT_EVALUATOR_REF,
+        1,
+        CaseMode::MappingFailure,
+    )?;
+    let profile = fs::read_to_string(&files.profile)?.replace("max_attempts: 1", "max_attempts: 3");
+    fs::write(&files.profile, profile)?;
+    let created = run_vigilo_json(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "single-default",
+        [
+            "run",
+            "create",
+            "--profile-file",
+            path_arg(&files.profile)?,
+            "--dataset-file",
+            path_arg(&files.dataset)?,
+        ],
+    )?;
+    let run = Uuid::parse_str(created["data"]["run_id"].as_str().unwrap())?;
+    let status = drive_run_to_status(
+        &fixture,
+        "mapping failure",
+        PRIMARY_ALIAS,
+        "single-default",
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(status["data"]["gate_status"], "fail");
+    let attempts: Vec<(i32, Value, Vec<u8>)> = sqlx::query_as("SELECT attempt_no, response_evidence, response_evidence_bytes FROM execution_attempts WHERE run_id=$1")
+        .bind(run).fetch_all(&fixture.primary).await?;
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].0, 1);
+    assert_eq!(attempts[0].2, b"{malformed");
+    assert!(attempts[0].1["items"].is_null());
+    assert!(attempts[0].1["mapping_error"].is_string());
+    let errors: i64 = sqlx::query_scalar("SELECT count(*) FROM evaluator_results WHERE run_id=$1 AND error_code='response_mapping_error'")
+        .bind(run).fetch_one(&fixture.primary).await?;
+    assert_eq!(errors, 1);
     Ok(())
 }
 
@@ -835,6 +892,8 @@ fn handle_agent_request(mut stream: TcpStream) -> anyhow::Result<()> {
             "HTTP/1.1 500 Internal Server Error",
             json!({"error": "forced integration agent failure"}).to_string(),
         )
+    } else if request.contains("force-mapping-error") {
+        ("HTTP/1.1 200 OK", "{malformed".to_string())
     } else {
         (
             "HTTP/1.1 200 OK",
@@ -1100,6 +1159,7 @@ async fn expire_chunk_lease(primary: &PgPool, run_id: Uuid) -> anyhow::Result<()
 
 #[derive(Debug, Clone, Copy)]
 enum CaseMode {
+    MappingFailure,
     Passing,
     AgentFailure,
 }
@@ -1647,6 +1707,21 @@ persistence:
 agent:
   provider: integration
   name: mock-agent
+  response:
+    schema_version: 1.0.0
+    interpretation:
+      format: json
+      mapping:
+        items:
+          - mode: single
+            item:
+              type: message
+              content:
+                - media_type: text/plain
+                  source:
+                    representation: inline_text
+                    selection:
+                      pointer: /text
   http:
     url: {agent_url}
 case_groups:
@@ -1687,6 +1762,7 @@ fn dataset_yaml(case_count: usize, case_mode: CaseMode) -> String {
         let prompt = match case_mode {
             CaseMode::Passing => format!("case {ordinal}: this is good and reliable"),
             CaseMode::AgentFailure => "force-agent-error".to_string(),
+            CaseMode::MappingFailure => "force-mapping-error".to_string(),
         };
         raw.push_str(&format!(
             r#"  - id: {case_id}

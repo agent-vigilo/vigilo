@@ -813,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn response_configuration_is_preserved_but_cannot_be_silently_executed() {
+    fn response_configuration_is_preserved_and_supported_for_execution() {
         let mut configured = profile();
         configured.agent.response = Some(
             serde_json::from_value(serde_json::json!({
@@ -825,11 +825,8 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&configured).unwrap()).unwrap();
         assert_eq!(configured.agent.response, round_trip.agent.response);
         let issues = super::collect_static_profile_config_issues(&round_trip);
-        assert!(
-            issues
-                .iter()
-                .any(|issue| issue.contains("response configuration is not enabled"))
-        );
+        assert!(issues.is_empty(), "{issues:?}");
+        crate::agent_client::validate_request_format(&round_trip).unwrap();
         let mut wrong = serde_json::to_value(&configured).unwrap();
         wrong["agent"]["response"]["schema_version"] = serde_json::json!("2.0.0");
         assert!(serde_json::from_value::<RunProfile>(wrong).is_err());

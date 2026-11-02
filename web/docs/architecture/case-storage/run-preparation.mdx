@@ -71,8 +71,10 @@ Chunk files, indexes, gate files, and the configuration use the
 profile, agent settings, evaluator execution plan, logical dataset identity, and
 executability counts. The run-plan manifest links those objects to the finalized
 dataset and records per-shard totals and settlement hashes. The control run
-snapshot retains compact identities, references and expected shard settlement
-hashes rather than full policy or case payloads. Publication derives that bounded
+snapshot retains compact identities, references, expected shard settlement
+hashes, and the response retention mode and mapping hash. The full policy and case
+payloads remain in blob storage. The response policy identity lets attempt writes
+validate retained evidence without loading the full profile from PostgreSQL. Publication derives that bounded
 finalization projection from the same shard metadata in its atomic commit.
 
 ## Authority, Recovery, and Status

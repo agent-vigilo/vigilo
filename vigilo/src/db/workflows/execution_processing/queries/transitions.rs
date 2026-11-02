@@ -269,9 +269,8 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                  transition_input.response_evidence #>> '{provenance,case_hash}' = executions.case_hash
                  AND transition_input.response_evidence #>> '{provenance,profile_hash}' = run_guard.profile_hash
                  AND transition_input.response_evidence #>> '{provenance,execution_plan_hash}' = run_guard.config_snapshot->>'execution_plan_hash'
-                 AND transition_input.response_evidence->>'retention' = COALESCE(run_guard.config_snapshot #>> '{profile,persistence,mode}', 'full')
-                 AND (transition_input.response_evidence->>'retention' = 'summary'
-                      OR transition_input.response_evidence->'configuration' = COALESCE(run_guard.config_snapshot #> '{profile,agent,response}', 'null'::jsonb))
+                 AND transition_input.response_evidence->>'retention' = run_guard.config_snapshot #>> '{response_policy,retention}'
+                 AND transition_input.response_evidence->>'configuration_hash' = run_guard.config_snapshot #>> '{response_policy,configuration_hash}'
              ))
         ),
         authority_check AS (

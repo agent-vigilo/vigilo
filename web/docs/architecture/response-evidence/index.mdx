@@ -14,11 +14,14 @@ The attempt persistence boundary accepts a validated packet containing metadata 
 a binary payload. It writes both with the attempt's terminal transition, under the
 same shard fence, chunk lock, current-attempt check, and worker lease.
 
-The HTTP-to-evaluator worker path does not populate this packet. Explicit response
-mapping configurations are rejected for execution. The
-[mapping API](/docs/configuration/run-profile#mapping-engine) is available in the
-library. Retained evidence is an internal persistence contract; a public replay
-command is not provided.
+The worker maps a complete successful response once per attempt using the
+[configured interpretation](/docs/configuration/run-profile#mapping-engine), then
+shares immutable evidence across evaluators. Mapping failure leaves raw evidence
+available to independent evaluators. Required mapped evidence fails explicitly;
+interpretation errors do not retry the agent. Non-success HTTP responses and partial
+bodies remain invocation failures, with diagnostics rather than scoreable bodies.
+Retained evidence is an internal persistence contract; a public replay command is
+not provided.
 
 ## Ownership and Writes
 
@@ -33,7 +36,10 @@ byte payload, making deliberate omission distinguishable from absent evidence.
 
 The same batched statement that completes or fails attempts stores the packet.
 It verifies the owning run, execution and attempt, plus the case hash, profile hash,
-execution-plan hash, retention mode and mapping configuration against frozen state.
+execution-plan hash, retention mode and mapping hash against frozen state.
+The compact execution snapshot stores the retention mode and mapping hash; the full
+profile remains in blob storage. These fields travel through existing snapshot
+creation and attempt writes, without additional database calls.
 An expired lease, replaced attempt, wrong worker or inconsistent provenance cannot
 write evidence. A committed terminal packet cannot be replaced by a late worker.
 
@@ -74,7 +80,8 @@ mapping configuration from the packet. The raw-output and evaluator-evidence fla
 control evaluator results and diagnostics; they do not silently discard a full
 response packet. See [persistence settings](/docs/configuration/run-profile#persistence).
 
-Packets allow at most 4 MiB of original bytes, 20 MiB of total binary payload,
+Workers reject an effective response limit above 4 MiB before calling the agent;
+profiles can explicitly lower a larger worker ceiling. Packets allow at most 4 MiB of original bytes, 20 MiB of total binary payload,
 2 MiB of serialized metadata, 4096 mapped items, 8192 content parts, 63 distinct
 decoded resources and 16 MiB of logical mapped content. Repeated references count
 against logical content limits, preventing amplification during reconstruction.
@@ -87,3 +94,7 @@ run removes the packet through existing cascades. There is no independent resour
 row or orphaned response object to collect. Removing a required external artifact
 makes replay unavailable; surviving provenance still identifies the required digest.
 No automatic runtime-artifact archive or retention duration is provided.
+
+Operators retain the exact Vigilo binary or immutable container image identified
+by the packet. Workers hash the executable once per process using streaming I/O;
+deployment executables must remain immutable while the process is running.

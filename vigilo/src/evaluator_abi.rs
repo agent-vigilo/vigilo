@@ -189,6 +189,7 @@ mod tests {
             },
             actual: AgentOutput {
                 captured_body: None,
+                mapping: None,
                 text: Some("neutral statement".to_string()),
                 structured: None,
                 tool_calls: Vec::new(),
@@ -266,7 +267,11 @@ mod tests {
                 )
             });
             let evaluator = PreparedEvaluator::compile(&runtime, &bytes, identity).unwrap();
-            let output = evaluator.execute(&runtime, evaluator_input()).unwrap();
+            let input = crate::contracts::evaluator::test_input::decode_input(include_str!(
+                "../../evaluators/sentiment-basic-en/example-input.json"
+            ))
+            .unwrap();
+            let output = evaluator.execute(&runtime, input).unwrap();
 
             assert!(matches!(output.outcome, EvaluatorOutcome::Completed(_)));
             assert_eq!(
@@ -275,6 +280,92 @@ mod tests {
             );
         }
     }
+    #[cfg(feature = "evaluator-abi-fixtures")]
+    #[test]
+    fn sentiment_reads_mapped_ranges_and_resources_without_prompt_fallback() {
+        let bytes = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../target/wasm32-wasip2/release/sentiment_basic_en.wasm"),
+        )
+        .unwrap();
+        let runtime = Wasm::new(Config {
+            timeout_ms: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let evaluator = PreparedEvaluator::compile(&runtime, &bytes, &current_identity()).unwrap();
+        assert!(evaluator.execute(&runtime, evaluator_input()).is_err());
+        for (representation, text, success) in [
+            ("json_value", "bad ".repeat(20_000), true),
+            ("base64", "YmFk".into(), true),
+            ("base64", "//8=".into(), false),
+            ("inline_text", "".into(), false),
+        ] {
+            let config = serde_json::from_value(json!({"schema_version":"1.0.0","interpretation":{"format":"json","mapping":{"items":[{"mode":"single","item":{"type":"message","content":[{"media_type":"text/plain","source":{"representation":representation,"selection":{"pointer":"/text"}}}]}}]}}})).unwrap();
+            let body = vigilo::response::CapturedBody::new(
+                serde_json::to_vec(&json!({"text":text})).unwrap(),
+                None,
+            );
+            let mut input = evaluator_input();
+            input.actual.mapping = Some(std::sync::Arc::new(
+                vigilo::response_mapping::map_response(&body, Some(&config), Default::default()),
+            ));
+            input.actual.captured_body = Some(body);
+            let result = evaluator.execute(&runtime, input);
+            if success {
+                assert!(
+                    matches!(result.unwrap().outcome, EvaluatorOutcome::Completed(crate::contracts::evaluator::Measurement::Ordinal { value }) if value == "negative")
+                );
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
+
+    #[cfg(feature = "evaluator-abi-fixtures")]
+    #[test]
+    fn mapped_evidence_crosses_real_wasm_and_mapping_failure_preserves_raw_evaluation() {
+        let bytes = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../target/wasm32-wasip2/release/response_resource_fixture.wasm"),
+        )
+        .unwrap();
+        let runtime = Wasm::new(Config {
+            timeout_ms: 0,
+            ..Default::default()
+        })
+        .unwrap();
+        let evaluator = PreparedEvaluator::compile(&runtime, &bytes, &current_identity()).unwrap();
+        let config = serde_json::from_value(json!({"schema_version":"1.0.0","interpretation":{"format":"json","mapping":{"items":[
+            {"mode":"single","item":{"type":"message","content":[{"media_type":"text/plain","source":{"representation":"inline_text","selection":{"pointer":"/text"}}}]}},
+            {"mode":"single","item":{"type":"tool_call","name":{"source":"literal","value":"tool"},"arguments":{"media_type":"application/octet-stream","source":{"representation":"base64","selection":{"pointer":"/data"}}}}}
+        ]}}})).unwrap();
+        for (body, mapped) in [
+            (br#"{"text":"hello","data":"AP8qCg=="}"#.to_vec(), true),
+            (vec![0, 255, 42, 10], false),
+        ] {
+            let mut input = evaluator_input();
+            let body = vigilo::response::CapturedBody::new(body, None);
+            let mapping =
+                vigilo::response_mapping::map_response(&body, Some(&config), Default::default());
+            assert_eq!(mapping.is_ok(), mapped);
+            input.actual.captured_body = Some(body);
+            input.actual.mapping = Some(std::sync::Arc::new(mapping));
+            input.evaluator_config = if mapped {
+                json!({"mapped":true})
+            } else {
+                json!({})
+            };
+            let result = evaluator.execute(&runtime, input).unwrap();
+            assert!(matches!(
+                result.outcome,
+                EvaluatorOutcome::Completed(crate::contracts::evaluator::Measurement::Binary {
+                    value: true
+                })
+            ));
+        }
+    }
+
     #[cfg(feature = "evaluator-abi-fixtures")]
     #[test]
     fn response_resources_cross_real_wasm_and_are_scoped_to_each_execution() {

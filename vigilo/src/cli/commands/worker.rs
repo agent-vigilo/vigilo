@@ -101,6 +101,7 @@ struct WorkerRunContext {
     reader: Arc<crate::case_reader::RunReader>,
     profile: RunProfile,
     evaluator_catalog: execution_processing::RunEvaluatorCatalog,
+    response_identity: execution_processing::response::Identity,
 }
 
 #[derive(Debug, Clone)]
@@ -495,7 +496,14 @@ impl EvaluatorLoaderService {
                         run_id
                     );
                 }
+                let response_identity = execution_processing::response::Identity {
+                    profile_hash: reader.configuration.snapshot["profile_hash"].as_str()
+                        .ok_or_else(|| anyhow::anyhow!("missing profile identity"))?.to_owned(),
+                    execution_plan_hash: snapshot.execution_plan_hash.clone(),
+                    runtime_artifact_digest: execution_processing::response::runtime_digest().await?,
+                };
                 Ok::<_, anyhow::Error>(Arc::new(WorkerRunContext {
+                    response_identity,
                     reader,
                     profile: snapshot.profile,
                     evaluator_catalog,
@@ -1188,6 +1196,7 @@ async fn run_worker_message_admitted(
                             &attempt_lease,
                             &run_context.profile,
                             &run_context.evaluator_catalog,
+                            &run_context.response_identity,
                             &cases,
                         )
                         .await?,

@@ -37,6 +37,12 @@ async fn call_bytes(
     response: &[u8],
     limit: u64,
 ) -> anyhow::Result<contracts::evaluator::AgentOutput> {
+    invoke_bytes(response, limit)
+        .await
+        .map(|invocation| invocation.output)
+}
+
+async fn invoke_bytes(response: &[u8], limit: u64) -> anyhow::Result<agent_client::Invocation> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let response = response.to_owned();
@@ -87,8 +93,7 @@ async fn call_bytes(
         &profile(&url),
         &case(),
     )
-    .await
-    .map(|invocation| invocation.output);
+    .await;
     match tokio::time::timeout(std::time::Duration::from_secs(3), &mut server).await {
         Ok(joined) => joined.expect("HTTP fixture failed"),
         Err(_) => {
@@ -105,7 +110,8 @@ async fn response_bounds_cover_success_error_chunked_and_missing_length() {
     let output = call("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", 5)
         .await
         .unwrap();
-    assert_eq!(output.text.as_deref(), Some("hello"));
+    assert!(output.text.is_none());
+    assert_eq!(output.captured_body.unwrap().bytes(), b"hello");
     for response in [
         "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello!",
         "HTTP/1.1 500 Error\r\nContent-Length: 6\r\n\r\nhello!",
@@ -253,11 +259,6 @@ async fn failures_preserve_type_and_retry_advice_without_client_retries() {
             false,
         ),
         (
-            "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n{",
-            Kind::InvalidResponse,
-            false,
-        ),
-        (
             "HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nshort",
             Kind::Transport,
             true,
@@ -315,10 +316,10 @@ mod credential_services;
 
 #[tokio::test]
 async fn invocation_diagnostics_identify_success_and_failure_consistently() {
-    let output = call("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 10)
+    let invocation = invoke_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", 10)
         .await
         .unwrap();
-    let data = &output.metadata["vigilo_invocation"];
+    let data = serde_json::to_value(&invocation.diagnostics).unwrap();
     assert_eq!(data["attempt_id"], Uuid::nil().to_string());
     assert!(
         data["endpoint_ref"]
@@ -326,24 +327,21 @@ async fn invocation_diagnostics_identify_success_and_failure_consistently() {
             .unwrap()
             .starts_with("blake3:")
     );
-    assert!(data["elapsed_ms"].is_u64());
     assert_eq!(data["http_status"], 200);
-    assert!(data["failure_category"].is_null());
-    let body = serde_json::json!({"text":"ok", "metadata":{"vigilo_invocation":{"attempt_id":"forged", "endpoint_ref":"forged"}}}).to_string();
+    assert!(invocation.output.metadata.as_object().unwrap().is_empty());
+    let body =
+        serde_json::json!({"text":"ok", "metadata":{"vigilo_invocation":{"attempt_id":"forged"}}})
+            .to_string();
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
-    let output = call(&response, 1024).await.unwrap();
+    let invocation = invoke_bytes(response.as_bytes(), 1024).await.unwrap();
+    assert_eq!(invocation.diagnostics.attempt_id, Uuid::nil());
+    assert!(invocation.output.metadata.as_object().unwrap().is_empty());
     assert_eq!(
-        output.metadata["vigilo_invocation"]["attempt_id"],
-        Uuid::nil().to_string()
-    );
-    assert!(
-        output.metadata["vigilo_invocation"]["endpoint_ref"]
-            .as_str()
-            .unwrap()
-            .starts_with("blake3:")
+        invocation.output.captured_body.unwrap().bytes(),
+        body.as_bytes()
     );
 }
 
@@ -361,12 +359,6 @@ async fn failed_http_and_response_validation_retain_safe_timing_and_status() {
             5,
             200,
             agent_client::failure::Kind::BodyLimit,
-        ),
-        (
-            "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n{",
-            10,
-            200,
-            agent_client::failure::Kind::InvalidResponse,
         ),
     ] {
         let err = call(response, limit).await.unwrap_err();
@@ -405,7 +397,8 @@ async fn compressed_response_limits_apply_to_decoded_bytes() {
     let encoded = gzip_bytes(b"hello");
     let response = compressed_response(&encoded, "gzip");
     let result = call_bytes(&response, 5).await.unwrap();
-    assert_eq!(result.text.as_deref(), Some("hello"));
+    assert!(result.text.is_none());
+    assert_eq!(result.captured_body.unwrap().bytes(), b"hello");
     assert!(call_bytes(&response, 4).await.is_err());
 }
 
@@ -559,7 +552,7 @@ async fn original_capture_is_shared_but_not_implicitly_serialized() {
     )
     .await
     .unwrap();
-    assert_eq!(output.text.as_deref(), Some("X"));
+    assert!(output.text.is_none());
     let captured = output.captured_body.as_ref().unwrap();
     assert_eq!(captured.bytes(), b"\xef\xbb\xbfX");
     let clone = output.clone();
@@ -595,4 +588,19 @@ async fn capture_rejects_ambiguous_metadata_and_expired_deadlines() {
         .unwrap_err();
     assert_eq!(error.kind, Kind::Timeout);
     assert!(error.retryable);
+}
+
+#[tokio::test]
+async fn complete_arbitrary_bodies_remain_scoreable() {
+    for body in [b"{invalid".as_slice(), b"", &[0xff, 0]] {
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(body);
+        let output = call_bytes(&response, 1024).await.unwrap();
+        assert_eq!(output.captured_body.unwrap().bytes(), body);
+        assert!(output.text.is_none());
+    }
 }

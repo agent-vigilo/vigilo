@@ -121,16 +121,24 @@ impl std::fmt::Debug for RetainedResponse {
     }
 }
 
+/// Compact authority checked by SQL without copying the profile out of blob
+/// storage. Hash the typed configuration exactly as capture does, including null.
+pub(crate) fn policy_identity(
+    profile: &super::run::RunProfile,
+) -> anyhow::Result<serde_json::Value> {
+    Ok(serde_json::json!({
+        "retention": profile.persistence.mode,
+        "configuration_hash": configuration_hash(profile.agent.response.as_ref())?,
+    }))
+}
+
+fn configuration_hash(configuration: Option<&ResponseConfiguration>) -> anyhow::Result<String> {
+    Ok(hash(&bounded_json(&configuration)?))
+}
+
 impl RetainedResponse {
     /// Builds evidence without I/O. Mapping failure keeps raw evidence; no partial
     /// mapped output is accepted. Summary mode retains identities but no content.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Response runtime integration is gated; persistence tests exercise this contract"
-        )
-    )]
     pub(crate) fn capture(
         provenance: Provenance,
         retention: PersistenceMode,
@@ -143,7 +151,7 @@ impl RetainedResponse {
             body.is_none_or(|body| body.bytes().len() <= 4 * 1024 * 1024),
             "original response exceeds retention limit"
         );
-        let configuration_hash = hash(&bounded_json(&configuration)?);
+        let configuration_hash = configuration_hash(configuration)?;
         let mut payload = if full {
             body.map(|body| body.bytes().to_vec()).unwrap_or_default()
         } else {
@@ -597,13 +605,6 @@ fn bounded_json(value: &impl Serialize) -> anyhow::Result<Vec<u8>> {
     serde_json::to_writer(&mut writer, value)?;
     Ok(writer.0)
 }
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Used by the gated capture and reconstruction entry points"
-    )
-)]
 fn transform<S, T>(
     item: &OutputItem<S>,
     convert: &mut impl FnMut(&S) -> anyhow::Result<T>,

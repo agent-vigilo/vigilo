@@ -1131,7 +1131,7 @@ async fn evidence_for_seed(
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("UPDATE run_snapshots SET profile_hash=$3, config_snapshot=$4 WHERE run_id=$1 AND run_shard=$2").bind(seed.run_id).bind(seed.run_shard).bind(metadata["provenance"]["profile_hash"].as_str().unwrap()).bind(json!({"execution_plan_hash":metadata["provenance"]["execution_plan_hash"],"profile":{"persistence":{"mode":metadata["retention"]},"agent":{"response":metadata["configuration"]}}})).execute(pool).await.unwrap();
+    sqlx::query("UPDATE run_snapshots SET profile_hash=$3, config_snapshot=$4 WHERE run_id=$1 AND run_shard=$2").bind(seed.run_id).bind(seed.run_shard).bind(metadata["provenance"]["profile_hash"].as_str().unwrap()).bind(json!({"execution_plan_hash":metadata["provenance"]["execution_plan_hash"],"response_policy":{"retention":metadata["retention"],"configuration_hash":metadata["configuration_hash"]}})).execute(pool).await.unwrap();
     packet
 }
 
@@ -1386,6 +1386,23 @@ async fn retained_response_rejects_stale_or_mismatched_evidence_and_cascades_on_
         .is_err()
     );
     evidence_for_seed(&pool, &seed, crate::contracts::run::PersistenceMode::Full).await;
+    for field in ["retention", "configuration_hash"] {
+        sqlx::query("UPDATE run_snapshots SET config_snapshot=jsonb_set(config_snapshot, ARRAY['response_policy',$3], '\"wrong\"'::jsonb) WHERE run_id=$1 AND run_shard=$2")
+            .bind(seed.run_id).bind(seed.run_shard).bind(field).execute(&pool).await.unwrap();
+        assert!(
+            finalize_execution_terminal_transitions(
+                &pool,
+                seed.run_id,
+                seed.run_shard,
+                seed.worker_id,
+                1,
+                &[transition.clone()]
+            )
+            .await
+            .is_err()
+        );
+        evidence_for_seed(&pool, &seed, crate::contracts::run::PersistenceMode::Full).await;
+    }
     finalize_execution_terminal_transitions(
         &pool,
         seed.run_id,

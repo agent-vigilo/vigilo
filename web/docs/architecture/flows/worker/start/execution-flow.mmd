@@ -61,7 +61,7 @@ sequenceDiagram
                 Vigilo->>WASM: Warm evaluator components
                 WASM-->>Vigilo: Warmup result
                 Vigilo->>Queue: Hold delivery unacked while chunk is owned
-                par Agent calls
+                opt Agent invocation
                     Vigilo->>Vigilo: Validate profile byte limits against worker ceilings
                     opt Profile references a credential
                         Vigilo->>Credentials: Resolve trusted binding with runtime IDs and destination
@@ -71,11 +71,13 @@ sequenceDiagram
                         Vigilo->>Agent: Invoke bounded request with attempt correlation and authorized credential
                         Agent-->>Vigilo: Response headers and encoded body
                         Vigilo->>Vigilo: Capture decoded original bytes under size and deadline limits
+                        Vigilo->>Vigilo: Map once and pack retained evidence with exact provenance
                         Vigilo->>Vigilo: Retain status, HTTP latency, supported usage and Retry-After
                     else Validation or credential resolution fails
                         Vigilo->>Vigilo: Retain bounded failure diagnostics and skip the agent call
                     end
-                and Evaluator calls
+                end
+                opt Complete successful agent invocation
                     Vigilo->>Vigilo: Acquire Wasm evaluation semaphore permits
                     Vigilo->>WASM: Install scoped shared-body resources and check evidence requirements
                     alt Required response evidence unavailable
@@ -86,7 +88,7 @@ sequenceDiagram
                     end
                 end
                 WASM-->>Vigilo: Evaluation outputs; release store resource handles
-                Vigilo->>ExecutionDB: Persist batched results and lease-guarded terminal transitions with invocation diagnostics
+                Vigilo->>ExecutionDB: Persist batched results and lease-guarded terminal transitions with diagnostics and shared response evidence
                 Vigilo->>ExecutionDB: Read chunk execution retry state
                 ExecutionDB-->>Vigilo: Terminal or retry-waiting chunk state
                 alt Executions still waiting for retry

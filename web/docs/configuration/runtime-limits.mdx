@@ -35,6 +35,12 @@ Omitted values use the executing worker's ceilings. A worker rejects zero or
 above-ceiling overrides before sending a request; it does not silently clamp them.
 Use consistent ceilings across workers serving the same workload.
 
+The [response evidence contract](/docs/architecture/response-evidence#retention-and-limits)
+supports at most 4 MiB of original response bytes. Workers reject a larger effective
+response limit before invocation. When the process ceiling is higher, set an explicit
+profile response limit of 4 MiB or less; increasing a transport ceiling does not
+increase the evidence contract's capacity.
+
 Request limits count serialized JSON body bytes, including escaping and UTF-8,
 but not HTTP headers. Responses are bounded while reading, including non-success
 responses, without relying on Content-Length. Transfer framing is not counted.

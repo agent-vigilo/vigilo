@@ -1,7 +1,7 @@
 //! Worker-side client for invoking the configured agent endpoint.
 //!
 //! This module owns request-format adaptation, HTTP transport, and response
-//! normalization into the evaluator `AgentOutput` contract. It returns bounded
+//! capture without inferring response semantics. It returns bounded
 //! operational diagnostics separately so the workflow can retain HTTP outcomes
 //! even when later evaluator processing fails, without additional database calls.
 //!
@@ -68,7 +68,6 @@ use crate::contracts::{
 const REQUEST_FORMAT_VIGILO_CASE: &str = "vigilo_case";
 const REQUEST_FORMAT_OPENAI_COMPATIBLE_CHAT_COMPLETIONS: &str =
     "openai_compatible_chat_completions";
-const INVOCATION_SOURCE: &str = "http_agent_client";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentRequestFormat {
@@ -113,8 +112,10 @@ impl AgentRequestFormat {
 }
 
 pub(crate) fn validate_request_format(run_profile: &RunProfile) -> anyhow::Result<()> {
-    if run_profile.agent.response.is_some() {
-        anyhow::bail!("explicit agent response configuration is not enabled for execution");
+    if let Some(response) = &run_profile.agent.response
+        && let vigilo::response::Interpretation::Json { mapping } = &response.interpretation
+    {
+        mapping.validate().map_err(anyhow::Error::msg)?;
     }
     AgentRequestFormat::from_profile(run_profile).map(|_| ())
 }
@@ -291,141 +292,18 @@ fn response_body_excerpt(body: &str) -> String {
     body.chars().take(MAX_ERROR_BODY_CHARS).collect()
 }
 
-fn parse_response_body(body: &str) -> anyhow::Result<Value> {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return Ok(json!({}));
+/// Preserve complete response bytes without guessing a provider envelope.
+fn captured_output(body: vigilo::response::CapturedBody) -> AgentOutput {
+    AgentOutput {
+        captured_body: Some(body),
+        mapping: None,
+        text: None,
+        structured: None,
+        tool_calls: Vec::new(),
+        trace: Vec::new(),
+        raw: json!({}),
+        metadata: json!({}),
     }
-
-    match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) => Ok(value),
-        Err(err) if trimmed.starts_with('{') || trimmed.starts_with('[') => {
-            anyhow::bail!("agent response body was not valid JSON: {}", err)
-        }
-        Err(_) => Ok(json!({ "text": body })),
-    }
-}
-
-fn string_at(value: &Value, pointer: &str) -> Option<String> {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
-fn extract_agent_response_text(response_json: &Value, output_value: &Value) -> Option<String> {
-    [
-        string_at(output_value, "/text"),
-        string_at(output_value, "/output_text"),
-        string_at(output_value, "/message/content"),
-        string_at(response_json, "/text"),
-        string_at(response_json, "/output_text"),
-        string_at(response_json, "/message/content"),
-        string_at(response_json, "/choices/0/message/content"),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|text| !text.trim().is_empty())
-}
-
-fn extract_agent_response_structured(output_value: &Value) -> Option<Value> {
-    output_value
-        .get("structured_output")
-        .or_else(|| output_value.get("json"))
-        .cloned()
-}
-
-fn parse_structured_text(text: &str) -> Option<Value> {
-    let trimmed = text.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return None;
-    }
-
-    serde_json::from_str(trimmed).ok()
-}
-
-fn is_empty_object(value: &Value) -> bool {
-    matches!(value, Value::Object(map) if map.is_empty())
-}
-
-fn output_from_response_json(response_json: Value) -> anyhow::Result<AgentOutput> {
-    let output_value = response_json
-        .get("actual")
-        .or_else(|| response_json.get("output"))
-        .cloned()
-        .unwrap_or_else(|| response_json.clone());
-
-    if let Value::String(text) = &output_value {
-        return Ok(AgentOutput {
-            captured_body: None,
-            text: Some(text.clone()),
-            structured: None,
-            tool_calls: Vec::new(),
-            trace: Vec::new(),
-            raw: response_json,
-            metadata: json!({}),
-        });
-    }
-
-    let mut output = serde_json::from_value::<AgentOutput>(output_value.clone())
-        .map_err(|err| anyhow::anyhow!("agent response did not match output envelope: {}", err))?;
-
-    if output.text.is_none() {
-        output.text = extract_agent_response_text(&response_json, &output_value);
-    }
-
-    if output.structured.is_none() {
-        output.structured = extract_agent_response_structured(&output_value);
-    }
-
-    if output.structured.is_none() {
-        output.structured = output.text.as_deref().and_then(parse_structured_text);
-    }
-
-    if is_empty_object(&output.raw) {
-        output.raw = response_json;
-    }
-
-    Ok(output)
-}
-
-fn invocation_metadata(
-    run_profile: &RunProfile,
-    http_status: Option<u16>,
-    latency_ms: u64,
-) -> Value {
-    json!({
-        "source": INVOCATION_SOURCE,
-        "http_status": http_status,
-        "latency_ms": latency_ms,
-        "agent": {
-            "provider": &run_profile.agent.provider,
-            "name": &run_profile.agent.name,
-            "version": &run_profile.agent.version,
-            "model": &run_profile.agent.model,
-            "config": &run_profile.agent.config,
-        }
-    })
-}
-
-fn attach_invocation_metadata(
-    mut output: AgentOutput,
-    run_profile: &RunProfile,
-    http_status: Option<u16>,
-    latency_ms: u64,
-) -> AgentOutput {
-    let invocation = invocation_metadata(run_profile, http_status, latency_ms);
-    output.metadata = match output.metadata {
-        Value::Object(mut map) => {
-            map.insert("vigilo_invocation".to_string(), invocation);
-            Value::Object(map)
-        }
-        other => json!({
-            "value": other,
-            "vigilo_invocation": invocation,
-        }),
-    };
-    output
 }
 
 /// Attach bounded evidence to every typed outcome without changing retry policy.
@@ -454,22 +332,10 @@ pub(crate) async fn invoke(
     )
     .await;
     match result {
-        Ok(mut output) => {
-            let diagnostics = observation.finish(None);
-            let metadata = output
-                .metadata
-                .get_mut("vigilo_invocation")
-                .and_then(Value::as_object_mut)
-                .expect("host invocation metadata is an object");
-            let Value::Object(fields) = serde_json::to_value(&diagnostics)? else {
-                unreachable!()
-            };
-            metadata.extend(fields);
-            Ok(Invocation {
-                output,
-                diagnostics,
-            })
-        }
+        Ok(output) => Ok(Invocation {
+            output,
+            diagnostics: observation.finish(None),
+        }),
         Err(error) => match error.downcast::<Failure>() {
             Ok(mut failure) => {
                 failure.invocation = Some(Box::new(observation.finish(Some(failure.kind))));
@@ -632,26 +498,15 @@ async fn invoke_inner(
         .into());
     }
 
-    let response_json = parse_response_body(&body).map_err(|err| {
-        Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
-    })?;
+    // Usage is operational data for the explicitly selected request adapter;
+    // parsing failure never invalidates successfully delivered behavior.
     if AgentRequestFormat::from_profile(run_profile)?
         == AgentRequestFormat::OpenAiCompatibleChatCompletions
+        && let Ok(value) = serde_json::from_slice::<Value>(captured.bytes())
     {
-        observation.data.usage = diagnostics::chat_usage(&response_json);
+        observation.data.usage = diagnostics::chat_usage(&value);
     }
-    let mut output = output_from_response_json(response_json).map_err(|err| {
-        Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
-    })?;
-
-    output.captured_body = Some(captured);
-
-    Ok(attach_invocation_metadata(
-        output,
-        run_profile,
-        Some(status.as_u16()),
-        observation.data.latency_ms.unwrap_or(0),
-    ))
+    Ok(captured_output(captured))
 }
 
 #[cfg(test)]
@@ -659,79 +514,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_response_body_accepts_plain_text() {
-        let value = parse_response_body("plain response").unwrap();
-        assert_eq!(value, json!({ "text": "plain response" }));
-    }
-
-    #[test]
-    fn output_from_response_json_reads_nested_actual() {
-        let output = output_from_response_json(json!({
-            "actual": {
-                "text": "classified positive",
-                "structured": {
-                    "label": "positive"
-                }
-            },
-            "provider_request_id": "req_123"
-        }))
-        .unwrap();
-
-        assert_eq!(output.text.as_deref(), Some("classified positive"));
-        assert_eq!(
-            output
-                .structured
-                .as_ref()
-                .and_then(|value| value.get("label"))
-                .and_then(Value::as_str),
-            Some("positive")
-        );
-        assert_eq!(
-            output
-                .raw
-                .get("provider_request_id")
-                .and_then(Value::as_str),
-            Some("req_123")
-        );
-    }
-
-    #[test]
-    fn output_from_response_json_extracts_common_message_shape() {
-        let output = output_from_response_json(json!({
-            "choices": [
-                {
-                    "message": {
-                        "content": "hello from the model"
-                    }
-                }
-            ]
-        }))
-        .unwrap();
-
-        assert_eq!(output.text.as_deref(), Some("hello from the model"));
-    }
-
-    #[test]
-    fn output_from_response_json_parses_structured_chat_content() {
-        let output = output_from_response_json(json!({
-            "choices": [
-                {
-                    "message": {
-                        "content": "{\"label\":\"positive\"}"
-                    }
-                }
-            ]
-        }))
-        .unwrap();
-
-        assert_eq!(
-            output
-                .structured
-                .as_ref()
-                .and_then(|value| value.get("label"))
-                .and_then(Value::as_str),
-            Some("positive")
-        );
+    fn captured_output_does_not_infer_or_decode_response_shapes() {
+        for bytes in [
+            b"{invalid".as_slice(),
+            b"",
+            &[0xff, 0],
+            br#"{"text":"secret","choices":[]}"#,
+        ] {
+            let output = captured_output(vigilo::response::CapturedBody::new(bytes.to_vec(), None));
+            assert_eq!(output.captured_body.unwrap().bytes(), bytes);
+            assert!(output.text.is_none());
+            assert!(output.structured.is_none());
+            assert!(output.mapping.is_none());
+            assert_eq!(output.raw, json!({}));
+            assert_eq!(output.metadata, json!({}));
+        }
     }
 
     #[test]

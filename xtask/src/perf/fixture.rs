@@ -259,6 +259,14 @@ fn profile_value(
         "agent": {
             "provider": "vigilo-performance",
             "name": "deterministic-agent",
+            "response": {
+                "schema_version": "1.0.0",
+                "interpretation": {"format": "json", "mapping": {"items": [{
+                    "mode": "single", "item": {"type": "message", "content": [{
+                        "media_type": "text/plain", "source": {"representation": "inline_text", "selection": {"pointer": "/text"}}
+                    }]}
+                }]}}
+            },
             "http": {"url": agent_url}
         },
         "case_groups": [{

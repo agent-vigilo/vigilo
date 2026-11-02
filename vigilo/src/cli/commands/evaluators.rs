@@ -31,10 +31,7 @@ use super::{
 };
 use crate::{
     context::Context,
-    contracts::{
-        evaluator::EvaluatorInput,
-        evaluator_ref::parse_fully_qualified_evaluator,
-    },
+    contracts::evaluator_ref::parse_fully_qualified_evaluator,
     db::tables::evaluators,
     models::evaluator::{
         EvaluatorPatch,

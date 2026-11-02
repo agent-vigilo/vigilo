@@ -196,6 +196,9 @@ async fn admit(
     let mut snapshot_template = draft.config_snapshot.clone();
     snapshot_template["storage_limits"] = serde_json::to_value(&reader.limits)?;
     snapshot_template["profile"] = json!({"scorecard":{"gates":gates}});
+    let profile = serde_json::from_value(reader.configuration.snapshot["profile"].clone())?;
+    snapshot_template["response_policy"] =
+        crate::contracts::response_retention::policy_identity(&profile)?;
     let mut gate_counts = BTreeMap::new();
     let mut expected = BTreeMap::new();
     let mut clock = lease::Clock::new();

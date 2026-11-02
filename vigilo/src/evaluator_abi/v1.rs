@@ -27,6 +27,8 @@ use crate::{
     },
 };
 
+mod evidence;
+
 const WIT: &[u8] = include_bytes!("../../wit/evaluator/v1.0.0/evaluator.wit");
 
 mod bindings {
@@ -84,33 +86,15 @@ impl EvaluatorAbiAdapter for V1Adapter {
         input: EvaluatorInput,
     ) -> anyhow::Result<EvaluatorOutput> {
         let mut store = runtime.evaluator_store()?;
-        let captured = input
-            .actual
-            .captured_body
-            .clone()
-            .map(|body| store.data_mut().install_response_body(body))
-            .transpose()?;
         let instance = instance_pre.instantiate(&mut store)?;
         let bindings = bindings::EvaluatorWorld::new(&mut store, &instance)?;
         let requirements = bindings
             .vigilo_evaluator_evaluator()
             .call_requirements(&mut store)?;
-        validate_available_evidence(&requirements, captured.is_some())?;
+        evidence::validate(&requirements, &input.actual)?;
+        let response_evidence = evidence::bind(store.data_mut(), &input.actual)?;
         let mut input = map_input(input)?;
-        input.response_evidence =
-            captured.map(
-                |body| bindings::vigilo::evaluator::types::ResponseEvidence {
-                    schema_version: "1.0.0".into(),
-                    body: bindings::vigilo::evaluator::types::BodyMetadata {
-                        resource: body.resource.0,
-                        byte_length: body.byte_length,
-                        content_type: body.content_type,
-                    },
-                    items: None,
-                    status: None,
-                    stop_reason: None,
-                },
-            );
+        input.response_evidence = response_evidence;
         let output = bindings
             .vigilo_evaluator_evaluator()
             .call_evaluate(&mut store, &input)
@@ -179,24 +163,6 @@ impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
     ) -> Result<bindings::vigilo::evaluator::executor::HttpResponse, String> {
         Err("send_http_request is not enabled yet; outbound HTTP policy enforcement is not configured".to_string())
     }
-}
-
-/// Reject unsatisfied declared evidence before the evaluator can score a case.
-/// Original bytes are available only when captured by the host; mapped evidence
-/// is not inferred from the legacy actual-output fields.
-fn validate_available_evidence(
-    requirements: &bindings::vigilo::evaluator::types::EvidenceRequirements,
-    has_original_body: bool,
-) -> anyhow::Result<()> {
-    if (requirements.original_body && !has_original_body)
-        || requirements.mapped_items
-        || !requirements.content_media_types.is_empty()
-        || requirements.tool_calls
-        || requirements.tool_results
-    {
-        anyhow::bail!("evaluator requires response evidence unavailable on this execution path");
-    }
-    Ok(())
 }
 
 fn parse_json(field_name: &str, raw: &str) -> anyhow::Result<Value> {
@@ -367,33 +333,6 @@ mod tests {
         ToolCall,
     };
 
-    #[test]
-    fn evidence_requirements_fail_closed_individually() {
-        use bindings::vigilo::evaluator::types::EvidenceRequirements;
-        let empty = || EvidenceRequirements {
-            original_body: false,
-            mapped_items: false,
-            content_media_types: vec![],
-            tool_calls: false,
-            tool_results: false,
-        };
-        assert!(validate_available_evidence(&empty(), false).is_ok());
-        let mut original = empty();
-        original.original_body = true;
-        assert!(validate_available_evidence(&original, true).is_ok());
-        for field in 0..5 {
-            let mut requirements = empty();
-            match field {
-                0 => requirements.original_body = true,
-                1 => requirements.mapped_items = true,
-                2 => requirements.content_media_types.push("text/plain".into()),
-                3 => requirements.tool_calls = true,
-                _ => requirements.tool_results = true,
-            }
-            assert!(validate_available_evidence(&requirements, false).is_err());
-        }
-    }
-
     fn evaluator_input() -> EvaluatorInput {
         EvaluatorInput {
             run_id: "run-1".to_string(),
@@ -411,6 +350,7 @@ mod tests {
             },
             actual: AgentOutput {
                 captured_body: None,
+                mapping: None,
                 text: Some("positive".to_string()),
                 structured: Some(json!({"label": "positive"})),
                 tool_calls: vec![ToolCall {

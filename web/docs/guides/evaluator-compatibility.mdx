@@ -116,9 +116,10 @@ reason are separate: a completed response can be a refusal.
 The `requirements` export declares original-body, mapped-item, content-media-type,
 and tool evidence requirements. A successful HTTP invocation supplies its captured
 original body to the evaluator. Calls without captured bytes cannot satisfy an
-original-body requirement. Mapped-item requirements are rejected because mapped
-response evidence is not supplied on this execution path. The sentiment example
-reads `input.actual` and declares none of these additional requirements.
+original-body requirement. Mapped requirements are checked against the atomic mapping result. Missing media
+types or tool evidence produce an explicit evaluator error. Mapping failure does
+not prevent an independent original-body evaluator from running. The sentiment example requires mapped `text/plain` message content and never
+substitutes the case prompt for a missing answer.
 
 `executor.read-resource(handle, offset, max-bytes)` reads original bytes on demand.
 The host shares immutable allocations across evaluators and copies only the requested

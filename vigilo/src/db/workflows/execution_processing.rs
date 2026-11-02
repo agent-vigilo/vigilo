@@ -5,6 +5,8 @@
 //! It also owns evaluator runtime lookup and single-flight component loading so
 //! concurrent workers do not repeatedly compile the same evaluator artifact.
 
+pub(crate) mod response;
+
 use std::{
     collections::{
         BTreeMap,
@@ -866,6 +868,7 @@ async fn evaluate_case_execution(
     run_shard: i16,
     run_profile: &RunProfile,
     evaluator_catalog: &RunEvaluatorCatalog,
+    response_identity: &response::Identity,
     case: &chunk_processing::WorkerCaseBatchItem,
     evaluator_bindings: &[EvaluatorBinding],
     aggregation: &AggregationSettings,
@@ -890,12 +893,33 @@ async fn evaluate_case_execution(
     };
     let attempt_no = allocation.attempt_no;
     let mut agent_invocation = None;
+    let mut response_evidence = None;
+    let provenance = crate::contracts::response_retention::Provenance {
+        run_id,
+        execution_id,
+        attempt_id,
+        case_hash: case.case_hash.clone(),
+        profile_hash: response_identity.profile_hash.clone(),
+        execution_plan_hash: response_identity.execution_plan_hash.clone(),
+        runtime_artifact_digest: response_identity.runtime_artifact_digest.clone(),
+        external_dependencies: crate::contracts::response_retention::ExternalDependencies::None,
+    };
 
     let evaluation_result: anyhow::Result<(
         Vec<AggregationBinding>,
         Vec<EvaluatorExecutionRecord>,
         Vec<evaluator_results::EvaluatorResultInsertRow>,
     )> = async {
+        response_evidence = Some(
+            crate::contracts::response_retention::RetainedResponse::capture(
+                provenance.clone(),
+                run_profile.persistence.mode.clone(),
+                None,
+                run_profile.agent.response.as_ref(),
+                None,
+            )?,
+        );
+        response::validate_limits(context.agent_http_limits(), run_profile)?;
         let test_case = make_test_case(case)?;
         let http = context.http().await?;
         let invocation = agent_client::invoke(
@@ -913,7 +937,9 @@ async fn evaluate_case_execution(
         .await
         .map_err(|err| err.context("agent invocation failed"))?;
         agent_invocation = Some(invocation.diagnostics);
-        let agent_output = invocation.output;
+        let (agent_output, retained) =
+            response::prepare(invocation.output, run_profile, provenance).await?;
+        response_evidence = Some(retained);
 
         let aggregation_bindings = evaluator_bindings
             .iter()
@@ -1293,6 +1319,7 @@ async fn evaluate_case_execution(
                                 failure_message,
                             );
                             processed.terminal_transition.agent_invocation = agent_invocation;
+                            processed.terminal_transition.response_evidence = response_evidence;
                             processed
                         }),
                         persistence: None,
@@ -1323,7 +1350,7 @@ async fn evaluate_case_execution(
                     requires_worker_lease: true,
                     agent_invocation: agent_invocation.clone(),
                     agent_failure: None,
-                    response_evidence: None,
+                    response_evidence,
                 },
             };
 
@@ -1359,6 +1386,7 @@ async fn evaluate_case_execution(
                 .and_then(|failure| failure.invocation.as_deref().cloned())
                 .or(agent_invocation);
             processed.terminal_transition.agent_failure = agent_failure;
+            processed.terminal_transition.response_evidence = response_evidence;
             CaseExecutionOutcome {
                 processed: Some(processed),
                 persistence: None,
@@ -1392,6 +1420,7 @@ pub(crate) async fn process_case_batch_execution(
     lease: &AttemptLeaseContext,
     run_profile: &RunProfile,
     evaluator_catalog: &RunEvaluatorCatalog,
+    response_identity: &response::Identity,
     cases: &[chunk_processing::WorkerCaseBatchItem],
 ) -> anyhow::Result<Vec<ProcessedExecution>> {
     if cases.is_empty() {
@@ -1482,6 +1511,7 @@ pub(crate) async fn process_case_batch_execution(
                         run_shard,
                         run_profile,
                         evaluator_catalog,
+                        response_identity,
                         case,
                         &evaluation_plan.evaluator_bindings,
                         &evaluation_plan.aggregation,

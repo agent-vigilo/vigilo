@@ -3,6 +3,9 @@
 //! These types represent the canonical payload exchanged between a WASM evaluator and
 //! the host runtime before persistence/aggregation mapping.
 
+#[path = "evaluator/test_input.rs"]
+pub(crate) mod test_input;
+
 use std::{
     collections::BTreeMap,
     fmt,
@@ -72,6 +75,16 @@ pub(crate) struct AgentOutput {
     /// Persistence explicitly owns durable evidence; live resources never enter JSON.
     #[serde(skip)]
     pub(crate) captured_body: Option<vigilo::response::CapturedBody>,
+    /// Atomic interpretation shared across evaluators; failures leave original bytes available.
+    #[serde(skip)]
+    pub(crate) mapping: Option<
+        std::sync::Arc<
+            Result<
+                vigilo::response_mapping::MappedResponse,
+                vigilo::response_mapping::MappingError,
+            >,
+        >,
+    >,
     /// Final user-visible text output, when applicable.
     #[serde(default)]
     pub(crate) text: Option<String>,

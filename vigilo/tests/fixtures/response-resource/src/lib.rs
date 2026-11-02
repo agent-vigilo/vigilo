@@ -24,7 +24,30 @@ impl Guest for Evaluator {
     }
 
     fn evaluate(input: Input) -> Result<Output, EvaluatorError> {
-        let body = input.response_evidence.expect("required evidence").body;
+        let evidence = input.response_evidence.expect("required evidence");
+        let body = evidence.body;
+        let mapped = input.evaluator_config_json.contains("mapped");
+        if mapped {
+            let items = evidence.items.expect("mapped items");
+            assert_eq!(items.len(), 2);
+            let OutputItem::Message(message) = &items[0] else {
+                panic!("message order")
+            };
+            let ContentSource::InlineText(text) = &message.content[0].source else {
+                panic!("inline text")
+            };
+            assert_eq!(text, "hello");
+            let OutputItem::ToolCall(call) = &items[1] else {
+                panic!("tool order")
+            };
+            let ContentSource::Resource(resource) = &call.arguments.source else {
+                panic!("decoded resource")
+            };
+            assert_eq!(
+                executor::read_resource(resource.handle, 0, 4).unwrap(),
+                [0, 255, 42, 10]
+            );
+        }
         let handle = body.resource;
         if let Ok(foreign) = input.evaluator_config_json.parse::<u64>() {
             assert!(matches!(
@@ -78,7 +101,9 @@ impl Guest for Evaluator {
                 content_hash: None,
                 interface_version: Some("1.0.0".into()),
             },
-            outcome: EvaluatorOutcome::Completed(Measurement::Binary(bytes == [0, 255, 42, 10])),
+            outcome: EvaluatorOutcome::Completed(Measurement::Binary(
+                mapped || bytes == [0, 255, 42, 10],
+            )),
             diagnostics: vec![],
             metadata_json: handle.to_string(),
         })

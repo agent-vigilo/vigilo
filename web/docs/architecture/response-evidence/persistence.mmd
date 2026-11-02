@@ -1,9 +1,14 @@
 flowchart TD
-    caller[Caller supplies an attempt-scoped response packet] --> pack[Bound and validate metadata and bytes]
+    capture[Capture complete successful agent body] --> mapping[Apply explicit mapping once per attempt]
+    mapping --> packet[Pack shared evidence and exact provenance]
+    mapping --> evaluator[Check each evaluator requirements and bind scoped resources]
+    evaluator --> outcome[Evaluate available evidence and release resources]
+    packet --> pack[Bound and validate metadata and bytes]
+    outcome --> transaction
     pack --> owner{Run, execution and attempt match?}
     owner -->|No| reject[Reject without publishing evidence]
     owner -->|Yes| transaction[Existing batched terminal transaction]
-    snapshot[Frozen case, profile and execution plan] --> guard
+    snapshot[Frozen case, profile and execution plan hashes plus response policy] --> guard
     transaction --> guard{Live ownership and frozen provenance match?}
     guard -->|No| reject
     guard -->|Yes| update[Same attempt UPDATE stores metadata and byte payload]

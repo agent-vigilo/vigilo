@@ -9,12 +9,15 @@ Shared evaluator guidance: `evaluators/AGENTS.md`
 
 ## Input
 
-The evaluator consumes a WIT `input` envelope. This evaluator reads text from:
+The evaluator consumes explicitly mapped `text/plain` message parts in
+`input.response-evidence.items`, preserving message and part order. Parts are
+separated by newlines before lexicon scoring. Other media and tool events are not
+scored. Missing, empty, or whitespace-only mapped text is an evaluation error;
+the case prompt and `actual.text` are never substitutes.
 
-- `input.actual.text` (preferred)
-- `input.test_case.input_json.user_message` (fallback)
-
-Text values can be plain text or a JSON object containing a `text` field.
+Configure the agent profile to select the answer, for example `/text` for
+`{"text":"Great service"}` or `/choices/0/message/content` for a chat response.
+See [Response Mapping](https://agentvigilo.com/docs/configuration/run-profile#explicit-response-contracts).
 
 ## Limitations
 
@@ -24,9 +27,11 @@ Text values can be plain text or a JSON object containing a `text` field.
 
 ## Evidence Requirements
 
-The `requirements` export declares no resource-backed response requirements.
-This evaluator consumes `input.actual` as described above; it does not read
-`input.response-evidence` or call `read-resource`.
+The `requirements` export requires mapped items and `text/plain` content.
+Inline text and explicitly mapped body ranges or decoded resources are supported.
+Resource reads use the host's invocation-scoped handles in chunks of at most 64 KiB.
+Combined text is limited to 4 MiB and must be UTF-8. JSON-looking text is scored as
+literal text; it is never parsed for another answer field.
 
 ## Output
 
@@ -42,7 +47,7 @@ The output includes:
 - `measurement`: ordinal sentiment label (`positive`, `neutral`, or `negative`)
 - diagnostic `severity`: `medium` for negative, otherwise `none`
 - diagnostic `category`: `sentiment_classification`
-- `evidence_json`: JSON string with `label`, `score`, matches, and normalized text
+- `evidence_json`: JSON string with `label`, `score`, matches, and evaluated text
 - `tags`: includes `basic` and `english-only` to make scope explicit
 
 The run profile maps those labels to scores and owns the pass threshold,
@@ -71,3 +76,8 @@ or Rust toolchain. See [Publishing Evaluators](https://agentvigilo.com/docs/guid
 ```bash
 vigilo evaluator test 'vigilo/sentiment-basic-en:0.1.0' --input-file evaluators/sentiment-basic-en/example-input.json
 ```
+
+The example file includes a `response` fixture with a UTF-8 `body`, optional
+`content_type`, and explicit `configuration`. The test command applies that mapping
+and installs fresh host resources, without calling an agent. It does not accept
+live resource handles from JSON.

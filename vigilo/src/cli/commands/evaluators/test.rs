@@ -55,8 +55,7 @@ pub(super) async fn exec(
         _ => anyhow::bail!("exactly one of --input or --input-file must be provided"),
     };
 
-    let parsed_input: EvaluatorInput = serde_json::from_str(&input_raw)
-        .map_err(|err| anyhow::anyhow!("invalid evaluator test input json: {}", err))?;
+    let parsed_input = crate::contracts::evaluator::test_input::decode_input(&input_raw)?;
 
     let abi = crate::contracts::evaluator_abi::EvaluatorAbiIdentity {
         package: evaluator_record

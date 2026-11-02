@@ -11,7 +11,9 @@ The profile points at `http://agent_vigilo_agent:8080/v1/chat/completions`, the 
 
 The example uses one `quality` dimension. Each execution must meet `defaults.min_execution_score`, then the run-level `quality_release` scorecard gate requires complete coverage, no errors or abstentions, and a mean quality score of at least `0.85`.
 
-The evaluator returns an ordinal sentiment label. `profile.yaml` explicitly maps `positive`, `neutral`, and `negative` to scores; see the [normalization reference](../web/docs/configuration/measurement-normalization.mdx) for every measurement type.
+The agent rewrites each message while preserving its sentiment. The profile explicitly
+maps `/choices/0/message/content` to `text/plain`; the evaluator scores the returned
+text rather than the case prompt. The evaluator returns an ordinal sentiment label. `profile.yaml` explicitly maps `positive`, `neutral`, and `negative` to scores; see the [normalization reference](../web/docs/configuration/measurement-normalization.mdx) for every measurement type.
 
 Each example dataset case sets `case_group: sentiment_classification`, which explicitly routes the case to the matching profile case group. If `case_group` is omitted, Vigilo falls back to `task_type` and tag matching.
 

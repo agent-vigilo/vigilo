@@ -1,3 +1,6 @@
+//! English lexicon sentiment over explicitly mapped text message content.
+//! The evaluator never substitutes the case prompt, guesses JSON fields, or scores
+//! tool arguments. Resource-backed text is read through bounded host capabilities.
 wit_bindgen::generate!({
     path: "../../vigilo/wit/evaluator/v1.0.0/evaluator.wit",
     world: "evaluator-world",
@@ -40,53 +43,81 @@ const NEGATIVE_TERMS: &[&str] = &[
     "bad", "terrible", "awful", "hate", "slow", "angry", "sad", "bug", "failure", "poor",
 ];
 
-fn extract_text(raw: &str) -> Result<String, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("context.db must not be empty".to_string());
+const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Read exactly the declared range, rejecting short reads, invalid UTF-8, or
+/// exhausted budgets before any score is produced.
+fn read_text(handle: u64, offset: u64, length: u64, remaining: usize) -> Result<String, String> {
+    if length > remaining as u64 || offset.checked_add(length).is_none() {
+        return Err("mapped text exceeds evaluator byte limit".into());
     }
-
-    // Accept either plain text input or a JSON object containing a text payload.
-    if trimmed.starts_with('{') {
-        let parsed: serde_json::Value = serde_json::from_str(trimmed)
-            .map_err(|err| format!("invalid JSON in context.db: {err}"))?;
-
-        let obj = parsed
-            .as_object()
-            .ok_or_else(|| "context.db JSON must be an object".to_string())?;
-
-        if let Some(text) = obj.get("text").and_then(|value| value.as_str()) {
-            let text = text.trim();
-            if text.is_empty() {
-                return Err("context.db.text must not be empty".to_string());
-            }
-            return Ok(text.to_string());
+    let mut bytes = Vec::with_capacity(length as usize);
+    while bytes.len() < length as usize {
+        let count = (length as usize - bytes.len()).min(64 * 1024) as u32;
+        let chunk = executor::read_resource(handle, offset + bytes.len() as u64, count)
+            .map_err(|_| "mapped text resource is unavailable".to_string())?;
+        if chunk.is_empty() || chunk.len() > count as usize {
+            return Err("mapped text resource returned an invalid range".into());
         }
-
-        return Err("context.db JSON must contain a non-empty string field 'text'".to_string());
+        bytes.extend(chunk);
     }
-
-    Ok(trimmed.to_string())
+    String::from_utf8(bytes).map_err(|_| "mapped text is not UTF-8".into())
 }
 
+/// Score only text/plain message parts, in declared order. Each part is separated
+/// by a newline so tokens cannot merge across independent content boundaries.
 fn extract_text_from_input(input: &Input) -> Result<String, String> {
-    if let Some(text) = input.actual.text.as_deref()
-        && let Ok(parsed) = extract_text(text)
-    {
-        return Ok(parsed);
+    use vigilo::evaluator::types::{
+        ContentSource,
+        OutputItem,
+    };
+    let evidence = input
+        .response_evidence
+        .as_ref()
+        .ok_or("mapped response evidence is required")?;
+    let items = evidence
+        .items
+        .as_ref()
+        .ok_or("mapped response items are required")?;
+    let mut text = String::new();
+    for item in items {
+        let OutputItem::Message(message) = item else {
+            continue;
+        };
+        for part in &message.content {
+            if part.media_type != "text/plain" {
+                continue;
+            }
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let remaining = MAX_TEXT_BYTES
+                .checked_sub(text.len())
+                .ok_or("mapped text exceeds evaluator byte limit")?;
+            let value = match &part.source {
+                ContentSource::InlineText(value) => {
+                    if value.len() > remaining {
+                        return Err("mapped text exceeds evaluator byte limit".into());
+                    }
+                    value.clone()
+                }
+                ContentSource::BodyRange(range) => read_text(
+                    evidence.body.resource,
+                    range.offset,
+                    range.byte_length,
+                    remaining,
+                )?,
+                ContentSource::Resource(resource) => {
+                    read_text(resource.handle, 0, resource.byte_length, remaining)?
+                }
+            };
+            text.push_str(&value);
+        }
     }
-
-    let input_json: serde_json::Value = serde_json::from_str(&input.test_case.input_json)
-        .map_err(|err| format!("invalid test-case.input-json: {err}"))?;
-
-    if let Some(user_message) = input_json
-        .get("user_message")
-        .and_then(serde_json::Value::as_str)
-    {
-        return extract_text(user_message);
+    if text.trim().is_empty() {
+        return Err("nonempty mapped text/plain message content is required".into());
     }
-
-    Err("input must include actual.text or test-case.input-json.user_message".to_string())
+    Ok(text)
 }
 
 fn tokenize(text: &str) -> Vec<String> {
@@ -130,8 +161,8 @@ impl Guest for Evaluator {
     fn requirements() -> vigilo::evaluator::types::EvidenceRequirements {
         vigilo::evaluator::types::EvidenceRequirements {
             original_body: false,
-            mapped_items: false,
-            content_media_types: Vec::new(),
+            mapped_items: true,
+            content_media_types: vec!["text/plain".into()],
             tool_calls: false,
             tool_results: false,
         }
@@ -210,7 +241,6 @@ export!(Evaluator);
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_text,
         extract_text_from_input,
         label_from_score,
         score_text,
@@ -249,83 +279,108 @@ mod tests {
         assert_eq!(label_from_score(score), "neutral");
     }
 
-    #[test]
-    fn extract_text_accepts_plain_text() {
-        let text = extract_text("  plain text input  ").unwrap();
-        assert_eq!(text, "plain text input");
-    }
-
-    #[test]
-    fn extract_text_accepts_json_payload() {
-        let text = extract_text(r#"{"text":"Excellent response"}"#).unwrap();
-        assert_eq!(text, "Excellent response");
-    }
-
-    #[test]
-    fn extract_text_rejects_invalid_or_empty_input() {
-        assert!(extract_text("   ").is_err());
-        assert!(extract_text(r#"{"message":"missing text"}"#).is_err());
-    }
-
-    #[test]
-    fn extract_text_from_input_prefers_actual_text() {
-        let input = Input {
-            run_id: "run-1".to_string(),
-            execution_id: "exec-1".to_string(),
-            attempt_id: "attempt-1".to_string(),
+    fn input() -> Input {
+        Input {
+            run_id: "run".into(),
+            execution_id: "execution".into(),
+            attempt_id: "attempt".into(),
             test_case: TestCase {
-                id: "case-1".to_string(),
-                task_type: "classification".to_string(),
+                id: "case".into(),
+                task_type: "classification".into(),
                 case_group: None,
-                input_json: r#"{"user_message":"fallback"}"#.to_string(),
+                input_json: r#"{"user_message":"great prompt"}"#.into(),
                 expected_json: None,
                 context_json: None,
                 tags: vec![],
-                metadata_json: "{}".to_string(),
+                metadata_json: "{}".into(),
             },
             response_evidence: None,
             actual: AgentOutput {
-                text: Some("great experience".to_string()),
+                text: Some("great legacy text".into()),
                 structured_json: None,
                 tool_calls: vec![],
                 trace: vec![],
-                raw_json: "{}".to_string(),
-                metadata_json: "{}".to_string(),
+                raw_json: "{}".into(),
+                metadata_json: "{}".into(),
             },
-            evaluator_config_json: "{}".to_string(),
-        };
-
-        assert_eq!(extract_text_from_input(&input).unwrap(), "great experience");
+            evaluator_config_json: "{}".into(),
+        }
     }
-
+    fn mapped(parts: &[(&str, &str)]) -> Input {
+        use crate::vigilo::evaluator::types::*;
+        let mut input = input();
+        input.response_evidence = Some(ResponseEvidence {
+            schema_version: "1.0.0".into(),
+            body: BodyMetadata {
+                resource: 1,
+                byte_length: 0,
+                content_type: None,
+            },
+            items: Some(vec![OutputItem::Message(Message {
+                id: None,
+                role: None,
+                content: parts
+                    .iter()
+                    .map(|(media, text)| ContentPart {
+                        media_type: (*media).into(),
+                        source: ContentSource::InlineText((*text).into()),
+                    })
+                    .collect(),
+            })]),
+            status: None,
+            stop_reason: None,
+        });
+        input
+    }
     #[test]
-    fn extract_text_from_input_falls_back_when_actual_text_is_empty() {
-        let input = Input {
-            run_id: "run-1".to_string(),
-            execution_id: "exec-1".to_string(),
-            attempt_id: "attempt-1".to_string(),
-            test_case: TestCase {
-                id: "case-1".to_string(),
-                task_type: "classification".to_string(),
-                case_group: None,
-                input_json: r#"{"user_message":"fallback message"}"#.to_string(),
-                expected_json: None,
-                context_json: None,
-                tags: vec![],
-                metadata_json: "{}".to_string(),
-            },
-            response_evidence: None,
-            actual: AgentOutput {
-                text: Some("   ".to_string()),
-                structured_json: None,
-                tool_calls: vec![],
-                trace: vec![],
-                raw_json: "{}".to_string(),
-                metadata_json: "{}".to_string(),
-            },
-            evaluator_config_json: "{}".to_string(),
+    fn missing_mapping_never_falls_back_to_prompt_or_actual_text() {
+        assert!(extract_text_from_input(&input()).is_err());
+        let mut value = mapped(&[]);
+        assert!(extract_text_from_input(&value).is_err());
+        value.response_evidence.as_mut().unwrap().items = None;
+        assert!(extract_text_from_input(&value).is_err());
+    }
+    #[test]
+    fn mapped_text_preserves_order_and_does_not_parse_json_or_score_other_media() {
+        let value = mapped(&[
+            ("text/plain", "bad"),
+            ("image/png", "great"),
+            ("text/plain", "slow"),
+        ]);
+        let text = extract_text_from_input(&value).unwrap();
+        assert_eq!(text, "bad\nslow");
+        assert_eq!(label_from_score(score_text(&text).0), "negative");
+        let literal = r#"{"text":"good"}"#;
+        assert_eq!(
+            extract_text_from_input(&mapped(&[("text/plain", literal)])).unwrap(),
+            literal
+        );
+    }
+    #[test]
+    fn mapped_text_rejects_empty_wrong_media_and_oversize_content() {
+        for parts in [
+            vec![],
+            vec![("text/plain", "  ")],
+            vec![("application/json", "good")],
+        ] {
+            assert!(extract_text_from_input(&mapped(&parts)).is_err());
+        }
+        assert!(
+            extract_text_from_input(&mapped(&[(
+                "text/plain",
+                &"x".repeat(super::MAX_TEXT_BYTES + 1)
+            )]))
+            .is_err()
+        );
+    }
+    #[test]
+    fn requirements_are_explicit() {
+        use super::{
+            Evaluator,
+            Guest,
         };
-
-        assert_eq!(extract_text_from_input(&input).unwrap(), "fallback message");
+        let requirements = Evaluator::requirements();
+        assert!(requirements.mapped_items);
+        assert_eq!(requirements.content_media_types, ["text/plain"]);
     }
 }

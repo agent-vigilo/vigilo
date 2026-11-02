@@ -160,7 +160,8 @@ async fn service_protocol_resolves_for_runtime_scope_without_enterprise_dependen
         .await
         .unwrap();
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-    assert_eq!(output.text.as_deref(), Some("hello"));
+    assert!(output.text.is_none());
+    assert_eq!(output.captured_body.as_ref().unwrap().bytes(), b"hello");
     assert_eq!(before, serde_json::to_value(&p).unwrap());
     for canary in ["agent-canary", "grant-canary", "workload-canary"] {
         assert!(!logs.contains(canary));

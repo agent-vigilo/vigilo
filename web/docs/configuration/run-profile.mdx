@@ -202,8 +202,7 @@ defaults, and failure behavior.
 When an attempt's authoritative terminal update commits, its available diagnostics
 are merged into `execution_attempts.outcome_summary.agent_invocation` in the same
 batch. Calls interrupted before the commit may have no diagnostic record; there is
-no extra pre-call or mid-call write. Successful agent calls also expose these
-bounded fields in `actual.metadata.vigilo_invocation`. The attempt summary is
+no extra pre-call or mid-call write. Operational diagnostics are separate from evaluator-visible response evidence. The attempt summary is
 independent of evaluator evidence/raw-output retention and remains available when
 an evaluator fails after a successful agent call.
 
@@ -218,7 +217,7 @@ an evaluator fails after a successful agent call.
 | `usage` | Supported returned token counters, otherwise `null` |
 
 HTTP latency includes network and server time; it is not model inference time.
-Parsing/normalization is included in total elapsed time, not successful HTTP latency.
+Response mapping runs after invocation diagnostics are captured.
 An HTTP status of 200 can accompany a body-limit or response-validation failure.
 Preflight and credential-resolution failures have no HTTP status or latency.
 Evaluator failures and low scores do not change a successful agent call's category.
@@ -485,9 +484,11 @@ configuration and evidence schemas. Both accept the exact schema identity `1.0.0
 unknown versions and unknown configuration fields are rejected. `profile_version`
 is an author-supplied profile revision, not a response-schema selector.
 
-`agent.response` accepts a typed configuration document. Execution rejects profiles
-containing this field: parsing a configuration does not mean the worker can execute
-its interpretation. Profiles without this field use the documented invocation path.
+`agent.response` explicitly selects response interpretation. Profiles without it,
+or with `interpretation.format: raw`, expose only original bytes. JSON mapping runs
+once per attempt after successful body capture. It never guesses fields or falls
+back to another response shape. Mapping failures preserve original evidence and
+fail evaluators requiring mapped evidence, without retrying the agent.
 
 A JSON mapping describes explicit producers in declaration order:
 
@@ -581,8 +582,8 @@ original HTTP deadline includes body collection and decompression; a failed capt
 returns no partial evidence. Content-Type metadata is limited to 1024 bytes and
 ambiguous multiple values are rejected. No remote artifact references are fetched.
 
-Successful invocations share captured bytes with evaluator resource tables. The
-existing actual-output interpretation remains separate and can reject a body that
-capture itself accepts. Explicit response mapping configuration remains unavailable
-for execution. See [Evaluator Compatibility](../guides/evaluator-compatibility.mdx#response-evidence-contract)
+Successful invocations share captured bytes and atomic mapping results across
+evaluators. Binary, empty, and malformed JSON bodies remain scoreable through raw
+access. Only an explicitly selected JSON mapping requires valid JSON. No inferred
+text, structured output, or trace is populated in `actual`. See [Evaluator Compatibility](../guides/evaluator-compatibility.mdx#response-evidence-contract)
 for resource read limits and availability.

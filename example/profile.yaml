@@ -28,10 +28,25 @@ scorecard:
 
 agent:
   provider: llama.cpp
+  response:
+    schema_version: 1.0.0
+    interpretation:
+      format: json
+      mapping:
+        items:
+          - mode: single
+            item:
+              type: message
+              content:
+                - media_type: text/plain
+                  source:
+                    representation: inline_text
+                    selection:
+                      pointer: /choices/0/message/content
   name: qwen2.5-0.5b-instruct
   version: q4_k_m
   model: qwen2.5-0.5b-instruct-q4_k_m.gguf
-  prompt_config_id: qwen-sentiment-json
+  prompt_config_id: qwen-sentiment-text
   prompt_config_version: 1.0.0
   http:
     method: POST
@@ -41,12 +56,9 @@ agent:
     request_format: openai_compatible_chat_completions
     temperature: 0.0
     max_tokens: 96
-    response_format:
-      type: json_object
     system_prompt: |
-      You classify sentiment for short user messages.
-      Return only JSON with this exact shape: {"label":"<label>"}.
-      Use one of these labels: positive, neutral, negative.
+      Rewrite the user message as a short English sentence preserving its sentiment.
+      Return only the rewritten sentence, without JSON or commentary.
 
 case_groups:
   - id: sentiment_classification

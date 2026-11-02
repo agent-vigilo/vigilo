@@ -126,6 +126,21 @@ impl EvaluatorHost {
         })
     }
 
+    /// Register decoded mapped bytes in the same invocation-local table.
+    pub(crate) fn install_decoded_body(
+        &mut self,
+        body: vigilo::response::CapturedBody,
+    ) -> anyhow::Result<u64> {
+        let table = self
+            .resources
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("original response resource is unavailable"))?;
+        Ok(table
+            .insert(body)
+            .map_err(|error| anyhow::anyhow!("response resource budget exceeded: {error:?}"))?
+            .0)
+    }
+
     pub(crate) fn read_response_resource(
         &mut self,
         handle: u64,
