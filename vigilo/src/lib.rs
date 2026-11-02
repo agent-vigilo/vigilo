@@ -17,3 +17,6 @@
 /// Versioned agent response configuration and evidence contracts.
 #[path = "contracts/response.rs"]
 pub mod response;
+
+/// Pure, bounded interpretation of captured response evidence.
+pub mod response_mapping;

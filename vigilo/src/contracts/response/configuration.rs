@@ -205,7 +205,8 @@ pub struct ContentMapping {
 }
 
 /// Operations are explicit and nonrecursive; the engine enforces decoded budgets.
-/// JSON value serialization is an interpretation, never original-byte evidence.
+/// JSON values retain their exact source fragment; JSON strings and base64 create
+/// decoded resources. Original evidence remains separately available.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "representation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ContentMappingSource {

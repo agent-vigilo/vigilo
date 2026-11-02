@@ -516,8 +516,13 @@ present null or wrong-type value.
 Item templates are `message`, `tool_call`, or `tool_result`. Message `role` and tool
 `name` use explicit `literal` or `field` string mappings. Content representations
 are `inline_text`, `json_value`, `json_string`, `base64`, or `original_body`.
-Except for `original_body`, they require a `selection`. These operations describe
-interpretation; JSON serialization is not byte-faithful original evidence.
+Except for `original_body`, they require a `selection`. `inline_text` requires a
+JSON string and preserves its decoded text without trimming. `json_value` retains
+the exact selected JSON fragment as a range of the original body, including number
+precision and internal whitespace. `json_string` requires a string containing valid
+JSON and exposes its decoded bytes. `base64` requires strict standard RFC 4648
+encoding with padding where needed. `original_body` refers to the complete body.
+No representation fetches URLs or guesses an encoding.
 Completion `status` and `stop_reason` mappings use a selection plus an explicit
 string-to-category `values` table. Unlisted values have no implicit fallback.
 
@@ -525,6 +530,33 @@ Authoring limits are 128 item producers, 256 content templates, 4096 UTF-8 bytes
 per pointer, and 255 bytes per media type. Configured media types use bare
 `type/subtype` syntax without parameters; the server-declared Content-Type is a
 separate value. These authoring limits do not authorize unbounded response expansion.
+
+### Mapping Engine
+
+`vigilo::response_mapping::map_response` applies the configuration to a shared
+`CapturedBody` independently of worker execution. No configuration, or `format: raw`,
+returns original evidence with absent mapped items. JSON interpretation rejects
+invalid JSON and duplicate object keys, including in unselected fields.
+
+Producers run in declaration order; each array producer preserves array order.
+Content templates also retain their order. Optional missing selections omit the
+corresponding value or content part; present values must satisfy the declared type.
+Tool calls must produce both a name and arguments. Unrelated arrays are not merged
+chronologically, and one array producer applies the same template to every element.
+
+Mapping is atomic: a failure returns no mapped items or decoded resources, while
+original evidence remains available to the caller. Errors contain categories and
+available producer/element indexes, without body excerpts. Mapped resources own
+shared bytes, not evaluator handles. Invocation-scoped authorization remains the
+host's responsibility.
+
+The caller supplies `Limits`. Defaults bound input to 4 MiB, JSON structure to
+100,000 nodes and 64 levels, parsing/decoding byte work to 32 MiB, output to 4096
+items and 8192 parts, logical output bytes to 16 MiB, and decoded resources to 63.
+Repeated references count against logical output size. A cooperative one-second
+deadline bounds processing; synchronous callers in async services use a bounded
+blocking executor. Limits also cover embedded JSON decoding. The implementation
+identity is `vigilo-response-mapping-v1@1`, independent of the schema version.
 
 ### Original Response Capture
 

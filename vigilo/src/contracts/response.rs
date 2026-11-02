@@ -60,22 +60,24 @@ pub struct BodyMetadata {
 pub struct ResourceHandle(pub u64);
 
 /// One observed item. Vector order is semantic; IDs never determine chronology.
+/// The source parameter lets mapping retain owned bytes before the host binds
+/// invocation-local handles; its default preserves the evaluator evidence shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum OutputItem {
+pub enum OutputItem<S = ContentSource> {
     Message {
         id: Option<String>,
         role: Option<String>,
-        content: Vec<ContentPart>,
+        content: Vec<ContentPart<S>>,
     },
     ToolCall {
         call_id: Option<String>,
         name: String,
-        arguments: ContentPart,
+        arguments: ContentPart<S>,
     },
     ToolResult {
         call_id: Option<String>,
-        content: Vec<ContentPart>,
+        content: Vec<ContentPart<S>>,
         is_error: Option<bool>,
     },
 }
@@ -83,9 +85,9 @@ pub enum OutputItem {
 /// Explicit content interpretation; media type is not guessed from data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ContentPart {
+pub struct ContentPart<S = ContentSource> {
     pub media_type: String,
-    pub source: ContentSource,
+    pub source: S,
 }
 
 /// Resource bounds and ownership are checked by the host on every read.

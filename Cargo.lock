@@ -5159,6 +5159,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
+ "base64",
  "blake3",
  "cargo_metadata",
  "cargo_toml",
