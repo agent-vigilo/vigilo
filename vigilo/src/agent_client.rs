@@ -110,6 +110,9 @@ impl AgentRequestFormat {
 }
 
 pub(crate) fn validate_request_format(run_profile: &RunProfile) -> anyhow::Result<()> {
+    if run_profile.agent.response.is_some() {
+        anyhow::bail!("explicit agent response configuration is not enabled for execution");
+    }
     AgentRequestFormat::from_profile(run_profile).map(|_| ())
 }
 
@@ -482,6 +485,8 @@ async fn invoke_inner(
     test_case: &TestCase,
     observation: &mut diagnostics::Observation,
 ) -> anyhow::Result<AgentOutput> {
+    validate_request_format(run_profile)
+        .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
     let http = &run_profile.agent.http;
     if http
         .headers

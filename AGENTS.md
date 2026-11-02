@@ -27,6 +27,10 @@ This file records Vigilo-specific constraints that are easy to miss. A nearer
 
 ## Architecture Contracts
 
+- Prefer explicit configuration and contracts over inferred behavior. Do not guess
+  semantic meaning from field names, content, or familiar formats. Define defaults
+  and fallback behavior explicitly; failed configured behavior must not silently
+  switch to another interpretation.
 - Keep evaluator interface vocabulary as `input` and `output`. Preserve the
   strict evaluator identifier format `<namespace>/<name>:<version>`.
 - Treat `vigilo/wit/evaluator/v1.0.0/evaluator.wit` as the sole pre-release source of

@@ -153,3 +153,8 @@ Use `vigilo evaluator package` to turn the prebuilt source package into a
 self-contained release archive. Recipients publish it without a Rust toolchain
 or source checkout. See [Publishing Evaluators](./publishing.mdx#portable-packages)
 for the package command, validation rules, and registration workflow.
+
+The evaluator interface also exports `requirements`, returning an
+`evidence-requirements` record. Declare evidence actually consumed by the evaluator;
+see [Response Evidence Contract](./evaluator-compatibility.mdx#response-evidence-contract)
+for availability and host enforcement.

@@ -1755,6 +1755,7 @@ mod tests {
             },
             scorecard: Default::default(),
             agent: AgentProfile {
+                response: None,
                 provider: "example".to_string(),
                 name: "agent".to_string(),
                 version: None,

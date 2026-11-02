@@ -34,12 +34,67 @@ interface types {
         metadata-json: string,
     }
 
+    // Ordered interpreted evidence. None differs from an observed empty list.
+    type resource-handle = u64;
+    record body-metadata {
+        %resource: resource-handle,
+        byte-length: u64,
+        content-type: option<string>,
+    }
+    record body-range { offset: u64, byte-length: u64 }
+    record resource-content { handle: resource-handle, byte-length: u64 }
+    variant content-source {
+        inline-text(string),
+        body-range(body-range),
+        %resource(resource-content),
+    }
+    record content-part { media-type: string, source: content-source }
+    record message {
+        id: option<string>,
+        role: option<string>,
+        content: list<content-part>,
+    }
+    record observed-tool-call {
+        call-id: option<string>,
+        name: string,
+        arguments: content-part,
+    }
+    record tool-result {
+        call-id: option<string>,
+        content: list<content-part>,
+        is-error: option<bool>,
+    }
+    variant output-item {
+        message(message),
+        tool-call(observed-tool-call),
+        tool-result(tool-result),
+    }
+    enum completion-status { completed, incomplete, failed }
+    enum stop-category { end-turn, tool-call, limit, refusal, other }
+    record stop-reason { category: stop-category, provider-value: option<string> }
+    record response-evidence {
+        schema-version: string,
+        body: body-metadata,
+        items: option<list<output-item>>,
+        status: option<completion-status>,
+        stop-reason: option<stop-reason>,
+    }
+    record evidence-requirements {
+        original-body: bool,
+        mapped-items: bool,
+        content-media-types: list<string>,
+        tool-calls: bool,
+        tool-results: bool,
+    }
+    enum resource-read-error { unavailable, invalid-handle, out-of-bounds, limit-exceeded }
+
     record input {
         run-id: string,
         execution-id: string,
         attempt-id: string,
         test-case: test-case,
         actual: agent-output,
+        response-evidence: option<response-evidence>,
         evaluator-config-json: string,
     }
 
@@ -103,6 +158,12 @@ interface types {
 
 // executor functions exposed to evaluators
 interface executor {
+    use types.{resource-handle, resource-read-error};
+    // Handles are scoped to one evaluate invocation. Reads do not move a cursor.
+    // Offset equal to length returns empty bytes; beyond length is out-of-bounds.
+    // Zero max-bytes or budget exhaustion returns limit-exceeded.
+    read-resource: func(handle: resource-handle, offset: u64, max-bytes: u32) -> result<list<u8>, resource-read-error>;
+
     // tracing
     trace: func(msg: string);
     debug: func(msg: string);
@@ -132,7 +193,8 @@ interface executor {
 
 // evaluator interface
 interface evaluator {
-    use types.{input, output, evaluator-error};
+    use types.{input, output, evaluator-error, evidence-requirements};
+    requirements: func() -> evidence-requirements;
     evaluate: func(input: input) -> result<output, evaluator-error>;
 }
 

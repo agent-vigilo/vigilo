@@ -84,3 +84,8 @@ Agent invocation returns bounded operational evidence separately from evaluator
 output. Execution processing carries it through both successful and failed
 evaluation paths into the existing batched attempt update. No diagnostic query or
 transaction is added. See [invocation diagnostics](/docs/configuration/run-profile#agent-invocation-diagnostics).
+
+The evaluator ABI exposes declared evidence requirements. The host checks these
+before calling `evaluate`; unavailable required response evidence produces an
+execution error rather than a fabricated score. Resource handles cannot authorize
+access on a host with no resource table; reads return a typed unavailable error.

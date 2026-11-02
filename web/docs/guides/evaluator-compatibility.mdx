@@ -93,3 +93,30 @@ aggregation, database workflows, and profile policy use host contracts.
 - [Publishing Evaluators](./publishing.mdx)
 - [`Vigilo.toml` Reference](../configuration/vigilo-toml.mdx)
 - [Worker Components](../architecture/structure/components/worker/index.mdx)
+
+## Response Evidence Contract
+
+The pre-release WIT defines ordered response evidence independently from evaluator
+measurements. `input.response-evidence` is optional; absence must not be treated as
+an empty observed response. Messages contain ordered content parts, and tool calls
+and results retain explicit correlation identifiers. Completion status and stop
+reason are separate: a completed response can be a refusal.
+
+The `requirements` export declares original-body, mapped-item, content-media-type,
+and tool evidence requirements. The current execution path supplies no
+`response-evidence` and rejects evaluators declaring these requirements before
+calling `evaluate`. The sentiment example reads `input.actual` and declares none
+of these additional requirements. Requirements must describe evidence the evaluator
+actually consumes, not its preferred provider format.
+
+`executor.read-resource(handle, offset, max-bytes)` returns bounded bytes or a typed
+error. Handles are opaque and invocation-scoped. The current host returns
+`unavailable` because no resource table is installed. The contract distinguishes
+`invalid-handle`, `out-of-bounds`, and `limit-exceeded`; offset at EOF returns empty
+bytes, offset beyond EOF is out of bounds, and a zero read budget is invalid.
+Live handles are execution capabilities, not durable storage identities.
+
+Configuration schema, evidence schema, evaluator ABI, and application release
+versions are distinct. Exact schema identity checks reject unsupported versions;
+WIT hashes additionally bind the component shape. These pre-v1 contracts are
+subject to breaking changes. Source packages and fixtures use the same WIT source.

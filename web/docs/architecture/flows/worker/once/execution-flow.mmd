@@ -74,7 +74,12 @@ sequenceDiagram
                     end
                 and Evaluator calls
                     Vigilo->>Vigilo: Acquire Wasm evaluation semaphore permits
-                    Vigilo->>WASM: Dispatch pinned ABI adapters in sandboxed stores
+                    Vigilo->>WASM: Check declared evidence requirements in sandboxed store
+                    alt Required response evidence unavailable
+                        WASM-->>Vigilo: Evaluation error without calling evaluate
+                    else Requirements satisfied
+                        Vigilo->>WASM: Dispatch pinned ABI adapter evaluate
+                    end
                 end
                 WASM-->>Vigilo: Evaluation outputs
                 Vigilo->>ExecutionDB: Persist batched results and lease-guarded terminal transitions with invocation diagnostics

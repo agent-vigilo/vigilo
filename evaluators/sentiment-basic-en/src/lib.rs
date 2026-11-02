@@ -127,6 +127,16 @@ fn label_from_score(score: i32) -> &'static str {
 }
 
 impl Guest for Evaluator {
+    fn requirements() -> vigilo::evaluator::types::EvidenceRequirements {
+        vigilo::evaluator::types::EvidenceRequirements {
+            original_body: false,
+            mapped_items: false,
+            content_media_types: Vec::new(),
+            tool_calls: false,
+            tool_results: false,
+        }
+    }
+
     fn evaluate(input: Input) -> Result<Output, EvaluatorError> {
         executor::trace("sentiment evaluator started");
         executor::debug(&format!(
@@ -273,6 +283,7 @@ mod tests {
                 tags: vec![],
                 metadata_json: "{}".to_string(),
             },
+            response_evidence: None,
             actual: AgentOutput {
                 text: Some("great experience".to_string()),
                 structured_json: None,
@@ -303,6 +314,7 @@ mod tests {
                 tags: vec![],
                 metadata_json: "{}".to_string(),
             },
+            response_evidence: None,
             actual: AgentOutput {
                 text: Some("   ".to_string()),
                 structured_json: None,

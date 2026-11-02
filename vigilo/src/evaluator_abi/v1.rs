@@ -86,6 +86,10 @@ impl EvaluatorAbiAdapter for V1Adapter {
         let mut store = runtime.evaluator_store()?;
         let instance = instance_pre.instantiate(&mut store)?;
         let bindings = bindings::EvaluatorWorld::new(&mut store, &instance)?;
+        let requirements = bindings
+            .vigilo_evaluator_evaluator()
+            .call_requirements(&mut store)?;
+        validate_available_evidence(&requirements)?;
         let input = map_input(input)?;
         let output = bindings
             .vigilo_evaluator_evaluator()
@@ -106,6 +110,17 @@ impl EvaluatorAbiAdapter for V1Adapter {
 }
 
 impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
+    fn read_resource(
+        &mut self,
+        _handle: u64,
+        _offset: u64,
+        _max_bytes: u32,
+    ) -> Result<Vec<u8>, bindings::vigilo::evaluator::types::ResourceReadError> {
+        // No resource table is installed on this execution path. Fail closed;
+        // numeric handles must never be interpreted as paths or global identities.
+        Err(bindings::vigilo::evaluator::types::ResourceReadError::Unavailable)
+    }
+
     fn trace(&mut self, msg: String) {
         if let Some(msg) = self.capped_log_message(msg) {
             tracing::debug!("evaluator.trace: {}", msg);
@@ -136,6 +151,22 @@ impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
     ) -> Result<bindings::vigilo::evaluator::executor::HttpResponse, String> {
         Err("send_http_request is not enabled yet; outbound HTTP policy enforcement is not configured".to_string())
     }
+}
+
+/// Reject unsatisfied declared evidence before the evaluator can score a case.
+/// This execution path exposes only the actual-output contract, not resources.
+fn validate_available_evidence(
+    requirements: &bindings::vigilo::evaluator::types::EvidenceRequirements,
+) -> anyhow::Result<()> {
+    if requirements.original_body
+        || requirements.mapped_items
+        || !requirements.content_media_types.is_empty()
+        || requirements.tool_calls
+        || requirements.tool_results
+    {
+        anyhow::bail!("evaluator requires response evidence unavailable on this execution path");
+    }
+    Ok(())
 }
 
 fn parse_json(field_name: &str, raw: &str) -> anyhow::Result<Value> {
@@ -214,6 +245,7 @@ fn map_input(input: EvaluatorInput) -> anyhow::Result<bindings::vigilo::evaluato
             raw_json: serialize_json("actual.raw", &input.actual.raw)?,
             metadata_json: serialize_json("actual.metadata", &input.actual.metadata)?,
         },
+        response_evidence: None,
         evaluator_config_json: serialize_json("evaluator_config", &input.evaluator_config)?,
     })
 }
@@ -304,6 +336,30 @@ mod tests {
         TestCase,
         ToolCall,
     };
+
+    #[test]
+    fn evidence_requirements_fail_closed_individually() {
+        use bindings::vigilo::evaluator::types::EvidenceRequirements;
+        let empty = || EvidenceRequirements {
+            original_body: false,
+            mapped_items: false,
+            content_media_types: vec![],
+            tool_calls: false,
+            tool_results: false,
+        };
+        assert!(validate_available_evidence(&empty()).is_ok());
+        for field in 0..5 {
+            let mut requirements = empty();
+            match field {
+                0 => requirements.original_body = true,
+                1 => requirements.mapped_items = true,
+                2 => requirements.content_media_types.push("text/plain".into()),
+                3 => requirements.tool_calls = true,
+                _ => requirements.tool_results = true,
+            }
+            assert!(validate_available_evidence(&requirements).is_err());
+        }
+    }
 
     fn evaluator_input() -> EvaluatorInput {
         EvaluatorInput {

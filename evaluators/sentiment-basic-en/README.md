@@ -22,6 +22,12 @@ Text values can be plain text or a JSON object containing a `text` field.
 - Language handling is advisory and tuned for English terms only.
 - It uses a small fixed lexicon and does not perform advanced linguistic analysis.
 
+## Evidence Requirements
+
+The `requirements` export declares no resource-backed response requirements.
+This evaluator consumes `input.actual` as described above; it does not read
+`input.response-evidence` or call `read-resource`.
+
 ## Output
 
 The evaluator returns a structured `output` object:

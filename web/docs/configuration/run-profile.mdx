@@ -473,3 +473,55 @@ See the repository example profile:
 - [Dataset format](./dataset-format)
 - [Glossary](/docs/glossary)
 - Repository example: `example/README.md`
+
+## Explicit Response Contracts
+
+The `vigilo::response` library module defines independently versioned response
+configuration and evidence schemas. Both accept the exact schema identity `1.0.0`;
+unknown versions and unknown configuration fields are rejected. `profile_version`
+is an author-supplied profile revision, not a response-schema selector.
+
+`agent.response` accepts a typed configuration document. Execution rejects profiles
+containing this field: parsing a configuration does not mean the worker can execute
+its interpretation. Profiles without this field use the documented invocation path.
+
+A JSON mapping describes explicit producers in declaration order:
+
+```yaml
+response:
+  schema_version: 1.0.0
+  interpretation:
+    format: json
+    mapping:
+      items:
+        - mode: single
+          item:
+            type: message
+            content:
+              - media_type: text/plain
+                source:
+                  representation: inline_text
+                  selection:
+                    pointer: /answer
+                    required: true
+```
+
+`format: raw` has no mapping. For JSON interpretation, `single` selects one item
+from the response root; `each` requires a `source` selection and applies its item
+template relative to each array element in order. JSON Pointer uses RFC 6901 syntax:
+empty selects the current root, `~0` escapes `~`, and `~1` escapes `/`. URI fragments
+are rejected. Selectors are required by default. Optional absence differs from a
+present null or wrong-type value.
+
+Item templates are `message`, `tool_call`, or `tool_result`. Message `role` and tool
+`name` use explicit `literal` or `field` string mappings. Content representations
+are `inline_text`, `json_value`, `json_string`, `base64`, or `original_body`.
+Except for `original_body`, they require a `selection`. These operations describe
+interpretation; JSON serialization is not byte-faithful original evidence.
+Completion `status` and `stop_reason` mappings use a selection plus an explicit
+string-to-category `values` table. Unlisted values have no implicit fallback.
+
+Authoring limits are 128 item producers, 256 content templates, 4096 UTF-8 bytes
+per pointer, and 255 bytes per media type. Configured media types use bare
+`type/subtype` syntax without parameters; the server-declared Content-Type is a
+separate value. These authoring limits do not authorize unbounded response expansion.

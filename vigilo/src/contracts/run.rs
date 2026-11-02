@@ -135,6 +135,11 @@ pub(crate) struct AgentProfile {
     /// HTTP invocation configuration used by workers.
     pub(crate) http: AgentHttpConfig,
 
+    /// Explicit response contract. Profiles using it fail closed until execution
+    /// supports the configured interpretation; it must never be silently ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) response: Option<vigilo::response::ResponseConfiguration>,
+
     /// Agent-specific unstructured configuration passed in invocation metadata.
     #[serde(default = "default_json_object")]
     pub(crate) config: Value,
