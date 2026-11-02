@@ -30,6 +30,13 @@ fn case() -> TestCase {
 }
 
 async fn call(response: &str, limit: u64) -> anyhow::Result<contracts::evaluator::AgentOutput> {
+    call_bytes(response.as_bytes(), limit).await
+}
+
+async fn call_bytes(
+    response: &[u8],
+    limit: u64,
+) -> anyhow::Result<contracts::evaluator::AgentOutput> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let response = response.to_owned();
@@ -63,7 +70,7 @@ async fn call(response: &str, limit: u64) -> anyhow::Result<contracts::evaluator
             }
             assert!(request.len() < 16_384);
         }
-        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.write_all(&response).await;
     });
     let result = agent_client::invoke(
         agent_client::Services {
@@ -378,4 +385,214 @@ async fn failed_http_and_response_validation_retain_safe_timing_and_status() {
                 .contains("canary")
         );
     }
+}
+
+fn compressed_response(body: &[u8], encoding: &str) -> Vec<u8> {
+    let mut response = format!("HTTP/1.1 200 OK\r\nContent-Encoding: {encoding}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    response.extend_from_slice(body);
+    response
+}
+
+fn gzip_bytes(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+#[tokio::test]
+async fn compressed_response_limits_apply_to_decoded_bytes() {
+    let encoded = gzip_bytes(b"hello");
+    let response = compressed_response(&encoded, "gzip");
+    let result = call_bytes(&response, 5).await.unwrap();
+    assert_eq!(result.text.as_deref(), Some("hello"));
+    assert!(call_bytes(&response, 4).await.is_err());
+}
+
+async fn capture_bytes(
+    response: Vec<u8>,
+    limit: u64,
+) -> Result<vigilo::response::CapturedBody, agent_client::failure::Failure> {
+    capture_bytes_with_timeout(response, limit, std::time::Duration::from_secs(2)).await
+}
+
+async fn capture_bytes_with_timeout(
+    response: Vec<u8>,
+    limit: u64,
+    timeout: std::time::Duration,
+) -> Result<vigilo::response::CapturedBody, agent_client::failure::Failure> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let mut server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        let _ = stream.read(&mut request).await;
+        let _ = stream.write_all(&response).await;
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let response = client.get(url).send().await.unwrap();
+    let result =
+        agent_client::capture::collect(response, limit, tokio::time::Instant::now() + timeout)
+            .await;
+    if tokio::time::timeout(std::time::Duration::from_secs(2), &mut server)
+        .await
+        .is_err()
+    {
+        server.abort();
+        let _ = server.await;
+        panic!("capture fixture did not complete");
+    }
+    result
+}
+
+#[tokio::test]
+async fn capture_preserves_binary_empty_bom_and_invalid_json_without_interpreting() {
+    for bytes in [
+        vec![],
+        vec![0, 255, 42],
+        b"{invalid json".to_vec(),
+        vec![239, 187, 191, b'a'],
+    ] {
+        let response = compressed_response(&bytes, "identity");
+        let captured = capture_bytes(response, 64).await.unwrap();
+        assert_eq!(captured.bytes(), bytes);
+        assert_eq!(captured.content_type(), Some("text/plain"));
+    }
+    let captured = capture_bytes(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\na".to_vec(), 1)
+        .await
+        .unwrap();
+    assert_eq!(captured.content_type(), None);
+}
+
+#[tokio::test]
+async fn compressed_capture_validates_trailers_members_and_encoding() {
+    use std::io::Write;
+
+    use agent_client::failure::Kind;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(b"hello").unwrap();
+    let mut zlib = encoder.finish().unwrap();
+    assert_eq!(
+        capture_bytes(compressed_response(&zlib, "deflate"), 5)
+            .await
+            .unwrap()
+            .bytes(),
+        b"hello"
+    );
+    zlib.push(1);
+    assert_eq!(
+        capture_bytes(compressed_response(&zlib, "deflate"), 5)
+            .await
+            .unwrap_err()
+            .kind,
+        Kind::InvalidResponse
+    );
+    let mut concatenated = gzip_bytes(b"ab");
+    concatenated.extend(gzip_bytes(b"cd"));
+    assert_eq!(
+        capture_bytes(compressed_response(&concatenated, "gzip"), 4)
+            .await
+            .unwrap()
+            .bytes(),
+        b"abcd"
+    );
+    concatenated.pop();
+    assert_eq!(
+        capture_bytes(compressed_response(&concatenated, "gzip"), 4)
+            .await
+            .unwrap_err()
+            .kind,
+        Kind::InvalidResponse
+    );
+    let mut corrupt = gzip_bytes(b"hello");
+    let checksum = corrupt.len() - 8;
+    corrupt[checksum] ^= 1;
+    assert_eq!(
+        capture_bytes(compressed_response(&corrupt, "gzip"), 5)
+            .await
+            .unwrap_err()
+            .kind,
+        Kind::InvalidResponse
+    );
+    for encoding in ["br", "gzip, deflate", "unknown"] {
+        assert_eq!(
+            capture_bytes(compressed_response(b"body", encoding), 16)
+                .await
+                .unwrap_err()
+                .kind,
+            Kind::InvalidResponse
+        );
+    }
+}
+
+#[tokio::test]
+async fn expansion_and_encoded_overhead_are_both_bounded() {
+    use agent_client::failure::Kind;
+    let bomb = gzip_bytes(&vec![b'x'; 128 * 1024]);
+    assert_eq!(
+        capture_bytes(compressed_response(&bomb, "gzip"), 1024)
+            .await
+            .unwrap_err()
+            .kind,
+        Kind::BodyLimit
+    );
+    let empty = gzip_bytes(b"");
+    let overhead = empty.repeat(4000);
+    assert_eq!(
+        capture_bytes(compressed_response(&overhead, "gzip"), 1)
+            .await
+            .unwrap_err()
+            .kind,
+        Kind::BodyLimit
+    );
+}
+
+#[tokio::test]
+async fn original_capture_is_shared_but_not_implicitly_serialized() {
+    let output = call_bytes(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n\xef\xbb\xbfX",
+        4,
+    )
+    .await
+    .unwrap();
+    assert_eq!(output.text.as_deref(), Some("X"));
+    let captured = output.captured_body.as_ref().unwrap();
+    assert_eq!(captured.bytes(), b"\xef\xbb\xbfX");
+    let clone = output.clone();
+    assert_eq!(
+        captured.bytes().as_ptr(),
+        clone.captured_body.as_ref().unwrap().bytes().as_ptr()
+    );
+    assert!(
+        serde_json::to_value(&output)
+            .unwrap()
+            .get("captured_body")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn capture_rejects_ambiguous_metadata_and_expired_deadlines() {
+    use agent_client::failure::Kind;
+    for response in [
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Type: image/png\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Encoding: deflate\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: 0\r\n\r\n", "x".repeat(1025)).into_bytes(),
+    ] {
+        assert_eq!(capture_bytes(response, 1).await.unwrap_err().kind, Kind::InvalidResponse);
+    }
+    let empty = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    assert_eq!(
+        capture_bytes(empty.to_vec(), 0).await.unwrap_err().kind,
+        Kind::Configuration
+    );
+    let error = capture_bytes_with_timeout(empty.to_vec(), 1, std::time::Duration::ZERO)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, Kind::Timeout);
+    assert!(error.retryable);
 }

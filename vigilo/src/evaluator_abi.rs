@@ -188,6 +188,7 @@ mod tests {
                 metadata: BTreeMap::new(),
             },
             actual: AgentOutput {
+                captured_body: None,
                 text: Some("neutral statement".to_string()),
                 structured: None,
                 tool_calls: Vec::new(),
@@ -273,5 +274,61 @@ mod tests {
                 Some(identity.version.as_str())
             );
         }
+    }
+    #[cfg(feature = "evaluator-abi-fixtures")]
+    #[test]
+    fn response_resources_cross_real_wasm_and_are_scoped_to_each_execution() {
+        let bytes = fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../target/wasm32-wasip2/release/response_resource_fixture.wasm"),
+        )
+        .expect("build response-resource-fixture for wasm32-wasip2");
+        let runtime = Wasm::new(Config {
+            timeout_ms: 0,
+            ..Config::default()
+        })
+        .unwrap();
+        let evaluator = PreparedEvaluator::compile(&runtime, &bytes, &current_identity()).unwrap();
+        assert!(
+            evaluator
+                .execute(&runtime, evaluator_input())
+                .unwrap_err()
+                .to_string()
+                .contains("evidence unavailable")
+        );
+        let mut previous_handle = None;
+        for config in [
+            json!({}),
+            json!({"trap":true}),
+            json!({}),
+            json!({"error":true}),
+            json!({}),
+        ] {
+            let mut input = evaluator_input();
+            input.actual.captured_body = Some(vigilo::response::CapturedBody::new(
+                vec![0, 255, 42, 10],
+                Some("application/octet-stream".into()),
+            ));
+            input.evaluator_config = if config.as_object().is_some_and(|value| value.is_empty()) {
+                previous_handle.map_or_else(|| config.clone(), |handle: u64| json!(handle))
+            } else {
+                config.clone()
+            };
+            let result = evaluator.execute(&runtime, input);
+            if config.get("trap").is_some() || config.get("error").is_some() {
+                assert!(result.is_err());
+            } else {
+                let output = result.unwrap();
+                previous_handle = output.metadata.as_u64();
+                assert!(previous_handle.is_some());
+                assert!(matches!(
+                    output.outcome,
+                    EvaluatorOutcome::Completed(crate::contracts::evaluator::Measurement::Binary {
+                        value: true
+                    })
+                ));
+            }
+        }
+        assert!(evaluator.execute(&runtime, evaluator_input()).is_err());
     }
 }

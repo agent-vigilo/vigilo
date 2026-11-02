@@ -68,20 +68,23 @@ sequenceDiagram
                     end
                     alt Request and credential validation succeed
                         Vigilo->>Agent: Invoke bounded request with attempt correlation and authorized credential
-                        Agent-->>Vigilo: Read bounded responses; capture status, HTTP latency, supported usage and Retry-After
+                        Agent-->>Vigilo: Response headers and encoded body
+                        Vigilo->>Vigilo: Capture decoded original bytes under size and deadline limits
+                        Vigilo->>Vigilo: Retain status, HTTP latency, supported usage and Retry-After
                     else Validation or credential resolution fails
                         Vigilo->>Vigilo: Retain bounded failure diagnostics and skip the agent call
                     end
                 and Evaluator calls
                     Vigilo->>Vigilo: Acquire Wasm evaluation semaphore permits
-                    Vigilo->>WASM: Check declared evidence requirements in sandboxed store
+                    Vigilo->>WASM: Install scoped shared-body resources and check evidence requirements
                     alt Required response evidence unavailable
                         WASM-->>Vigilo: Evaluation error without calling evaluate
                     else Requirements satisfied
                         Vigilo->>WASM: Dispatch pinned ABI adapter evaluate
+                        WASM->>Vigilo: Bounded read-resource calls when needed
                     end
                 end
-                WASM-->>Vigilo: Evaluation outputs
+                WASM-->>Vigilo: Evaluation outputs; release store resource handles
                 Vigilo->>ExecutionDB: Persist batched results and lease-guarded terminal transitions with invocation diagnostics
                 Vigilo->>ExecutionDB: Read chunk execution retry state
                 ExecutionDB-->>Vigilo: Terminal or retry-waiting chunk state

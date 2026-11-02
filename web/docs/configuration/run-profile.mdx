@@ -525,3 +525,28 @@ Authoring limits are 128 item producers, 256 content templates, 4096 UTF-8 bytes
 per pointer, and 255 bytes per media type. Configured media types use bare
 `type/subtype` syntax without parameters; the server-declared Content-Type is a
 separate value. These authoring limits do not authorize unbounded response expansion.
+
+### Original Response Capture
+
+HTTP capture preserves immutable bytes after content decompression and before BOM
+handling, text decoding, JSON parsing, or response interpretation. Declared
+Content-Type is retained independently of content; missing content type stays absent.
+No byte content or header value appears in the resource's debug representation.
+
+Supported content encodings are identity, gzip (including concatenated members),
+and zlib-wrapped deflate. Unsupported or stacked encodings, corrupt checksums,
+truncated compressed streams, and trailing deflate bytes fail explicitly. HTTP
+transfer framing is handled by the client. Automatic client decompression is disabled
+so capture owns encoding validation and budgets.
+
+The response byte limit applies to decompressed bytes during collection. Encoded
+input is separately bounded by that limit plus 64 KiB of encoding overhead. The
+original HTTP deadline includes body collection and decompression; a failed capture
+returns no partial evidence. Content-Type metadata is limited to 1024 bytes and
+ambiguous multiple values are rejected. No remote artifact references are fetched.
+
+Successful invocations share captured bytes with evaluator resource tables. The
+existing actual-output interpretation remains separate and can reject a body that
+capture itself accepts. Explicit response mapping configuration remains unavailable
+for execution. See [Evaluator Compatibility](../guides/evaluator-compatibility.mdx#response-evidence-contract)
+for resource read limits and availability.

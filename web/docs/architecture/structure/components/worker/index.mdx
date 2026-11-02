@@ -87,5 +87,9 @@ transaction is added. See [invocation diagnostics](/docs/configuration/run-profi
 
 The evaluator ABI exposes declared evidence requirements. The host checks these
 before calling `evaluate`; unavailable required response evidence produces an
-execution error rather than a fabricated score. Resource handles cannot authorize
-access on a host with no resource table; reads return a typed unavailable error.
+execution error rather than a fabricated score. Successful HTTP calls retain original decoded bytes in shared immutable memory.
+Each evaluator store owns a scoped resource table and read budgets; reads copy only
+the requested range into guest memory. Store destruction releases the table after
+success, errors, or traps. Resource reads on a store with no table return unavailable;
+foreign handles cannot authorize access. This path does not persist captured bytes
+or resource handles.

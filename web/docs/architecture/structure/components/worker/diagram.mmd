@@ -111,6 +111,12 @@ flowchart TD
 
     ExecutionProcessor -->|"Invokes agent for chunk cases with bounded concurrency through"| AgentClient
     AgentClient -->|"Sends case input and receives output from <br> <small>[TEXT/HTTP]</small>"| TargetAgent
+    CapturedBody["<b>Original Response Bytes</b><br/>Immutable shared allocation; bounded content decoding."]:::component
+    ResponseResources["<b>Response Resource Table</b><br/>Evaluator-store ownership; scoped handles and read budgets."]:::component
+    AgentClient -->|"Captures complete decoded bodies"| CapturedBody
+    CapturedBody -->|"Shares bytes without copying"| ResponseResources
+    EvaluatorExecutor -->|"Owns and drops per invocation"| ResponseResources
+    EvaluatorExecutor -->|"Reads bounded ranges into guest memory"| ResponseResources
     ExecutionProcessor -->|"Acquires active-evaluation permits from"| WasmSemaphore
     WasmSemaphore -->|"Admits bounded evaluator calls into"| EvaluatorExecutor
     EvaluatorExecutor -->|"Gets prepared evaluators from"| EvaluatorLoader

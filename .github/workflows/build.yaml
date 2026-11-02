@@ -490,8 +490,8 @@ jobs:
         run: >-
           cargo test -p vigilo --locked --bin vigilo
           --features evaluator-abi-fixtures
-          evaluator_abi::tests::all_registered_evaluator_abis_execute_in_one_host
-          -- --exact
+          evaluator_abi::tests::
+          -- --nocapture
       - name: Verify portable evaluator identity and ABI validation
         run: >-
           cargo test -p vigilo --locked --bin vigilo

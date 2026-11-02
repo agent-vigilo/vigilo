@@ -3,6 +3,7 @@ members = [
     "evaluators/sentiment-basic-en",
     "xtask",
     "vigilo",
+    "vigilo/tests/fixtures/response-resource",
 ]
 resolver = "2"
 

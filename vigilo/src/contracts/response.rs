@@ -155,3 +155,39 @@ pub enum ResourceReadError {
 #[cfg(test)]
 #[path = "response/tests.rs"]
 mod tests;
+
+/// Complete immutable response content after HTTP content decoding. Clones share
+/// the byte allocation; this value is ephemeral and is never serialized implicitly.
+#[derive(Clone)]
+pub struct CapturedBody {
+    bytes: std::sync::Arc<Vec<u8>>,
+    content_type: Option<String>,
+}
+
+impl CapturedBody {
+    /// Own already bounded bytes without copying their backing allocation.
+    /// The capturing host must enforce its collection budget before construction.
+    pub fn new(bytes: Vec<u8>, content_type: Option<String>) -> Self {
+        Self {
+            bytes: std::sync::Arc::new(bytes),
+            content_type,
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn content_type(&self) -> Option<&str> {
+        self.content_type.as_deref()
+    }
+}
+
+impl std::fmt::Debug for CapturedBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Body content may contain private input or credentials echoed by an agent.
+        formatter
+            .debug_struct("CapturedBody")
+            .field("byte_length", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}

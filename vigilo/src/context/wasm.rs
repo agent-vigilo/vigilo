@@ -79,7 +79,13 @@ use crate::{
     },
 };
 
+#[path = "wasm/resources.rs"]
+mod resources;
+
 pub(crate) struct EvaluatorHost {
+    resources: Option<resources::Resources>,
+    resource_max_bytes: u64,
+    resource_timeout: Option<Duration>,
     table: ResourceTable,
     ctx: WasiCtx,
     limits: StoreLimits,
@@ -98,6 +104,40 @@ impl WasiView for EvaluatorHost {
 }
 
 impl EvaluatorHost {
+    /// Install immutable bytes in this store only. No handle survives store drop.
+    pub(crate) fn install_response_body(
+        &mut self,
+        body: vigilo::response::CapturedBody,
+    ) -> anyhow::Result<vigilo::response::BodyMetadata> {
+        let byte_length = body.bytes().len() as u64;
+        let content_type = body.content_type().map(str::to_owned);
+        let mut table = resources::Resources::new(self.resource_max_bytes, self.resource_timeout)
+            .map_err(|error| {
+            anyhow::anyhow!("response resource budget unavailable: {error:?}")
+        })?;
+        let resource = table
+            .insert(body)
+            .map_err(|error| anyhow::anyhow!("response resource budget exceeded: {error:?}"))?;
+        self.resources = Some(table);
+        Ok(vigilo::response::BodyMetadata {
+            resource,
+            byte_length,
+            content_type,
+        })
+    }
+
+    pub(crate) fn read_response_resource(
+        &mut self,
+        handle: u64,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<Vec<u8>, vigilo::response::ResourceReadError> {
+        self.resources
+            .as_mut()
+            .ok_or(vigilo::response::ResourceReadError::Unavailable)?
+            .read(vigilo::response::ResourceHandle(handle), offset, max_bytes)
+    }
+
     pub(crate) fn capped_log_message(&mut self, msg: String) -> Option<String> {
         if self.max_log_messages == 0 || self.log_messages >= self.max_log_messages {
             return None;
@@ -866,6 +906,10 @@ impl Wasm {
         let mut store = Store::new(
             &self.engine,
             EvaluatorHost {
+                resources: None,
+                resource_max_bytes: self.config.max_memory_bytes,
+                resource_timeout: (self.config.timeout_ms > 0)
+                    .then(|| Duration::from_millis(self.config.timeout_ms)),
                 table: ResourceTable::new(),
                 ctx: WasiCtxBuilder::new().build(),
                 limits: self.config.store_limits()?,
@@ -935,6 +979,9 @@ mod tests {
 
     fn test_host(max_log_message_bytes: usize, max_log_messages: u32) -> EvaluatorHost {
         EvaluatorHost {
+            resources: None,
+            resource_max_bytes: Config::default().max_memory_bytes,
+            resource_timeout: None,
             table: ResourceTable::new(),
             ctx: WasiCtxBuilder::new().build(),
             limits: Config::default().store_limits().unwrap(),

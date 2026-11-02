@@ -18,6 +18,7 @@ homepage = "https://agentvigilo.com"
 
 [dependencies]
 anyhow = { version = "1.0.102" }
+async-compression = { version = "0.4", default-features = false, features = ["tokio", "gzip", "zlib"] }
 async-trait = {  version = "0.1.89" }
 aws-config = { version = "1.13.0", default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-s3 = { version = "1.155.0", default-features = false, features = ["rt-tokio", "rustls", "default-https-client"] }
@@ -38,7 +39,7 @@ sqlx = { version = "0.8.6", features = ["chrono", "macros", "migrate", "postgres
 tempfile = "3.23.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["full"] }
-tokio-util = { version = "0.7.18" }
+tokio-util = { version = "0.7.18", features = ["io"] }
 toml = { version = "1.1.2"}
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

@@ -79,6 +79,17 @@ Fixture-backed compatibility tests use the `evaluator-abi-fixtures` Cargo
 feature. They are normal tests rather than ignored tests, keeping them isolated
 from the PostgreSQL tier that selects `--ignored` tests.
 
+Build both fixtures before running the ABI tests:
+
+```bash
+cargo build -p sentiment-basic-en -p response-resource-fixture --locked --target wasm32-wasip2 --release
+cargo test -p vigilo --locked --features evaluator-abi-fixtures --bin vigilo evaluator_abi::
+```
+
+The resource fixture exercises reads through actual Wasm imports, including invalid
+ranges, expired handles from earlier invocations, and execution after errors or traps.
+
+
 The registry is static and auditable. CI invariants reject duplicate
 declarations, adapter ids, and fixture artifacts; runtime resolution rejects
 unknown identities and changed contract hashes. Workers cache a compiled
@@ -103,18 +114,31 @@ and results retain explicit correlation identifiers. Completion status and stop
 reason are separate: a completed response can be a refusal.
 
 The `requirements` export declares original-body, mapped-item, content-media-type,
-and tool evidence requirements. The current execution path supplies no
-`response-evidence` and rejects evaluators declaring these requirements before
-calling `evaluate`. The sentiment example reads `input.actual` and declares none
-of these additional requirements. Requirements must describe evidence the evaluator
-actually consumes, not its preferred provider format.
+and tool evidence requirements. A successful HTTP invocation supplies its captured
+original body to the evaluator. Calls without captured bytes cannot satisfy an
+original-body requirement. Mapped-item requirements are rejected because mapped
+response evidence is not supplied on this execution path. The sentiment example
+reads `input.actual` and declares none of these additional requirements.
 
-`executor.read-resource(handle, offset, max-bytes)` returns bounded bytes or a typed
-error. Handles are opaque and invocation-scoped. The current host returns
-`unavailable` because no resource table is installed. The contract distinguishes
-`invalid-handle`, `out-of-bounds`, and `limit-exceeded`; offset at EOF returns empty
-bytes, offset beyond EOF is out of bounds, and a zero read budget is invalid.
-Live handles are execution capabilities, not durable storage identities.
+`executor.read-resource(handle, offset, max-bytes)` reads original bytes on demand.
+The host shares immutable allocations across evaluators and copies only the requested
+range into Wasm memory. Handles are authorized only within their evaluator invocation;
+a handle from another invocation is invalid. Store destruction releases the resource
+table on success, evaluator error, or trap. Live handles are never persisted. Their numeric values are not stable evidence
+and must not be used to derive evaluation scores.
+
+A store with no resource table returns `unavailable`. A foreign handle returns
+`invalid-handle`; offset beyond EOF returns `out-of-bounds`; offset at EOF returns
+empty bytes. Zero or oversized reads, exhausted budgets, and expired resource
+deadlines return `limit-exceeded`.
+
+Each invocation permits at most 64 resources and 4096 read calls, including failed
+and EOF reads. Each read requests at most 64 KiB. Total retained resource bytes are
+bounded by the configured Wasm memory ceiling; this is an additional host-side
+budget, separate from guest linear memory. Cumulative returned bytes are bounded
+by four times that ceiling. Repeated reads count again. Resource access also respects
+the configured evaluation timeout. Original capture stays ephemeral on this path;
+it does not establish durable replay availability.
 
 Configuration schema, evidence schema, evaluator ABI, and application release
 versions are distinct. Exact schema identity checks reject unsupported versions;

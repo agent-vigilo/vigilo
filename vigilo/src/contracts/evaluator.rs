@@ -68,6 +68,10 @@ pub(crate) struct EvaluatorInput {
 /// Captured output produced by the evaluated agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AgentOutput {
+    /// Ephemeral original bytes, shared across evaluators without serialization.
+    /// Persistence explicitly owns durable evidence; live resources never enter JSON.
+    #[serde(skip)]
+    pub(crate) captured_body: Option<vigilo::response::CapturedBody>,
     /// Final user-visible text output, when applicable.
     #[serde(default)]
     pub(crate) text: Option<String>,

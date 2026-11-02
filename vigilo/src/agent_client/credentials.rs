@@ -316,6 +316,10 @@ impl Provider {
         self.client
             .get_or_try_init(|| async {
                 reqwest::Client::builder()
+                    .no_gzip()
+                    .no_brotli()
+                    .no_deflate()
+                    .no_zstd()
                     .redirect(reqwest::redirect::Policy::none())
                     .retry(reqwest::retry::never())
                     .no_proxy()

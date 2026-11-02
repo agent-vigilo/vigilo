@@ -84,13 +84,33 @@ impl EvaluatorAbiAdapter for V1Adapter {
         input: EvaluatorInput,
     ) -> anyhow::Result<EvaluatorOutput> {
         let mut store = runtime.evaluator_store()?;
+        let captured = input
+            .actual
+            .captured_body
+            .clone()
+            .map(|body| store.data_mut().install_response_body(body))
+            .transpose()?;
         let instance = instance_pre.instantiate(&mut store)?;
         let bindings = bindings::EvaluatorWorld::new(&mut store, &instance)?;
         let requirements = bindings
             .vigilo_evaluator_evaluator()
             .call_requirements(&mut store)?;
-        validate_available_evidence(&requirements)?;
-        let input = map_input(input)?;
+        validate_available_evidence(&requirements, captured.is_some())?;
+        let mut input = map_input(input)?;
+        input.response_evidence =
+            captured.map(
+                |body| bindings::vigilo::evaluator::types::ResponseEvidence {
+                    schema_version: "1.0.0".into(),
+                    body: bindings::vigilo::evaluator::types::BodyMetadata {
+                        resource: body.resource.0,
+                        byte_length: body.byte_length,
+                        content_type: body.content_type,
+                    },
+                    items: None,
+                    status: None,
+                    stop_reason: None,
+                },
+            );
         let output = bindings
             .vigilo_evaluator_evaluator()
             .call_evaluate(&mut store, &input)
@@ -112,13 +132,21 @@ impl EvaluatorAbiAdapter for V1Adapter {
 impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
     fn read_resource(
         &mut self,
-        _handle: u64,
-        _offset: u64,
-        _max_bytes: u32,
+        handle: u64,
+        offset: u64,
+        max_bytes: u32,
     ) -> Result<Vec<u8>, bindings::vigilo::evaluator::types::ResourceReadError> {
-        // No resource table is installed on this execution path. Fail closed;
-        // numeric handles must never be interpreted as paths or global identities.
-        Err(bindings::vigilo::evaluator::types::ResourceReadError::Unavailable)
+        self.read_response_resource(handle, offset, max_bytes)
+            .map_err(|error| {
+                use bindings::vigilo::evaluator::types::ResourceReadError as WitError;
+                use vigilo::response::ResourceReadError as HostError;
+                match error {
+                    HostError::Unavailable => WitError::Unavailable,
+                    HostError::InvalidHandle => WitError::InvalidHandle,
+                    HostError::OutOfBounds => WitError::OutOfBounds,
+                    HostError::LimitExceeded => WitError::LimitExceeded,
+                }
+            })
     }
 
     fn trace(&mut self, msg: String) {
@@ -154,11 +182,13 @@ impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
 }
 
 /// Reject unsatisfied declared evidence before the evaluator can score a case.
-/// This execution path exposes only the actual-output contract, not resources.
+/// Original bytes are available only when captured by the host; mapped evidence
+/// is not inferred from the legacy actual-output fields.
 fn validate_available_evidence(
     requirements: &bindings::vigilo::evaluator::types::EvidenceRequirements,
+    has_original_body: bool,
 ) -> anyhow::Result<()> {
-    if requirements.original_body
+    if (requirements.original_body && !has_original_body)
         || requirements.mapped_items
         || !requirements.content_media_types.is_empty()
         || requirements.tool_calls
@@ -347,7 +377,10 @@ mod tests {
             tool_calls: false,
             tool_results: false,
         };
-        assert!(validate_available_evidence(&empty()).is_ok());
+        assert!(validate_available_evidence(&empty(), false).is_ok());
+        let mut original = empty();
+        original.original_body = true;
+        assert!(validate_available_evidence(&original, true).is_ok());
         for field in 0..5 {
             let mut requirements = empty();
             match field {
@@ -357,7 +390,7 @@ mod tests {
                 3 => requirements.tool_calls = true,
                 _ => requirements.tool_results = true,
             }
-            assert!(validate_available_evidence(&requirements).is_err());
+            assert!(validate_available_evidence(&requirements, false).is_err());
         }
     }
 
@@ -377,6 +410,7 @@ mod tests {
                 metadata: BTreeMap::from([("source".to_string(), json!("test"))]),
             },
             actual: AgentOutput {
+                captured_body: None,
                 text: Some("positive".to_string()),
                 structured: Some(json!({"label": "positive"})),
                 tool_calls: vec![ToolCall {

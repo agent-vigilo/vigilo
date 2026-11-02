@@ -46,6 +46,9 @@ pub(crate) struct Services<'a> {
     pub(crate) credentials: &'a credentials::Provider,
 }
 
+#[path = "agent_client/capture.rs"]
+pub(crate) mod capture;
+
 use std::time::Duration;
 
 use serde_json::{
@@ -354,6 +357,7 @@ fn output_from_response_json(response_json: Value) -> anyhow::Result<AgentOutput
 
     if let Value::String(text) = &output_value {
         return Ok(AgentOutput {
+            captured_body: None,
             text: Some(text.clone()),
             structured: None,
             tool_calls: Vec::new(),
@@ -585,7 +589,8 @@ async fn invoke_inner(
         .build()
         .map_err(|err| Failure::transport(err, "invalid agent HTTP request", None))?;
     observation.start_http();
-    let mut response = client
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(timeout_secs));
+    let response = client
         .execute(request)
         .await
         .map_err(|err| Failure::transport(err, "agent HTTP request failed", None))?;
@@ -602,28 +607,19 @@ async fn invoke_inner(
             max_retry_after,
         )
     });
-    let mut body = limits::Body::new(limits.max_response_bytes);
-    while let Some(chunk) = response.chunk().await.map_err(|err| {
-        http_failure.clone().unwrap_or_else(|| {
-            Failure::transport(
-                err,
-                "failed to read agent HTTP response body",
-                Some(status.as_u16()),
-            )
-        })
-    })? {
-        body.append(&chunk).map_err(|err| {
-            Failure::terminal(
-                Kind::BodyLimit,
-                format!("agent HTTP response limit exceeded: {err}"),
-            )
-            .with_status(status.as_u16())
+    let captured = capture::collect(response, limits.max_response_bytes, deadline)
+        .await
+        .map_err(|error| {
+            if error.kind == Kind::BodyLimit {
+                error
+            } else {
+                http_failure.clone().unwrap_or(error)
+            }
         })?;
-    }
-    let bytes = body.finish();
+    let bytes = captured.bytes();
     observation.finish_http();
     // Match reqwest text decoding: strip a UTF-8 BOM and replace invalid UTF-8.
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
     let body = String::from_utf8_lossy(bytes);
 
     if let Some(failure) = http_failure {
@@ -644,9 +640,11 @@ async fn invoke_inner(
     {
         observation.data.usage = diagnostics::chat_usage(&response_json);
     }
-    let output = output_from_response_json(response_json).map_err(|err| {
+    let mut output = output_from_response_json(response_json).map_err(|err| {
         Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
     })?;
+
+    output.captured_body = Some(captured);
 
     Ok(attach_invocation_metadata(
         output,
