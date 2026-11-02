@@ -680,3 +680,55 @@ payload sizes, catalog reuse, and absence of per-case SQL tables after timing
 counters are frozen. Synthetic administration fixtures read the same verified
 files before seeding execution evidence. Cleanup removes only the exact recorded
 campaign resources, including its object-storage volume.
+
+### Worker Protocol Observations
+
+Worker execution workloads also record `external.postgres_protocol`: frontend
+PostgreSQL Query/Sync exchange counts, connection counts, and frontend protocol bytes. A bounded
+plaintext loopback proxy observes only the measured child. Setup, server-statistics
+collection, and correctness-oracle queries bypass it. These are protocol exchanges,
+not TCP packets, individual SQL statements, or latency measurements. Authentication
+frames contribute bytes but not Query/Sync counts. The shared-database worker
+fixture cannot attribute its traffic separately to control and execution planes.
+
+The proxy is limited to 128 connections and 64 MiB per protocol frame, streams
+payloads in 8 KiB blocks, and retains no SQL, credentials, or parameter contents.
+Malformed/truncated traffic invalidates the observation. Its sockets and threads
+are closed and joined on normal completion or failure. Timing includes proxy
+forwarding overhead; compare timings only between equally instrumented samples.
+
+Fixture catalogs default `response_mapping` to true, selecting `/text` explicitly.
+A preserved build that predates response mapping uses an explicitly separate
+catalog snapshot with `response_mapping = false`. Record both catalog identities;
+keep case bytes, agent responses, evaluator counts, and correctness expectations
+identical. Such profiles establish equivalent-work comparisons, not identical
+configuration or evaluator artifacts. Never silently infer a fixture mode from a
+binary version or downgrade a failed mapping to raw data.
+
+The historical worker SQL window also includes its fixed correctness-oracle SQL
+before collector finalization. Keep that overhead explicit when interpreting the
+50-statement baseline; it is not 50 application-only statements. Protocol counters
+exclude oracle connections. The routed response-query service test snapshots server
+counters immediately around the worker, before its oracle, and reports control and
+execution categories separately. Run that opt-in matrix alone on its PostgreSQL
+server so resets or statistics eviction cannot invalidate its observations.
+
+With the [distributed test services](../README.md#test-tiers) configured and
+`pg_stat_statements` installed in `public` on both databases, run the routed matrix:
+
+```bash
+VIGILO_E2E_MULTI_DATABASE=1 VIGILO_RESPONSE_QUERY_MATRIX=1 \
+  cargo test -p vigilo --locked --test multi_database_e2e \
+  response_queries::routed_response_query_matrix -- --exact --nocapture
+```
+
+It asserts statement categories and Query/Sync budgets for success, multiple
+bindings and decoded content, evaluator failure, agent failure, mapping failure,
+and a two-attempt retry. Empty broker passes are reported separately. Each runtime
+connection adds two timeout-configuration reads and five Query/Sync exchanges;
+raw counters and connection counts are retained rather than silently normalized.
+The matrix holds the current greenfield schema constant. An explicit
+`VIGILO_RESPONSE_QUERY_BINARY` and `VIGILO_E2E_SENTIMENT_WASM_PATH` select immutable
+artifacts. `VIGILO_RESPONSE_QUERY_PROFILE=raw` selects the preserved baseline
+fixture, which expects no mapped configuration or retained response packets.
+This is a test fixture choice, not a runtime compatibility mode.

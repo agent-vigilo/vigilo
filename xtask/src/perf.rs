@@ -42,6 +42,8 @@ mod config;
 mod diagnostics;
 mod fixture;
 mod model;
+#[path = "../../vigilo/tests/support/postgres_probe.rs"]
+mod postgres_probe;
 mod process;
 mod projection;
 mod provenance;

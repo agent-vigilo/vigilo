@@ -2336,6 +2336,7 @@ mod tests {
                 message: "fixture".into(),
             },
             external: ExternalMeasurements {
+                postgres_protocol: None,
                 storage_counters: BTreeMap::new(),
                 sql_databases: Vec::new(),
                 table_writes: BTreeMap::new(),

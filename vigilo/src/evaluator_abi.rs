@@ -24,6 +24,9 @@ use crate::{
 
 mod v1;
 
+#[cfg(all(test, feature = "evaluator-abi-fixtures"))]
+mod replay_tests;
+
 pub(crate) trait EvaluatorAbiAdapter: Send + Sync {
     fn identity(&self) -> &'static EvaluatorAbiIdentity;
 

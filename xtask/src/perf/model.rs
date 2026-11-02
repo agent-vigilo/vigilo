@@ -444,6 +444,9 @@ pub struct ProcessMeasurement {
 /// Scoped service and durable-state measurements for one workload execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExternalMeasurements {
+    /// Whole-worker frontend Query/Sync exchanges and bytes; excludes harness SQL.
+    #[serde(default)]
+    pub postgres_protocol: Option<super::postgres_probe::Observation>,
     /// PostgreSQL statements executed in the sample scope.
     pub sql_calls: Option<u64>,
     /// Complete statement categories per distinct database; empty when not collected.

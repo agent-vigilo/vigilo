@@ -1,0 +1,264 @@
+[
+  {
+    "name": "chat-completion",
+    "body": "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"good service\"},\"finish_reason\":\"stop\"}]}",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [
+            {
+              "mode": "single",
+              "item": {
+                "type": "message",
+                "content": [
+                  {
+                    "media_type": "text/plain",
+                    "source": {
+                      "representation": "inline_text",
+                      "selection": {
+                        "pointer": "/choices/0/message/content"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "stop_reason": {
+            "selection": {
+              "pointer": "/choices/0/finish_reason"
+            },
+            "values": {
+              "stop": "end_turn"
+            }
+          }
+        }
+      }
+    },
+    "expected_sentiment": "positive"
+  },
+  {
+    "name": "responses-incomplete",
+    "body": "{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"bad service\"}]}]}",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [
+            {
+              "mode": "single",
+              "item": {
+                "type": "message",
+                "content": [
+                  {
+                    "media_type": "text/plain",
+                    "source": {
+                      "representation": "inline_text",
+                      "selection": {
+                        "pointer": "/output/0/content/0/text"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "status": {
+            "selection": {
+              "pointer": "/status"
+            },
+            "values": {
+              "incomplete": "incomplete"
+            }
+          },
+          "stop_reason": {
+            "selection": {
+              "pointer": "/incomplete_details/reason"
+            },
+            "values": {
+              "max_output_tokens": "limit"
+            }
+          }
+        }
+      }
+    },
+    "expected_sentiment": "negative"
+  },
+  {
+    "name": "messages-content-blocks",
+    "body": "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"good\"},{\"type\":\"text\",\"text\":\"excellent\"}],\"stop_reason\":\"end_turn\"}",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [
+            {
+              "mode": "each",
+              "source": {
+                "pointer": "/content"
+              },
+              "item": {
+                "type": "message",
+                "content": [
+                  {
+                    "media_type": "text/plain",
+                    "source": {
+                      "representation": "inline_text",
+                      "selection": {
+                        "pointer": "/text"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "stop_reason": {
+            "selection": {
+              "pointer": "/stop_reason"
+            },
+            "values": {
+              "end_turn": "end_turn"
+            }
+          }
+        }
+      }
+    },
+    "expected_sentiment": "positive"
+  },
+  {
+    "name": "refusal-is-evidence",
+    "body": "{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"I cannot assist with that request.\"}]}],\"status\":\"completed\"}",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [
+            {
+              "mode": "single",
+              "item": {
+                "type": "message",
+                "content": [
+                  {
+                    "media_type": "text/plain",
+                    "source": {
+                      "representation": "inline_text",
+                      "selection": {
+                        "pointer": "/output/0/content/0/refusal"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "status": {
+            "selection": {
+              "pointer": "/status"
+            },
+            "values": {
+              "completed": "completed"
+            }
+          }
+        }
+      }
+    },
+    "expected_sentiment": "neutral"
+  },
+  {
+    "name": "ordered-multimodal-tools",
+    "body": "{\"messages\":[{\"text\":\"good\",\"image\":\"AP8=\"},{\"text\":\"excellent\",\"image\":\"AP8=\"}],\"call\":{\"id\":\"call-1\",\"name\":\"lookup\",\"arguments\":\"{ \\\"id\\\": 1 }\"},\"result\":{\"id\":\"call-1\",\"data\":{\"found\":true},\"is_error\":false}}",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [
+            {
+              "mode": "each",
+              "source": {
+                "pointer": "/messages"
+              },
+              "item": {
+                "type": "message",
+                "content": [
+                  {
+                    "media_type": "text/plain",
+                    "source": {
+                      "representation": "inline_text",
+                      "selection": {
+                        "pointer": "/text"
+                      }
+                    }
+                  },
+                  {
+                    "media_type": "image/png",
+                    "source": {
+                      "representation": "base64",
+                      "selection": {
+                        "pointer": "/image"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "mode": "single",
+              "item": {
+                "type": "tool_call",
+                "call_id": {
+                  "pointer": "/call/id"
+                },
+                "name": {
+                  "source": "field",
+                  "selection": {
+                    "pointer": "/call/name"
+                  }
+                },
+                "arguments": {
+                  "media_type": "application/json",
+                  "source": {
+                    "representation": "json_string",
+                    "selection": {
+                      "pointer": "/call/arguments"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "mode": "single",
+              "item": {
+                "type": "tool_result",
+                "call_id": {
+                  "pointer": "/result/id"
+                },
+                "content": [
+                  {
+                    "media_type": "application/json",
+                    "source": {
+                      "representation": "json_value",
+                      "selection": {
+                        "pointer": "/result/data"
+                      }
+                    }
+                  }
+                ],
+                "is_error": {
+                  "pointer": "/result/is_error"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "expected_sentiment": "positive"
+  }
+]

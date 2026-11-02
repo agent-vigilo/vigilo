@@ -451,7 +451,7 @@ impl RetainedResponse {
         not(test),
         expect(
             dead_code,
-            reason = "Response runtime integration is gated; persistence tests exercise this contract"
+            reason = "Internal reconstruction is tested; no public replay command is provided"
         )
     )]
     pub(crate) fn reconstruct(&self) -> anyhow::Result<MappedResponse> {
@@ -531,7 +531,7 @@ impl RetainedResponse {
         not(test),
         expect(
             dead_code,
-            reason = "Response runtime integration is gated; persistence tests exercise this contract"
+            reason = "Internal reconstruction is tested; no public replay command is provided"
         )
     )]
     pub(crate) fn missing_dependencies(

@@ -305,3 +305,28 @@ fn resign(value: serde_json::Value) -> serde_json::Value {
     metadata.metadata_hash = hash(&bounded_json(&metadata).unwrap());
     serde_json::to_value(metadata).unwrap()
 }
+
+#[test]
+fn unsupported_mapping_implementation_and_execution_plan_fail_closed() {
+    let packet = packet(Uuid::nil(), Uuid::nil(), Uuid::nil(), PersistenceMode::Full);
+    let mut metadata = packet.metadata_json().unwrap();
+    metadata["mapping_implementation"] = json!("unknown-mapper@2");
+    let stored =
+        RetainedResponse::from_storage(resign(metadata), packet.payload().to_vec()).unwrap();
+    assert!(
+        stored
+            .reconstruct()
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported response mapping implementation")
+    );
+    let mut unsupported = plan();
+    unsupported.version = 2;
+    assert!(
+        packet
+            .missing_dependencies(&unsupported, &Default::default())
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported evaluator execution plan")
+    );
+}

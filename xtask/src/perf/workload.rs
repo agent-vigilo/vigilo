@@ -266,6 +266,7 @@ impl WorkloadRunner {
             return Ok(());
         }
         let fixture = load(&self.root, fixture_id)?;
+        super::artifact::atomic_json(&self.run_dir.join("provenance/fixture.json"), &fixture)?;
         let service = ServiceHarness::start(
             &self.root,
             &self.run_dir,
@@ -1174,29 +1175,33 @@ impl WorkloadRunner {
                     )?,
                     "publish worker queue",
                 )?;
+                let probe = super::postgres_probe::Probe::start(&scope.database_url)?;
                 let baseline = service.begin_measurement(scope)?;
                 let process = invoke(
                     binary,
-                    worker_args(&scope.database_url, &scope.messaging_url),
+                    worker_args(&probe.url, &scope.messaging_url),
                     &env,
                     watchdog,
                     stdout_limit,
                     stderr_limit,
                 )?;
+                let protocol = probe.finish()?;
                 let counts = product(oracle_worker(
                     &scope.database_url,
                     &run_id,
                     cases,
                     evaluators,
                 ))?;
-                finish(
+                let mut outcome = finish(
                     service,
                     scope,
                     baseline,
                     process,
                     counts,
                     ExternalOracle::new(0, cases as u64, exact),
-                )
+                )?;
+                outcome.external.postgres_protocol = Some(protocol);
+                Ok(outcome)
             }
             "system.lifecycle.v1" | "system.capacity.v1" => {
                 let inputs = self.inputs(&format!("{workload_id}:{tuple}"), cases, evaluators)?;

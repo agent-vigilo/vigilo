@@ -10,6 +10,9 @@ mod support;
 #[path = "multi_database_e2e/recovery.rs"]
 mod recovery;
 
+#[path = "multi_database_e2e/response_queries.rs"]
+mod response_queries;
+
 #[path = "multi_database_e2e/worker_storage.rs"]
 mod worker_storage;
 
@@ -891,6 +894,11 @@ fn handle_agent_request(mut stream: TcpStream) -> anyhow::Result<()> {
         (
             "HTTP/1.1 500 Internal Server Error",
             json!({"error": "forced integration agent failure"}).to_string(),
+        )
+    } else if request.contains("force-resource-response") {
+        (
+            "HTTP/1.1 200 OK",
+            json!({"text":"good reliable response","data":"AP8="}).to_string(),
         )
     } else if request.contains("force-mapping-error") {
         ("HTTP/1.1 200 OK", "{malformed".to_string())

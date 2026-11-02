@@ -17,21 +17,31 @@ use anyhow::{
     Result,
     bail,
 };
-use serde::Deserialize;
+use serde::{
+    Deserialize,
+    Serialize,
+};
 use serde_json::{
     Value,
     json,
 };
 use uuid::Uuid;
 
+fn mapped_responses() -> bool {
+    true
+}
+
 const FIXTURE_SCHEMA: &str = "performance-fixtures/v1";
 const FIXTURE_NAMESPACE: Uuid = Uuid::from_u128(0x8f17098f_9fd0_4c9f_9164_957940ab5e8d);
 
 /// Complete deterministic performance fixture catalog.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FixtureCatalog {
     /// Fixture document shape.
     pub schema_id: String,
+    /// Explicitly selects mapped response fixtures; false is for preserved pre-mapping builds.
+    #[serde(default = "mapped_responses")]
+    pub response_mapping: bool,
     /// Stable fixture identity referenced by workloads.
     pub id: String,
     /// Published evaluator used by worker workloads.
@@ -51,7 +61,7 @@ pub struct FixtureCatalog {
 }
 
 /// Run-creation workload cardinalities.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RunCreateFixture {
     /// Number of cases submitted to `run create`.
     pub cases: usize,
@@ -60,7 +70,7 @@ pub struct RunCreateFixture {
 }
 
 /// Coordinator dispatch workload cardinalities.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CoordinatorFixture {
     /// Chunks made ready by the measured coordinator cycle.
     pub chunks: usize,
@@ -69,7 +79,7 @@ pub struct CoordinatorFixture {
 }
 
 /// Orthogonal worker fixture dimensions.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WorkerFixture {
     /// Case-heavy tuple case count.
     pub cases_many: usize,
@@ -78,7 +88,7 @@ pub struct WorkerFixture {
 }
 
 /// End-to-end lifecycle bounds.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LifecycleFixture {
     /// Cases processed by the lifecycle workload.
     pub cases: usize,
@@ -189,7 +199,13 @@ pub fn write_run_inputs_with_payload(
     fs::create_dir_all(directory)?;
     let profile = directory.join("profile.yaml");
     let mut dataset = directory.join("dataset.yaml");
-    let profile_value = profile_value(fixture, identity, agent_url, evaluator_count);
+    let mut profile_value = profile_value(fixture, identity, agent_url, evaluator_count);
+    if !fixture.response_mapping {
+        profile_value["agent"]
+            .as_object_mut()
+            .expect("agent object")
+            .remove("response");
+    }
     let dataset_value = dataset_value(identity, case_count, payload_bytes);
     fs::write(&profile, serde_yaml::to_string(&profile_value)?)?;
     let encoded = serde_yaml::to_string(&dataset_value)?;
@@ -319,6 +335,7 @@ mod tests {
     fn fixture() -> FixtureCatalog {
         FixtureCatalog {
             schema_id: FIXTURE_SCHEMA.into(),
+            response_mapping: true,
             id: "mvp-v1".into(),
             evaluator_ref: "vigilo/example:1.0.0".into(),
             agent_response_text: "good".into(),
@@ -403,5 +420,30 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod response_fixture_tests {
+    #[test]
+    fn response_mapping_is_an_explicit_fixture_choice() {
+        let source = include_str!("../../../performance/fixtures/mvp-v1.toml");
+        let mut fixture: super::FixtureCatalog = toml::from_str(source).unwrap();
+        for enabled in [true, false] {
+            fixture.response_mapping = enabled;
+            let directory = tempfile::tempdir().unwrap();
+            let inputs = super::write_run_inputs(
+                directory.path(),
+                &fixture,
+                "response",
+                "http://127.0.0.1",
+                1,
+                1,
+            )
+            .unwrap();
+            let profile: serde_json::Value =
+                serde_yaml::from_str(&std::fs::read_to_string(inputs.profile).unwrap()).unwrap();
+            assert_eq!(profile["agent"].get("response").is_some(), enabled);
+        }
     }
 }

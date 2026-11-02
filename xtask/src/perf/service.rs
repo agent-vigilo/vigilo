@@ -103,6 +103,18 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
     let database_url = harness.create_database("sentinel")?;
     let scope = harness.create_sample_scope(database_url, "sentinel")?;
 
+    let probe = super::postgres_probe::Probe::start(&scope.database_url)?;
+    let mut probe_client = PgClient::connect(&probe.url, NoTls)?;
+    probe_client.simple_query("SELECT 17")?;
+    drop(probe_client);
+    let protocol = probe.finish()?;
+    if protocol.query_sync_exchanges != 1
+        || protocol.frontend_bytes == 0
+        || protocol.connections != Some(1)
+    {
+        bail!("protocol probe did not observe exactly one simple query");
+    }
+
     let first = harness.begin_measurement(&scope)?;
     harness.storage_reader()?.probe()?;
     let response = HttpClient::new()
@@ -803,6 +815,7 @@ impl ServiceHarness {
         let queue = self.queue_counts(&scope.vhost)?;
         let http = self.agent.snapshot();
         Ok(ExternalMeasurements {
+            postgres_protocol: None,
             storage_counters,
             sql_calls: Some(sql_calls),
             sql_databases,

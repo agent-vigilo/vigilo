@@ -1452,3 +1452,75 @@ async fn retained_response_rejects_stale_or_mismatched_evidence_and_cascades_on_
         .is_none()
     );
 }
+
+#[cfg(feature = "evaluator-abi-fixtures")]
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL and built evaluator ABI fixtures"]
+async fn persisted_response_replays_through_wasm_without_agent_io(pool: PgPool) {
+    use crate::{
+        context::wasm::{
+            Config,
+            Wasm,
+        },
+        contracts::evaluator::{
+            EvaluatorInput,
+            EvaluatorOutcome,
+            Measurement,
+        },
+        evaluator_abi::{
+            PreparedEvaluator,
+            current_identity,
+        },
+    };
+    let seed = seed_running_attempt(&pool, 120, 120).await;
+    let packet =
+        evidence_for_seed(&pool, &seed, crate::contracts::run::PersistenceMode::Full).await;
+    let wasm = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/wasm32-wasip2/release/sentiment_basic_en.wasm"),
+    )
+    .unwrap();
+    let runtime = Wasm::new(Config {
+        timeout_ms: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    let evaluator = PreparedEvaluator::compile(&runtime, &wasm, &current_identity()).unwrap();
+    let evaluate = |response: crate::contracts::response_retention::RetainedResponse| {
+        let mapped = response.reconstruct().unwrap();
+        let mut input:EvaluatorInput=serde_json::from_value(json!({"run_id":seed.run_id.to_string(),"execution_id":seed.execution_id.to_string(),"attempt_id":seed.attempt_id.to_string(),"case":{"id":"case","task_type":"classification","input":{"text":"excellent"}},"actual":{},"evaluator_config":{}})).unwrap();
+        input.actual.captured_body = Some(mapped.original.clone());
+        input.actual.mapping = Some(std::sync::Arc::new(Ok(mapped)));
+        evaluator.execute(&runtime, input).unwrap()
+    };
+    let before = evaluate(packet.clone());
+    assert!(
+        matches!(&before.outcome,EvaluatorOutcome::Completed(Measurement::Ordinal {value}) if value == "neutral")
+    );
+    let mut transition = terminal(&seed);
+    transition.response_evidence = Some(packet);
+    finalize_execution_terminal_transitions(
+        &pool,
+        seed.run_id,
+        seed.run_shard,
+        seed.worker_id,
+        1,
+        &[transition],
+    )
+    .await
+    .unwrap();
+    let restored = crate::db::tables::execution_attempts::select_response_evidence(
+        &pool,
+        seed.run_id,
+        seed.run_shard,
+        seed.attempt_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let replayed = evaluate(restored);
+    assert_eq!(
+        serde_json::to_value(before.outcome).unwrap(),
+        serde_json::to_value(replayed.outcome).unwrap()
+    );
+}
