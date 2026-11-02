@@ -149,6 +149,7 @@ async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool
                 requires_worker_lease: false,
                 agent_invocation: None,
                 agent_failure: None,
+                response_evidence: None,
             },
         ],
     )
@@ -663,6 +664,7 @@ async fn terminal_failure_serializes_with_a_waiting_result_writer(pool: PgPool) 
                 requires_worker_lease: true,
                 agent_invocation: None,
                 agent_failure: None,
+                response_evidence: None,
             }],
         )
         .await

@@ -126,9 +126,13 @@ persistence:
   persist_evaluator_evidence: true
 ```
 
-- `mode` (enum): `full` | `summary`. `full` stores execution-level case snapshots and evaluator binding config on each execution. `summary` redacts payloads, metadata, and evaluator config but retains tags referenced by scorecard gates.
-- `persist_raw_outputs` (enum): `all` | `failures_only` | `none`. Controls `evaluator_results.raw_evaluator_output`; `failures_only` retains host-failed and errored invocation output.
-- `persist_evaluator_evidence` (bool): controls `evaluator_diagnostics.evidence`. When `false`, diagnostic evidence and raw evaluator output are redacted.
+- `mode` (enum, default `full`): `full` | `summary`. `full` stores execution-level case snapshots and evaluator binding config on each execution. `summary` redacts payloads, metadata, and evaluator config but retains tags referenced by scorecard gates.
+- `persist_raw_outputs` (enum, default `all`): `all` | `failures_only` | `none`. Controls `evaluator_results.raw_evaluator_output`; `failures_only` retains host-failed and errored invocation output.
+- `persist_evaluator_evidence` (bool, default `true`): controls `evaluator_diagnostics.evidence`. When `false`, diagnostic evidence and raw evaluator output are redacted.
+
+Omitting `persistence` or individual settings selects these defaults. The
+[response evidence persistence contract](/docs/architecture/response-evidence/)
+uses the same full/summary distinction.
 
 These settings affect execution/result artifact retention. Dataset case blobs and dataset-version membership remain durable so workers can execute retries and runs remain reproducible by content hash. The run profile snapshot is also retained because workers load it to invoke the configured agent and evaluators.
 

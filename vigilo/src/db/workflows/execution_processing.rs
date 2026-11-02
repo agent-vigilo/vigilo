@@ -371,6 +371,7 @@ pub(crate) struct ExecutionTerminalTransition {
     pub(crate) requires_worker_lease: bool,
     pub(crate) agent_invocation: Option<crate::agent_client::diagnostics::Diagnostics>,
     pub(crate) agent_failure: Option<crate::agent_client::failure::Failure>,
+    pub(crate) response_evidence: Option<crate::contracts::response_retention::RetainedResponse>,
 }
 
 /// Worker ownership attached to newly allocated execution attempts.
@@ -507,6 +508,7 @@ fn processed_terminal_failure(
             requires_worker_lease: true,
             agent_invocation: None,
             agent_failure: None,
+            response_evidence: None,
         },
     }
 }
@@ -530,6 +532,7 @@ fn processed_terminal_failure_without_worker_lease(
             requires_worker_lease: false,
             agent_invocation: None,
             agent_failure: None,
+            response_evidence: None,
         },
     }
 }
@@ -1320,6 +1323,7 @@ async fn evaluate_case_execution(
                     requires_worker_lease: true,
                     agent_invocation: agent_invocation.clone(),
                     agent_failure: None,
+                    response_evidence: None,
                 },
             };
 

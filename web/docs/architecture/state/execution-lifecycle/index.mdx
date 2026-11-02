@@ -58,3 +58,9 @@ usage counters are merged into `outcome_summary.agent_invocation` by the same
 authoritative terminal statement. A successful HTTP record survives a subsequent
 evaluator failure. This adds no query or transaction. See
 [invocation diagnostics](/docs/configuration/run-profile#agent-invocation-diagnostics).
+
+The terminal persistence boundary also accepts a shared response-evidence packet.
+It validates ownership and frozen provenance and stores its metadata and bytes in
+the same attempt update. Ordinary status reads omit the payload. See
+[Response Evidence](/docs/architecture/response-evidence/) for the persistence
+contract, execution availability, and cleanup ownership.

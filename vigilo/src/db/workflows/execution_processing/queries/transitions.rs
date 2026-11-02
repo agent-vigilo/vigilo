@@ -76,6 +76,31 @@ pub(crate) async fn finalize_execution_terminal_transitions(
         return Ok(());
     }
 
+    for transition in transitions {
+        if let Some(evidence) = &transition.response_evidence {
+            evidence.validate_owner(run_id, transition.execution_id, transition.attempt_id)?;
+        }
+    }
+    let response_evidence = transitions
+        .iter()
+        .map(|transition| {
+            transition
+                .response_evidence
+                .as_ref()
+                .map(|evidence| evidence.metadata_json())
+                .transpose()
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let response_bytes = transitions
+        .iter()
+        .map(|transition| {
+            transition
+                .response_evidence
+                .as_ref()
+                .map(|evidence| evidence.payload())
+        })
+        .collect::<Vec<_>>();
+
     let execution_ids = transitions
         .iter()
         .map(|transition| transition.execution_id)
@@ -190,15 +215,17 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 $15::timestamptz[],
                 $16::int4[],
                 $17::int8[],
-                $18::jsonb[]
-            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs, agent_invocation)
+                $18::jsonb[],
+                $19::jsonb[],
+                $20::bytea[]
+            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs, agent_invocation, response_evidence, response_bytes)
         ),
         transition_count AS (
             SELECT COUNT(*) AS expected_count
             FROM transition_input
         ),
         run_guard AS (
-            SELECT run_id AS id
+            SELECT run_id AS id, profile_hash, config_snapshot
             FROM run_snapshots
             WHERE run_id = $7::uuid
               AND run_shard = $8
@@ -238,6 +265,14 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                  )
             JOIN run_guard
               ON run_guard.id = executions.run_id
+             AND (transition_input.response_evidence IS NULL OR (
+                 transition_input.response_evidence #>> '{provenance,case_hash}' = executions.case_hash
+                 AND transition_input.response_evidence #>> '{provenance,profile_hash}' = run_guard.profile_hash
+                 AND transition_input.response_evidence #>> '{provenance,execution_plan_hash}' = run_guard.config_snapshot->>'execution_plan_hash'
+                 AND transition_input.response_evidence->>'retention' = COALESCE(run_guard.config_snapshot #>> '{profile,persistence,mode}', 'full')
+                 AND (transition_input.response_evidence->>'retention' = 'summary'
+                      OR transition_input.response_evidence->'configuration' = COALESCE(run_guard.config_snapshot #> '{profile,agent,response}', 'null'::jsonb))
+             ))
         ),
         authority_check AS (
             SELECT transition_count.expected_count
@@ -313,6 +348,8 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                     WHEN terminal_input.completed THEN NULL
                     ELSE terminal_input.error_message
                 END,
+                response_evidence = COALESCE(terminal_input.response_evidence, execution_attempts.response_evidence),
+                response_evidence_bytes = COALESCE(terminal_input.response_bytes, execution_attempts.response_evidence_bytes),
                 outcome_summary = execution_attempts.outcome_summary
                     || CASE WHEN terminal_input.agent_failure IS NOT NULL
                         THEN jsonb_build_object('agent_failure', terminal_input.agent_failure)
@@ -463,6 +500,8 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     .bind(jitter_ms)
     .bind(retry_delay_secs)
     .bind(agent_invocations)
+    .bind(response_evidence)
+    .bind(response_bytes)
     .fetch_one(&mut *tx)
     .await?;
 

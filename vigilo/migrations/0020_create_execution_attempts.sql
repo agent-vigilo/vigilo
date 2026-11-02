@@ -21,6 +21,17 @@ CREATE TABLE execution_attempts (
     request_artifact_uri TEXT,
     response_artifact_uri TEXT,
 
+    -- Shared response evidence; ordinary status/result reads do not load bytes.
+    response_evidence JSONB,
+    response_evidence_bytes BYTEA,
+    CONSTRAINT ck_attempt_response_evidence_pair CHECK (
+        (response_evidence IS NULL) = (response_evidence_bytes IS NULL)
+    ),
+    CONSTRAINT ck_attempt_response_evidence_size CHECK (
+        octet_length(response_evidence_bytes) <= 20971520
+        AND octet_length(response_evidence::text) <= 3145728
+    ),
+
     -- timing
     agent_latency_ms BIGINT CHECK (agent_latency_ms IS NULL OR agent_latency_ms >= 0),
     evaluator_latency_ms BIGINT CHECK (evaluator_latency_ms IS NULL OR evaluator_latency_ms >= 0),
@@ -141,3 +152,8 @@ COMMENT ON COLUMN execution_attempts.completed_at IS
 
 COMMENT ON COLUMN execution_attempts.updated_at IS
     'Timestamp of the last update to the attempt record.';
+
+COMMENT ON COLUMN execution_attempts.response_evidence IS
+    'Versioned response metadata and provenance shared by evaluators of this attempt; null means no retained packet. Summary retention records explicit omission.';
+COMMENT ON COLUMN execution_attempts.response_evidence_bytes IS
+    'Bounded original and decoded response bytes referenced by metadata ranges, never live evaluator handles. Deleted with the owning attempt.';

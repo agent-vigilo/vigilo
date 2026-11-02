@@ -1,0 +1,15 @@
+flowchart TD
+    caller[Caller supplies an attempt-scoped response packet] --> pack[Bound and validate metadata and bytes]
+    pack --> owner{Run, execution and attempt match?}
+    owner -->|No| reject[Reject without publishing evidence]
+    owner -->|Yes| transaction[Existing batched terminal transaction]
+    snapshot[Frozen case, profile and execution plan] --> guard
+    transaction --> guard{Live ownership and frozen provenance match?}
+    guard -->|No| reject
+    guard -->|Yes| update[Same attempt UPDATE stores metadata and byte payload]
+    update --> commit[Commit evidence with completion or retry state]
+    commit --> read[Explicit attempt-scoped read]
+    read --> integrity{Schema, hashes, ranges and budgets valid?}
+    integrity -->|No| unavailable[Report unavailable or invalid evidence]
+    integrity -->|Yes| restore[Restore immutable content without live handles]
+    commit --> deletion[Owner deletion cascades to response evidence]

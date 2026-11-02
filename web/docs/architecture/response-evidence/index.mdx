@@ -1,0 +1,89 @@
+---
+title: Response Evidence
+sidebar_label: Response Evidence
+description: Attempt-scoped response retention, provenance, integrity, and ownership.
+---
+
+import Mermaid from '@theme/Mermaid';
+import persistenceFlow from './persistence.mmd';
+
+# Response Evidence
+
+Response evidence belongs to one execution attempt and is shared by its evaluators.
+The attempt persistence boundary accepts a validated packet containing metadata and
+a binary payload. It writes both with the attempt's terminal transition, under the
+same shard fence, chunk lock, current-attempt check, and worker lease.
+
+The HTTP-to-evaluator worker path does not populate this packet. Explicit response
+mapping configurations are rejected for execution. The
+[mapping API](/docs/configuration/run-profile#mapping-engine) is available in the
+library. Retained evidence is an internal persistence contract; a public replay
+command is not provided.
+
+## Ownership and Writes
+
+<Mermaid value={persistenceFlow} />
+
+`execution_attempts.response_evidence` holds versioned metadata;
+`response_evidence_bytes` holds original response bytes and decoded content.
+The packet schema identity is `1.0.0`, independent of the application version;
+unsupported identities fail closed. Metadata and payload each carry a BLAKE3
+integrity checksum. Both columns are null when no packet exists. A summary packet has metadata and an empty
+byte payload, making deliberate omission distinguishable from absent evidence.
+
+The same batched statement that completes or fails attempts stores the packet.
+It verifies the owning run, execution and attempt, plus the case hash, profile hash,
+execution-plan hash, retention mode and mapping configuration against frozen state.
+An expired lease, replaced attempt, wrong worker or inconsistent provenance cannot
+write evidence. A committed terminal packet cannot be replaced by a late worker.
+
+Ordinary status and result queries omit these columns. A dedicated read selects one
+attempt's packet and validates its owner, schema, hashes and ranges. Resource reads
+during evaluation remain in memory; they do not query these columns.
+
+## Content and Provenance
+
+Original bytes are preserved exactly after HTTP decompression. Text and decoded
+binary content occupy ranges in the binary payload. Repeated decoded resources
+share stored bytes. Metadata preserves ordered items, content types, completion
+metadata, explicit mapping configuration, its hash, and the mapping implementation
+identity. A packet for a failed mapping retains original evidence and a safe error classification,
+with no partial mapped output.
+
+Provenance records the case and profile hashes, exact executable digest, and the
+hash of the evaluator execution plan already held in the immutable run snapshot.
+That plan pins evaluator artifacts, ABI identities, runtime compatibility and
+scoring policy. Full case inputs and evaluator bindings use the existing execution
+snapshots; the packet does not duplicate those snapshots per evaluator.
+
+Live evaluator handles are never serialized. Reconstruction returns immutable
+content that a host can register with fresh invocation-local handles. Restoring a
+packet is distinct from proving a reproducible evaluation: the original runtime,
+evaluator artifacts, frozen case/profile/plan and any required external responses
+must also be available. Dependency checks reject mismatched plans and report missing
+runtime/evaluator artifacts or unretained external responses. An artifact hash alone
+is not evidence that its bytes remain available. Available dependencies also do not
+prove deterministic scores: evaluator randomness, time, or uncontrolled external
+state can affect a re-evaluation.
+
+## Retention and Limits
+
+Omitted persistence settings default to `full`, `persist_raw_outputs: all`, and
+`persist_evaluator_evidence: true`. `summary` explicitly omits response content and
+mapping configuration from the packet. The raw-output and evaluator-evidence flags
+control evaluator results and diagnostics; they do not silently discard a full
+response packet. See [persistence settings](/docs/configuration/run-profile#persistence).
+
+Packets allow at most 4 MiB of original bytes, 20 MiB of total binary payload,
+2 MiB of serialized metadata, 4096 mapped items, 8192 content parts, 63 distinct
+decoded resources and 16 MiB of logical mapped content. Repeated references count
+against logical content limits, preventing amplification during reconstruction.
+The database also enforces paired metadata/payload presence and storage size limits.
+Larger payloads increase storage, WAL and transfer costs even when statement counts
+stay constant.
+
+The attempt owns the packet's lifetime. Deleting the attempt, its execution or its
+run removes the packet through existing cascades. There is no independent resource
+row or orphaned response object to collect. Removing a required external artifact
+makes replay unavailable; surviving provenance still identifies the required digest.
+No automatic runtime-artifact archive or retention duration is provided.

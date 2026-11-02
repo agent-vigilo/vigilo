@@ -45,6 +45,7 @@ pub(crate) struct RunProfile {
     pub(crate) defaults: RunDefaults,
 
     /// Persistence behavior controls for run/evaluation artifacts.
+    #[serde(default)]
     pub(crate) persistence: PersistenceSettings,
 
     /// Run-level scorecard and gate policy applied after every shard completes.
@@ -198,6 +199,7 @@ pub(crate) struct RunDefaults {
 
 /// Persistence policy controls for run output and evidence retention.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct PersistenceSettings {
     /// High-level persistence strategy (`full` vs `summary`).
     pub(crate) mode: PersistenceMode,
@@ -207,6 +209,16 @@ pub(crate) struct PersistenceSettings {
 
     /// Whether evaluator evidence blobs should be retained.
     pub(crate) persist_evaluator_evidence: bool,
+}
+
+impl Default for PersistenceSettings {
+    fn default() -> Self {
+        Self {
+            mode: PersistenceMode::Full,
+            persist_raw_outputs: PersistRawOutputsMode::All,
+            persist_evaluator_evidence: true,
+        }
+    }
 }
 
 /// Persistence breadth mode for run artifacts.
