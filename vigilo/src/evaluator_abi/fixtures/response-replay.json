@@ -260,5 +260,186 @@
       }
     },
     "expected_sentiment": "positive"
+  },
+  {
+    "name": "openai-chat-tools",
+    "body": "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"good\",\"tool_calls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{ \\\"id\\\": 1 }\"}},{\"id\":\"call-2\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"id\\\":2}\"}}]},\"finish_reason\":\"tool_calls\"}]}",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [
+            {
+              "mode": "single",
+              "item": {
+                "type": "message",
+                "content": [
+                  {
+                    "media_type": "text/plain",
+                    "source": {
+                      "representation": "inline_text",
+                      "selection": {
+                        "pointer": "/choices/0/message/content"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "mode": "each",
+              "source": {
+                "pointer": "/choices/0/message/tool_calls"
+              },
+              "item": {
+                "type": "tool_call",
+                "call_id": {
+                  "pointer": "/id"
+                },
+                "name": {
+                  "source": "field",
+                  "selection": {
+                    "pointer": "/function/name"
+                  }
+                },
+                "arguments": {
+                  "media_type": "application/json",
+                  "source": {
+                    "representation": "json_string",
+                    "selection": {
+                      "pointer": "/function/arguments"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "expected_sentiment": "positive",
+    "expected_tool_ids": [
+      "call-1",
+      "call-2"
+    ]
+  },
+  {
+    "name": "openai-responses-tool",
+    "body": "{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"good\",\"annotations\":[]}]},{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"lookup\",\"arguments\":\"{ \\\"id\\\": 1 }\"}]}",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [
+            {
+              "mode": "single",
+              "item": {
+                "type": "message",
+                "content": [
+                  {
+                    "media_type": "text/plain",
+                    "source": {
+                      "representation": "inline_text",
+                      "selection": {
+                        "pointer": "/output/0/content/0/text"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "mode": "single",
+              "item": {
+                "type": "tool_call",
+                "call_id": {
+                  "pointer": "/output/1/call_id"
+                },
+                "name": {
+                  "source": "field",
+                  "selection": {
+                    "pointer": "/output/1/name"
+                  }
+                },
+                "arguments": {
+                  "media_type": "application/json",
+                  "source": {
+                    "representation": "json_string",
+                    "selection": {
+                      "pointer": "/output/1/arguments"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "expected_sentiment": "positive",
+    "expected_tool_ids": [
+      "call-1"
+    ]
+  },
+  {
+    "name": "anthropic-messages-tool",
+    "body": "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"good\"},{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"lookup\",\"input\":{\"id\":1}}],\"stop_reason\":\"tool_use\"}",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [
+            {
+              "mode": "single",
+              "item": {
+                "type": "message",
+                "content": [
+                  {
+                    "media_type": "text/plain",
+                    "source": {
+                      "representation": "inline_text",
+                      "selection": {
+                        "pointer": "/content/0/text"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "mode": "single",
+              "item": {
+                "type": "tool_call",
+                "call_id": {
+                  "pointer": "/content/1/id"
+                },
+                "name": {
+                  "source": "field",
+                  "selection": {
+                    "pointer": "/content/1/name"
+                  }
+                },
+                "arguments": {
+                  "media_type": "application/json",
+                  "source": {
+                    "representation": "json_value",
+                    "selection": {
+                      "pointer": "/content/1/input"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "expected_sentiment": "positive",
+    "expected_tool_ids": [
+      "call-1"
+    ]
   }
 ]

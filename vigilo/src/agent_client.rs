@@ -205,12 +205,25 @@ fn build_openai_compatible_chat_messages(
         }));
     }
 
-    if let Some(input_messages) = test_case.input.get("messages").and_then(Value::as_array) {
+    if let Some(input_messages) = test_case.input.get("messages") {
+        let input_messages = input_messages
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("input.messages must be an array"))?;
         for message in input_messages {
-            let role = message
-                .get("role")
-                .and_then(Value::as_str)
-                .unwrap_or("user");
+            let message = message
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("input.messages entries must be objects"))?;
+            // This adapter only represents text messages. Silently discarding tool
+            // identities or multimodal fields would change the task being evaluated.
+            if message.keys().any(|key| key != "role" && key != "content") {
+                anyhow::bail!("input.messages entries support only role and string content");
+            }
+            let role = match message.get("role") {
+                None => "user",
+                Some(value) => value
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("input.messages role must be a string"))?,
+            };
             let content = message
                 .get("content")
                 .and_then(Value::as_str)
@@ -661,5 +674,108 @@ case_groups: []
         );
         assert!(body.get("case").is_none());
         assert_eq!(body.get("stream").and_then(Value::as_bool), Some(false));
+    }
+    fn fixture_profile() -> RunProfile {
+        serde_yaml::from_str(
+            r#"
+profile_id: p
+profile_version: 1
+description: d
+defaults:
+  max_attempts: 1
+  request_timeout_secs: 30
+  fail_on_any_blocking_failure: true
+  min_execution_score: 0.5
+persistence:
+  mode: full
+  persist_raw_outputs: all
+  persist_evaluator_evidence: true
+agent:
+  provider: example
+  name: model
+  http:
+    url: http://localhost/invoke
+case_groups: []
+"#,
+        )
+        .unwrap()
+    }
+
+    fn fixture_case(input: Value) -> TestCase {
+        TestCase {
+            id: "case".into(),
+            task_type: "test".into(),
+            case_group: None,
+            input,
+            expected: Some(json!({"oracle":"must not reach the agent"})),
+            context: Some(json!({"history":[1,2]})),
+            tags: vec!["tag".into()],
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn chat_messages_reject_lossy_or_malformed_inputs() {
+        let profile = fixture_profile();
+        for input in [
+            json!({"messages":"wrong"}),
+            json!({"messages":null}),
+            json!({"messages":[{"role":42,"content":"hello"}]}),
+            json!({"messages":[{"role":"assistant","content":"hello","tool_calls":[]}]}),
+            json!({"messages":[{"role":"tool","content":"hello","tool_call_id":"call-1"}]}),
+            json!({"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}),
+        ] {
+            assert!(
+                build_openai_compatible_chat_messages(&profile, &fixture_case(input.clone()))
+                    .is_err(),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_request_preserves_case_input_and_context_without_oracle() {
+        let case = fixture_case(
+            json!({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.invalid/image"}}]}]}),
+        );
+        let ids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+        let body = build_request_body(ids[0], ids[1], ids[2], &fixture_profile(), &case).unwrap();
+        assert_eq!(body["input"], case.input);
+        assert_eq!(body["case"]["input"], case.input);
+        assert_eq!(body["case"]["context"], json!({"history":[1,2]}));
+        assert_eq!(body["run_id"], ids[0].to_string());
+        assert_eq!(body["execution_id"], ids[1].to_string());
+        assert_eq!(body["attempt_id"], ids[2].to_string());
+        assert!(body["case"].get("expected").is_none());
+        assert!(!body.to_string().contains("must not reach the agent"));
+    }
+
+    #[test]
+    fn chat_request_preserves_text_order_and_selected_options() {
+        let mut profile = fixture_profile();
+        profile.agent.config = json!({"request_format":"openai_compatible_chat_completions","system_prompt":"system","temperature":0.3,"top_p":0.8,"min_p":0.1,"max_tokens":64,"stop":["END"],"seed":42,"response_format":{"type":"json_object"},"presence_penalty":0.2,"frequency_penalty":0.1,"repeat_penalty":1.1});
+        let case = fixture_case(
+            json!({"messages":[{"role":"assistant","content":"prior"},{"content":"next"}]}),
+        );
+        let body = build_openai_compatible_chat_completions_request_body(&profile, &case).unwrap();
+        assert_eq!(
+            body["messages"],
+            json!([{"role":"system","content":"system"},{"role":"assistant","content":"prior"},{"role":"user","content":"next"}])
+        );
+        assert_eq!(body["model"], "model");
+        assert_eq!(body["stream"], false);
+        for (key, value) in profile.agent.config.as_object().unwrap() {
+            if key != "request_format" && key != "system_prompt" {
+                assert_eq!(&body[key], value);
+            }
+        }
+        assert!(!body.to_string().contains("must not reach the agent"));
+        for (input, text) in [
+            (json!({"user_message":"hello","prompt":"ignored"}), "hello"),
+            (json!({"prompt":"prompt"}), "prompt"),
+            (json!({"x":1}), "{\"x\":1}"),
+        ] {
+            assert_eq!(input_text_for_chat(&fixture_case(input)).unwrap(), text);
+        }
     }
 }

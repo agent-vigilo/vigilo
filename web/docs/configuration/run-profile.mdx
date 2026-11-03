@@ -284,19 +284,35 @@ These policies do not change the supported response mapping.
 
 By default, workers send a Vigilo case request containing `run_id`, `execution_id`, `attempt_id`, `agent`, `input`, and non-oracle case metadata. With `request_format: openai_compatible_chat_completions`, workers send an OpenAI-compatible `model` and `messages` payload.
 
-The response may be either plain text or JSON. JSON responses can return the evaluator-ready output directly, or under `actual`/`output`:
+Responses are captured as bounded original bytes. Vigilo does not automatically
+unwrap `actual`, `output`, or provider-specific fields. Select raw evidence or
+configure [explicit response mapping](#explicit-response-contracts).
 
-```json
-{
-  "actual": {
-    "text": "This seems positive.",
-    "structured": { "label": "positive" },
-    "tool_calls": [],
-    "trace": [],
-    "metadata": { "latency_ms": 42 }
-  }
-}
-```
+### Request format support
+
+| Request format | Supported input | Boundary |
+| --- | --- | --- |
+| `vigilo_case` (default) | Case input as JSON, context, tags, metadata, and execution identifiers | Sends the Vigilo envelope, not an arbitrary provider request; excludes `expected` |
+| `openai_compatible_chat_completions` | Ordered string-content messages, optional system prompt, model, and selected options | Text-only request adapter; always sends `stream: false` |
+
+For Chat Completions, `input.messages` must be an array of objects containing only
+`role` and string `content`. Omitted `role` defaults to `user`; malformed roles,
+content arrays, and additional message fields are rejected rather than discarded.
+This adapter does not send tool history or multimodal request blocks. Without
+`messages`, it uses string `user_message`, then string `prompt`, then serialized
+input JSON. A nonempty `agent.config.system_prompt` precedes those messages.
+`agent.model` defaults to `agent.name`.
+
+The forwarded configuration keys are `temperature`, `top_p`, `min_p`, `max_tokens`,
+`stop`, `seed`, `response_format`, `presence_penalty`, `frequency_penalty`, and
+`repeat_penalty`. Temperature defaults to `0.0` and must be numeric. Other forwarded
+values are validated by the endpoint; provider support varies. Other config keys
+are not forwarded as request options. In particular, setting `stream`, `tools`, or
+`max_completion_tokens` does not enable those options.
+
+There are no native OpenAI Responses or Anthropic Messages request adapters.
+An endpoint accepting the Vigilo envelope can return those response shapes;
+response mapping is independent of request format.
 
 ## `case_groups`
 
@@ -535,6 +551,35 @@ Authoring limits are 128 item producers, 256 content templates, 4096 UTF-8 bytes
 per pointer, and 255 bytes per media type. Configured media types use bare
 `type/subtype` syntax without parameters; the server-declared Content-Type is a
 separate value. These authoring limits do not authorize unbounded response expansion.
+
+### Representative response formats
+
+Local fixtures exercise these explicit selections against synthetic, non-streaming
+JSON responses. They do not make live provider calls or certify every provider variant.
+
+| Response shape | Selected evidence |
+| --- | --- |
+| OpenAI Chat Completions | First-choice text; ordered function tool calls with string-encoded JSON arguments |
+| OpenAI Responses | Output text, refusal text, incomplete status/reason; function call ID, name, and string-encoded JSON arguments |
+| Anthropic Messages | Ordered text blocks; explicitly positioned `tool_use` ID, name, and JSON-object input |
+
+These shapes follow the [OpenAI response reference](https://developers.openai.com/api/reference/resources/responses/methods/create),
+[Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/list),
+and [Anthropic tool-call reference](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls).
+The mappings are examples for fixed shapes, not automatic provider adapters.
+
+For example, Chat Completions text uses `/choices/0/message/content` with
+`inline_text`. Its `/choices/0/message/tool_calls` array can use `each`, selecting
+`/id`, `/function/name`, and `/function/arguments` with `json_string` relative to
+each call. Anthropic tool input uses `json_value`, not `json_string`.
+
+One `each` template cannot dispatch on heterogeneous block types. Fixed-position
+selectors can describe a known mixed layout, but cannot adapt when that layout
+changes. Missing required fields, null or wrong-type values, and unexpected mapped
+stop reasons fail mapping. A refusal remains response evidence, not an invocation
+failure. Unselected fields remain in the original body. Selecting only the first
+choice does not evaluate other choices. Tool evidence does not execute tools.
+Streaming event assembly and remote media fetching are not provided by JSON mapping.
 
 ### Mapping Engine
 

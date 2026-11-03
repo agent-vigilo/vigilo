@@ -364,3 +364,88 @@ fn optional_selection_does_not_hide_invalid_parent_types() {
     assert!(run(b"{}", &configuration).is_ok());
     assert!(run(br#"{"message":{}}"#, &configuration).is_ok());
 }
+
+/// Provider examples share fixtures with the real-Wasm replay tier. These selectors
+/// describe fixed shapes, not automatic dispatch on provider block types.
+#[test]
+fn provider_fixtures_preserve_tools_order_and_raw_evidence() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../evaluator_abi/fixtures/response-replay.json"
+    ))
+    .unwrap();
+    for fixture in fixtures {
+        let body = fixture["body"].as_str().unwrap().as_bytes();
+        let configuration: ResponseConfiguration =
+            serde_json::from_value(fixture["configuration"].clone()).unwrap();
+        let mapped = run(body, &configuration).unwrap();
+        assert_eq!(mapped.original.bytes(), body);
+        if let Some(ids) = fixture["expected_tool_ids"].as_array() {
+            let items = mapped.items.as_ref().unwrap();
+            assert!(matches!(&items[0], OutputItem::Message {content,..}
+                if matches!(&content[0].source, MappedSource::InlineText {text} if text == "good")));
+            assert_eq!(items.len(), ids.len() + 1);
+            for (index, (item, id)) in items[1..].iter().zip(ids).enumerate() {
+                let OutputItem::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                } = item
+                else {
+                    panic!("expected tool call")
+                };
+                assert_eq!(call_id.as_deref(), id.as_str());
+                assert_eq!(name, "lookup");
+                assert_eq!(arguments.media_type, "application/json");
+                let bytes = match &arguments.source {
+                    MappedSource::Resource { body } => body.bytes(),
+                    MappedSource::BodyRange {
+                        offset,
+                        byte_length,
+                    } => &body[*offset as usize..(*offset + *byte_length) as usize],
+                    _ => panic!("expected JSON arguments"),
+                };
+                assert_eq!(
+                    serde_json::from_slice::<Value>(bytes).unwrap(),
+                    json!({"id":index+1})
+                );
+            }
+        }
+        // A configured selector must not guess another provider envelope.
+        assert_eq!(
+            run(b"{}", &configuration).unwrap_err().kind,
+            ErrorKind::MissingField
+        );
+        let raw = map_response(
+            &CapturedBody::new(body.to_vec(), None),
+            None,
+            Limits::default(),
+        )
+        .unwrap();
+        assert!(raw.items.is_none());
+        assert_eq!(raw.original.bytes(), body);
+    }
+}
+
+#[test]
+fn heterogeneous_provider_blocks_fail_without_partial_mapping() {
+    let fixtures: Vec<Value> = serde_json::from_str(include_str!(
+        "../evaluator_abi/fixtures/response-replay.json"
+    ))
+    .unwrap();
+    let fixture = fixtures
+        .iter()
+        .find(|f| f["name"] == "messages-content-blocks")
+        .unwrap();
+    let configuration = serde_json::from_value(fixture["configuration"].clone()).unwrap();
+    for block in [
+        json!({"type":"tool_use","input":{}}),
+        json!({"type":"text","text":null}),
+        json!({"type":"text","text":42}),
+    ] {
+        let body = serde_json::to_vec(
+            &json!({"content":[{"type":"text","text":"good"},block],"stop_reason":"end_turn"}),
+        )
+        .unwrap();
+        assert!(run(&body, &configuration).is_err());
+    }
+}
