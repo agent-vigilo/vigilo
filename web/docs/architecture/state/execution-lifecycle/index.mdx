@@ -29,6 +29,7 @@ How executions and attempts become authoritative work records while workers proc
 - Terminal transitions first lock the still-live chunk, then require the execution's current attempt id and attempt number to match the worker's transition. Worker-owned transitions also require a live attempt lease for that worker.
 - Completed executions require an aggregate row. Worker failure transitions upsert an error aggregate when the failure is non-retryable or the attempt budget is exhausted. Chunk settlement instead retires unfinished authority and closes existing unresolved executions without inventing an aggregate; missing executions remain absent.
 - Retryable failed attempts that still have retry budget move the execution to `retry_scheduled` with a durable `retry_after`; the next chunk pass only creates a new attempt once that timestamp is due.
+- Retries retain the logical execution ID and allocate a new attempt ID. A timeout does not prove that remote work stopped; see [remote execution and duplicate requests](/docs/configuration/run-profile#remote-execution-and-duplicate-requests).
 - `defaults.max_attempts` is the hard execution retry limit. Exhausted open executions are closed as failed instead of being requeued indefinitely.
 
 After chunk settlement, current completed attempts with matching aggregates remain authoritative. Superseded or retired attempts remain stale evidence; unfinished evidence cannot contribute scores. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).

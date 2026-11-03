@@ -604,3 +604,113 @@ async fn complete_arbitrary_bodies_remain_scoreable() {
         assert!(output.text.is_none());
     }
 }
+
+/// Remote acceptance is observable even when its response is lost. The second
+/// invocation models a scheduled retry; this transport test does not run the DB
+/// scheduler or claim that correlation identifiers deduplicate remote effects.
+#[tokio::test]
+async fn timeout_after_remote_acceptance_can_repeat_effects_with_distinct_attempts() {
+    use std::time::Duration;
+
+    use agent_client::failure::{
+        Failure,
+        Kind,
+    };
+    use serde_json::{
+        Value,
+        json,
+    };
+
+    for chat in [false, true] {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut p = profile(&format!("http://{}", listener.local_addr().unwrap()));
+            p.agent.http.timeout_secs = Some(1);
+            if chat {
+                p.agent.config = json!({"request_format":"openai_compatible_chat_completions"});
+            }
+            let (release, wait_for_timeout) = tokio::sync::oneshot::channel();
+            let mut release = Some(release);
+            let mut servers = tokio::task::JoinSet::new();
+            servers.spawn(async move {
+                let mut wait_for_timeout = Some(wait_for_timeout);
+                let mut accepted = Vec::new();
+                for index in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0; 1024];
+                    loop {
+                        let n = stream.read(&mut chunk).await.unwrap();
+                        assert!(n > 0, "request ended before remote acceptance");
+                        request.extend_from_slice(&chunk[..n]);
+                        assert!(request.len() <= 65536, "fixture request exceeds bound");
+                        if let Some(end) = request.windows(4).position(|v| v == b"\r\n\r\n") {
+                            let header = String::from_utf8(request[..end].to_vec()).unwrap().to_lowercase();
+                            let length: usize = header.lines().find_map(|line| line.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+                            if request.len() >= end + 4 + length {
+                                let body: Value = serde_json::from_slice(&request[end+4..end+4+length]).unwrap();
+                                let attempt = header.lines().find_map(|line| line.strip_prefix("x-vigilo-attempt-id: ")).unwrap().to_owned();
+                                assert!(!header.contains("idempotency-key:"));
+                                // Recording acceptance represents an irreversible remote effect.
+                                accepted.push((attempt, body));
+                                break;
+                            }
+                        }
+                    }
+                    if index == 0 {
+                        // The request is fully accepted, but no response is sent.
+                        // Keep the connection open until the caller observes timeout.
+                        wait_for_timeout.take().unwrap().await.unwrap();
+                    } else {
+                        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.unwrap();
+                    }
+                }
+                accepted
+            });
+            let run = Uuid::from_u128(1);
+            let execution = Uuid::from_u128(2);
+            let attempts = [Uuid::from_u128(3), Uuid::from_u128(4)];
+            let client = reqwest::Client::new();
+            let credentials = agent_client::credentials::Provider::default();
+            for (index, attempt) in attempts.iter().enumerate() {
+                let result = agent_client::invoke(
+                    agent_client::Services {client: &client, limits: Limits::default(), credentials: &credentials},
+                    run, execution, *attempt, &p, &case(),
+                ).await;
+                if index == 0 {
+                    let error = result.unwrap_err();
+                    let failure = error.downcast_ref::<Failure>().unwrap();
+                    assert_eq!(failure.kind, Kind::Timeout);
+                    assert!(failure.retryable);
+                    let diagnostics = failure.invocation.as_ref().unwrap();
+                    assert_eq!(diagnostics.run_id, run);
+                    assert_eq!(diagnostics.execution_id, execution);
+                    assert_eq!(diagnostics.attempt_id, *attempt);
+                    assert!(diagnostics.http_status.is_none());
+                } else {
+                    let invocation = result.unwrap();
+                    assert_eq!(invocation.diagnostics.run_id, run);
+                    assert_eq!(invocation.diagnostics.execution_id, execution);
+                    assert_eq!(invocation.diagnostics.attempt_id, *attempt);
+                    assert_eq!(invocation.output.captured_body.unwrap().bytes(), b"ok");
+                }
+                if index == 0 {
+                    release.take().unwrap().send(()).unwrap();
+                }
+            }
+            let accepted = servers.join_next().await.unwrap().unwrap();
+            assert_eq!(accepted.len(), 2);
+            for (index, (attempt, body)) in accepted.iter().enumerate() {
+                assert_eq!(attempt, &attempts[index].to_string());
+                if chat {
+                    assert!(body.get("execution_id").is_none());
+                    assert!(body.get("attempt_id").is_none());
+                } else {
+                    assert_eq!(body["run_id"], run.to_string());
+                    assert_eq!(body["execution_id"], execution.to_string());
+                    assert_eq!(body["attempt_id"], attempts[index].to_string());
+                }
+            }
+        }).await.expect("bounded remote-acceptance fixture");
+    }
+}

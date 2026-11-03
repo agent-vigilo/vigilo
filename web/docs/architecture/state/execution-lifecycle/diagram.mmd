@@ -12,13 +12,13 @@ flowchart TD
     Pending[Execution pending]
     Supersede[Mark prior running attempts stale]
     Running[Execution running]
-    AttemptRunning[Attempt running]
+    AttemptRunning[New attempt ID for the same execution]
     AgentAndEvaluators[Invoke agent and run evaluators]
     TerminalGuard{Chunk live and current attempt authoritative?}
     AggregateGuard{Aggregate available or failure transition?}
     AttemptCompleted[Attempt completed]
     ExecutionCompleted[Execution completed]
-    AttemptAgentFail[Attempt failed agent call]
+    AttemptAgentFail[Agent call failed; remote effects may have occurred]
     AttemptEvalFail[Attempt failed evaluation]
     ExecutionFailed[Execution failed]
     Cancel([run cancel])

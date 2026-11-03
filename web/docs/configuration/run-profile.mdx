@@ -282,6 +282,40 @@ quality score. A valid answer that fails evaluation is scored normally. A timeou
 does not prove the remote agent stopped; retries can repeat external effects.
 These policies do not change the supported response mapping.
 
+### Remote execution and duplicate requests
+
+A timeout means Vigilo did not receive a complete response within its deadline.
+The endpoint may already have accepted the request, performed side effects, or
+completed the work. A worker crash or lost lease can create the same uncertainty.
+A retry can therefore repeat remote work; Vigilo does not guarantee exactly-once
+agent execution or remotely cancel work when an attempt expires.
+
+| Identity | Across retries of one execution | Visible to endpoint |
+| --- | --- | --- |
+| `run_id`, `execution_id` | Remain stable | Native `vigilo_case` body |
+| `attempt_id` | Changes for each allocated attempt | Native body and `X-Vigilo-Attempt-Id` header for both request formats |
+
+Chat Completions requests omit Vigilo execution identifiers from the body. Their
+attempt header identifies one invocation, not the logical execution. All three
+identifiers remain in Vigilo's invocation diagnostics when those diagnostics are
+persisted. Creating a new run creates separate logical executions; it is not a
+retry of the original execution.
+
+The HTTP client does not retry invocation failures internally; the worker workflow
+schedules eligible retries using the durable attempt budget. Retries are recovery attempts,
+not independent evaluation samples. Database ownership checks reject stale worker
+writes, but cannot undo an external action or deduplicate an agent request.
+
+Vigilo does not synthesize an `Idempotency-Key` or implement provider-specific
+remote deduplication. A custom endpoint accepting the native envelope can use
+`run_id` plus `execution_id` within its own authenticated namespace as a logical
+key, but must define atomic acceptance, concurrent duplicate handling, payload
+conflict detection, stored-result reuse, and retention covering the entire retry
+and recovery window. Attempt IDs must not be used as stable deduplication keys.
+Neither a correlation header nor a static profile header establishes those
+properties. Use isolated test environments for agents with external side effects
+unless the endpoint's deduplication contract is independently verified.
+
 By default, workers send a Vigilo case request containing `run_id`, `execution_id`, `attempt_id`, `agent`, `input`, and non-oracle case metadata. With `request_format: openai_compatible_chat_completions`, workers send an OpenAI-compatible `model` and `messages` payload.
 
 Responses are captured as bounded original bytes. Vigilo does not automatically
