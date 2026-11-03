@@ -649,4 +649,5 @@ fn transform<S, T>(
 }
 
 #[cfg(test)]
+#[path = "response_retention/tests.rs"]
 pub(crate) mod tests;

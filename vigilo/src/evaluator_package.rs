@@ -285,4 +285,5 @@ pub(crate) fn write(path: &Path, input: PackageInput) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+#[path = "evaluator_package/tests.rs"]
 mod tests;

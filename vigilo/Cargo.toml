@@ -70,6 +70,7 @@ default = []
 evaluator-abi-fixtures = []
 blob-storage-services = []
 agent-http-services = []
+evaluator-http-services = []
 
 [[test]]
 name = "blob_storage_services"
@@ -85,3 +86,8 @@ required-features = ["blob-storage-services"]
 name = "agent_http_services"
 path = "tests/agent_http_services.rs"
 required-features = ["agent-http-services"]
+
+[[test]]
+name = "evaluator_http_services"
+path = "tests/evaluator_http_services.rs"
+required-features = ["evaluator-http-services"]

@@ -113,7 +113,7 @@ async fn service_provider(dir: &std::path::Path, endpoint: &str) -> Provider {
     Provider::load(&path).await.unwrap()
 }
 fn response(origin: &str) -> serde_json::Value {
-    serde_json::json!({"version":1, "allowed_origin":origin, "header":"Authorization", "value":"Bearer agent-canary", "expires_at":chrono::Utc::now() + chrono::Duration::minutes(1)})
+    serde_json::json!({"version":1, "authority":{"kind":"agent"}, "allowed_origin":origin, "header":"Authorization", "value":"Bearer agent-canary", "expires_at":chrono::Utc::now() + chrono::Duration::minutes(1)})
 }
 async fn invoke(
     provider: &Provider,
@@ -174,7 +174,7 @@ async fn service_protocol_resolves_for_runtime_scope_without_enterprise_dependen
         serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(
         body,
-        serde_json::json!({"version":1,"credential":"agent-api","destination":format!("{}/", agent.url),"run_id":Uuid::nil(),"execution_id":Uuid::from_u128(1),"attempt_id":Uuid::from_u128(2),"grant":"grant-canary"})
+        serde_json::json!({"version":1,"authority":{"kind":"agent"},"credential":"agent-api","destination":format!("{}/", agent.url),"run_id":Uuid::nil(),"execution_id":Uuid::from_u128(1),"attempt_id":Uuid::from_u128(2),"grant":"grant-canary"})
     );
     let sent = agent.request().await;
     assert!(sent.contains("authorization: Bearer agent-canary"));
@@ -234,6 +234,13 @@ async fn denied_malformed_expired_wrong_destination_and_oversized_resolutions_fa
     expired["expires_at"] = serde_json::json!(chrono::Utc::now() - chrono::Duration::seconds(1));
     let mut version = response("https://agent.example.com");
     version["version"] = 2.into();
+    let mut missing_authority = response("https://agent.example.com");
+    missing_authority
+        .as_object_mut()
+        .unwrap()
+        .remove("authority");
+    let mut wrong_authority = response("https://agent.example.com");
+    wrong_authority["authority"] = serde_json::json!({"kind":"evaluator","evaluator_id":Uuid::nil(),"policy_revision":"wrong-scope"});
     for (status, body, retryable) in [
         (403, "denied secret-canary".into(), false),
         (401, "secret-canary".into(), false),
@@ -242,6 +249,8 @@ async fn denied_malformed_expired_wrong_destination_and_oversized_resolutions_fa
         (200, "secret-canary".into(), false),
         (200, expired.to_string(), false),
         (200, version.to_string(), false),
+        (200, missing_authority.to_string(), false),
+        (200, wrong_authority.to_string(), false),
         (
             200,
             response("https://other-tenant.example.com").to_string(),

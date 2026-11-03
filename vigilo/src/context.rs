@@ -34,6 +34,7 @@ pub(crate) struct Context(
     Arc<ContextInner>,
     crate::agent_client::limits::Limits,
     Arc<crate::agent_client::credentials::Provider>,
+    Arc<crate::evaluator_requests::Service>,
 );
 
 impl Context {
@@ -72,7 +73,26 @@ impl Context {
             }),
             crate::agent_client::limits::Limits::default(),
             Arc::new(crate::agent_client::credentials::Provider::default()),
+            Arc::new(crate::evaluator_requests::Service::default()),
         )
+    }
+
+    pub(crate) fn with_evaluator_http(
+        mut self,
+        service: crate::evaluator_requests::Service,
+    ) -> Self {
+        self.3 = Arc::new(service);
+        self
+    }
+    pub(crate) fn evaluator_http(
+        &self,
+        policy: Arc<vigilo::evaluator_http::Snapshot>,
+        execution: crate::agent_client::credentials::Execution,
+    ) -> anyhow::Result<(
+        Arc<crate::evaluator_requests::Invocation>,
+        crate::evaluator_requests::Cancellation,
+    )> {
+        self.3.invocation(policy, self.2.clone(), execution)
     }
 
     /// Configure freshness before sharing the process context.

@@ -17,3 +17,6 @@ pub(crate) mod normalization;
 pub(crate) mod run;
 #[path = "../../src/contracts/scorecard.rs"]
 pub(crate) mod scorecard;
+
+#[path = "../../src/contracts/response_retention.rs"]
+pub(crate) mod response_retention;

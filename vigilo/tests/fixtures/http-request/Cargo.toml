@@ -1,0 +1,16 @@
+[package]
+name = "http-request-fixture"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[package.metadata.vigilo]
+abi-fixture = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57.1"
+serde_json = "1.0"

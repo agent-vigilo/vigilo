@@ -44,6 +44,7 @@ mod dataset_ingestion;
 mod db;
 mod evaluator_abi;
 mod evaluator_package;
+mod evaluator_requests;
 mod evaluators;
 mod manifest;
 mod models;
@@ -127,6 +128,18 @@ async fn main() -> ExitCode {
                     Ok(provider) => context.with_agent_credentials(provider),
                     Err(error) => {
                         error!(%error, "invalid worker credential configuration");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                context
+            };
+
+            let context = if let Some(path) = &app.evaluator_http_config {
+                match evaluator_requests::Service::load(path).await {
+                    Ok(service) => context.with_evaluator_http(service),
+                    Err(error) => {
+                        error!(%error, "invalid evaluator HTTP configuration");
                         return ExitCode::FAILURE;
                     }
                 }

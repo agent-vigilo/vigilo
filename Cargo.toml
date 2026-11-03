@@ -4,6 +4,7 @@ members = [
     "xtask",
     "vigilo",
     "vigilo/tests/fixtures/response-resource",
+    "vigilo/tests/fixtures/http-request",
 ]
 resolver = "2"
 

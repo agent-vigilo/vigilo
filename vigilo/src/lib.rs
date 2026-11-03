@@ -21,5 +21,5 @@ pub mod response;
 /// Pure, bounded interpretation of captured response evidence.
 pub mod response_mapping;
 
-/// Operator-authorized evaluator HTTP policies and bounded snapshot caching.
+/// Operator-authorized evaluator HTTP, snapshot caching and bounded transport.
 pub mod evaluator_http;

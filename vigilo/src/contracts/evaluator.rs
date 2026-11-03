@@ -56,6 +56,10 @@ pub(crate) struct EvaluatorInput {
     /// Host-owned attempt authorization, never part of evaluator-controlled input.
     #[serde(skip)]
     pub(crate) http_policy: Option<std::sync::Arc<vigilo::evaluator_http::Snapshot>>,
+    /// Host-owned transport and credential state for this evaluator invocation.
+    #[serde(skip)]
+    pub(crate) http_invocation:
+        Option<std::sync::Arc<dyn vigilo::evaluator_http::transport::BlockingTransport>>,
     /// Logical run identifier owning this execution.
     pub(crate) run_id: String,
     /// Unique execution identifier for this case evaluation.

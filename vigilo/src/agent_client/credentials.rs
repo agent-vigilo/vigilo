@@ -1,8 +1,9 @@
-//! Process-local credential providers for agent HTTP requests.
+//! Process-local credential providers for agent and evaluator HTTP requests.
 //!
 //! Profiles carry names only. Trusted operator configuration binds names to local
 //! sources or a versioned resolver service. Sources are read per invocation, never
-//! persisted or cached. The service owns execution authorization; core enforces
+//! persisted or cached by this provider; evaluator hosts own invocation-scoped
+//! caching. The service owns execution authorization; core enforces
 //! transport, destination, header, size, concurrency, and lifetime boundaries.
 //! Secrets have no serialization or Debug implementation. This is not protection
 //! against a compromised worker or an authorized endpoint reflecting credentials.
@@ -93,6 +94,17 @@ pub(crate) struct Execution {
     pub(crate) attempt_id: Uuid,
 }
 
+/// Host-verified authority for the initial credential-service contract.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Authority {
+    Agent,
+    Evaluator {
+        evaluator_id: Uuid,
+        policy_revision: String,
+    },
+}
+
 /// Shared bounded provider. No credential material survives a resolution here.
 pub(crate) struct Provider {
     config: Option<Config>,
@@ -117,6 +129,11 @@ pub(crate) struct Resolved {
 }
 
 impl Resolved {
+    #[cfg(all(test, feature = "evaluator-http-services"))]
+    pub(crate) fn expire_for_test(&mut self) {
+        self.expires_at = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+    }
+
     pub(crate) fn check_validity(&self) -> Result<(), Failure> {
         if self
             .expires_at
@@ -338,6 +355,19 @@ impl Provider {
         headers: &BTreeMap<String, String>,
         execution: Execution,
     ) -> Result<Resolved, Failure> {
+        self.resolve_authorized(reference, destination, headers, execution, Authority::Agent)
+            .await
+    }
+
+    /// Resolve using authority supplied only by the execution host.
+    pub(crate) async fn resolve_authorized(
+        &self,
+        reference: &str,
+        destination: &str,
+        headers: &BTreeMap<String, String>,
+        execution: Execution,
+        authority: Authority,
+    ) -> Result<Resolved, Failure> {
         validate_reference(reference)?;
         let config = self
             .config
@@ -397,6 +427,7 @@ impl Provider {
                         grants_directory,
                         (reference, &destination),
                         execution,
+                        authority,
                     )
                     .await?
                 }
@@ -416,6 +447,7 @@ impl Provider {
         grants_directory: &Path,
         target: (&str, &Url),
         execution: Execution,
+        authority: Authority,
     ) -> Result<Resolved, Failure> {
         let (reference, destination) = target;
         let grant = Source::File {
@@ -426,6 +458,7 @@ impl Provider {
         let token = binding_value("Authorization", "Bearer ", &token.read().await?)?;
         let request = ServiceRequest {
             version: 1,
+            authority,
             credential: reference,
             destination: destination.as_str(),
             run_id: execution.run_id,
@@ -463,6 +496,11 @@ impl Provider {
         }
         let response: ServiceResponse = serde_json::from_slice(&bytes)
             .map_err(|_| configuration("invalid credential service response"))?;
+        if response.authority != request.authority {
+            return Err(configuration(
+                "credential service returned different authority",
+            ));
+        }
         if response.version != 1 {
             return Err(configuration(
                 "unsupported credential service response version",
@@ -494,6 +532,7 @@ fn check_collision(headers: &BTreeMap<String, String>, name: &HeaderName) -> Res
 #[derive(Serialize)]
 struct ServiceRequest<'a> {
     version: u32,
+    authority: Authority,
     credential: &'a str,
     destination: &'a str,
     run_id: Uuid,
@@ -506,6 +545,7 @@ struct ServiceRequest<'a> {
 #[serde(deny_unknown_fields)]
 struct ServiceResponse {
     version: u32,
+    authority: Authority,
     allowed_origin: String,
     header: String,
     value: String,

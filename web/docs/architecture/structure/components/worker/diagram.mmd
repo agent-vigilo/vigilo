@@ -146,3 +146,8 @@ flowchart TD
     PolicyStore["Control database operator policy rows"]:::storage
     ExecutionProcessor -->|"Freeze evaluator snapshots per attempt"| HttpPolicyCache
     HttpPolicyCache -->|"Bounded batched misses and refreshes"| PolicyStore
+
+    EvaluatorHttp["Bounded evaluator HTTP<br/>Pinned DNS, deadlines and cancellation"]:::component
+    EvaluatorCredentials["Host credential provider<br/>Invocation-scoped cache"]:::component
+    EvaluatorExecutor -->|"Authorized requests under frozen snapshot"| EvaluatorHttp
+    EvaluatorHttp -->|"Resolve bound credential within budget"| EvaluatorCredentials

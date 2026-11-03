@@ -269,4 +269,71 @@ For example, the defaults allow up to 8 active evaluator invocations at 64 MiB e
 
 If an evaluator exceeds its sandbox budget, the invocation is recorded as an evaluator runtime error. The worker continues processing the rest of the batch and persists the error result through the normal evaluator-result path.
 
-Outbound evaluator HTTP is denied by the host adapter.
+## Evaluator HTTP
+
+Workers execute evaluator HTTP only under an authorized attempt snapshot. Set
+`--evaluator-http-config` or `VIGILO_EVALUATOR_HTTP_CONFIG` to a worker-local JSON
+file for operator ceilings and credential bindings. Omitted fields use these defaults:
+
+```json
+{
+  "request_bytes": 1048576,
+  "response_bytes": 4194304,
+  "request_timeout_ms": 30000,
+  "total_time_ms": 60000,
+  "requests": 8,
+  "concurrency": 64,
+  "bindings": []
+}
+```
+
+Body ceilings range from 1 byte to 64 MiB. Request timeouts range from 1 to
+300,000 ms; the cumulative HTTP budget ranges from 1 to 3,600,000 ms. Request
+count and worker-wide concurrency range from 1 to 1,024. Each synchronous evaluator
+invocation issues one request at a time. Unknown configuration fields and duplicate
+bindings are rejected. The configuration file is limited to 1 MiB and 4,096 bindings.
+
+An optional binding selects a configured credential provider reference:
+
+```json
+{
+  "bindings": [{
+    "evaluator_id": "01900000-0000-7000-8000-000000000004",
+    "method": "POST",
+    "uri": "https://judge.example.com/evaluate",
+    "credential": "judge-api"
+  }]
+}
+```
+
+Bindings do not grant network access. Configure
+[destination permissions](./run-profile.mdx#evaluator-http-authorization) separately
+and supply the shared [credential provider](./agent-credentials.mdx#evaluator-credentials)
+through `worker --agent-credentials`. Files contain references, not secrets.
+
+The requested timeout is clamped to the operator ceiling, remaining cumulative
+HTTP time and remaining Wasm execution deadline. Permit waiting, credential
+resolution, DNS, connection and body reads share that deadline. Completed requests
+consume elapsed time, including failures. Cancellation consumes the reserved time;
+sequential requests do not reset the count or budget. Dropping the owning worker
+task interrupts HTTP work. An OS hostname lookup already running retains its
+admission slot until the resolver returns, preventing cancelled requests from
+accumulating unbounded resolver jobs; it cannot start an HTTP request after
+cancellation. Other transport permits release when I/O is dropped. Wasm fuel and
+epoch limits continue to bound evaluator computation.
+
+The transport validates all resolved addresses and pins them for the connection.
+Redirects, ambient proxies and automatic retries are disabled. Bodies are bounded
+while read, including chunked responses. HTTP 4xx/5xx and redirects return ordinary
+responses; policy, credential, network, timeout and limit failures return host errors.
+An oversized body never becomes a successful partial response.
+
+Requests allow at most 64 headers and 16 KiB of header names and values. Host-managed
+credential, routing and connection headers cannot be overridden. Response headers
+are limited to `content-type`, `content-encoding` and `retry-after`, each at most
+4 KiB. Response bytes retain their content encoding; the client removes HTTP
+transfer framing but does not decompress content. Evaluators interpret the provider
+payload and can explicitly retry within their remaining allowances.
+
+The local `evaluator test` command has no worker attempt authority and cannot issue
+HTTP requests. Networking tests use the named evaluator HTTP service test tier.

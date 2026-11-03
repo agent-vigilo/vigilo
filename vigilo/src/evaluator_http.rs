@@ -4,6 +4,8 @@
 //! with deny overriding allow. Authorization returns a destination capability whose
 //! address check must be applied to the actual connection; it does not send traffic.
 //! The worker cache batches loading and freezes snapshots for execution attempts.
+//! The transport consumes authorized destinations under invocation budgets; host
+//! adapters own credentials, cancellation and runtime scheduling.
 
 use std::net::IpAddr;
 
@@ -216,7 +218,8 @@ impl Snapshot {
 
 /// Authorized destination, not a DNS-precheck result. A sender must connect only
 /// to addresses accepted here, preserve TLS hostname verification and disable
-/// redirects/proxies that could replace that destination. No sender exists here.
+/// redirects/proxies that could replace that destination. The bounded transport
+/// consumes this capability before resolving credentials or opening connections.
 #[derive(Debug)]
 pub struct AuthorizedDestination {
     url: Url,
@@ -288,3 +291,6 @@ fn public_address(address: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// Asynchronous transport for operator-authorized evaluator requests.
+pub mod transport;

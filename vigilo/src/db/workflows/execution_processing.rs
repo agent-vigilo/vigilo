@@ -1013,7 +1013,16 @@ async fn evaluate_case_execution(
                             .await?;
                     let wasm_permit = wasm.acquire_evaluation_permit().await?;
 
+                    let (http_invocation, _http_cancellation) = context.evaluator_http(
+                        http_policy.clone(),
+                        crate::agent_client::credentials::Execution {
+                            run_id,
+                            execution_id,
+                            attempt_id,
+                        },
+                    )?;
                     let evaluator_input = EvaluatorInput {
+                        http_invocation: Some(http_invocation),
                         http_policy: Some(http_policy),
                         run_id: run_id.to_string(),
                         execution_id: execution_id.to_string(),

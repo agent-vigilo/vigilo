@@ -22,9 +22,11 @@ use crate::{
     },
 };
 
+#[path = "evaluator_abi/v1.rs"]
 mod v1;
 
 #[cfg(all(test, feature = "evaluator-abi-fixtures"))]
+#[path = "evaluator_abi/replay_tests.rs"]
 mod replay_tests;
 
 pub(crate) trait EvaluatorAbiAdapter: Send + Sync {
@@ -178,6 +180,7 @@ mod tests {
     fn evaluator_input() -> EvaluatorInput {
         EvaluatorInput {
             http_policy: None,
+            http_invocation: None,
             run_id: "run-1".to_string(),
             execution_id: "execution-1".to_string(),
             attempt_id: "attempt-1".to_string(),

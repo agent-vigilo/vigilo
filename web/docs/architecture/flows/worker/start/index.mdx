@@ -35,6 +35,10 @@ Every use verifies complete files and exact membership before execution evidence
 is persisted in the routed database. [Run Preparation](/docs/architecture/case-storage/run-preparation)
 describes cache ownership, limits and failure handling.
 
+Evaluator HTTP uses the attempt's frozen permission snapshot and host-owned
+credential bindings. The host bounds request count, bytes and time; cancellation
+releases pending HTTP work. No per-request database query is required.
+
 ## Execution Flow
 
 <Mermaid value={executionFlowDiagram} />

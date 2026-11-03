@@ -85,6 +85,12 @@ sequenceDiagram
                     else Requirements satisfied
                         Vigilo->>WASM: Dispatch pinned ABI adapter evaluate
                         WASM->>Vigilo: Bounded read-resource calls when needed
+                        opt Evaluator requests HTTP
+                            WASM->>Vigilo: send-http-request
+                            Vigilo->>Vigilo: Authorize snapshot; acquire permit; resolve bound credential
+                            Vigilo->>Vigilo: Pin approved DNS addresses; execute within shared time and byte budgets
+                            Vigilo-->>WASM: Bounded HTTP response or host error; release permit
+                        end
                     end
                 end
                 WASM-->>Vigilo: Evaluation outputs; release store resource handles

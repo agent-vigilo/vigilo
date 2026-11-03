@@ -100,5 +100,9 @@ Workers load operator policy snapshots in bounded batches through a process-loca
 cache. Newly allocated attempts retain immutable evaluator-specific snapshots;
 revision IDs accompany the existing terminal update. Cache expiry requires a
 successful refresh before new authorization. No policy database call occurs inside
-Wasm HTTP imports. The import validates the destination but transport is disabled.
+Wasm HTTP imports. The import checks permission, resolves host-owned credentials and sends a bounded
+request through the async transport while Wasm executes on a blocking thread.
+The invocation owns credential caching and cancellation; a worker-wide semaphore
+bounds concurrent requests. Policy and credential checks add no per-request SQL.
+HTTP failures return status and body; transport or budget failures return host errors.
 See [evaluator HTTP authorization](/docs/configuration/run-profile#evaluator-http-authorization).

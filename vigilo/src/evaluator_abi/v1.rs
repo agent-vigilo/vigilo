@@ -27,6 +27,7 @@ use crate::{
     },
 };
 
+#[path = "v1/evidence.rs"]
 mod evidence;
 
 const WIT: &[u8] = include_bytes!("../../wit/evaluator/v1.0.0/evaluator.wit");
@@ -87,6 +88,7 @@ impl EvaluatorAbiAdapter for V1Adapter {
     ) -> anyhow::Result<EvaluatorOutput> {
         let mut store = runtime.evaluator_store()?;
         store.data_mut().http_policy = input.http_policy.clone();
+        store.data_mut().http_invocation = input.http_invocation.clone();
         let instance = instance_pre.instantiate(&mut store)?;
         let bindings = bindings::EvaluatorWorld::new(&mut store, &instance)?;
         let requirements = bindings
@@ -169,7 +171,44 @@ impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
         let _destination = policy
             .authorize(policy.evaluator_id(), &req.method, &req.uri)
             .map_err(|error| error.to_string())?;
-        Err("evaluator HTTP transport is disabled".to_string())
+        let invocation = self
+            .http_invocation
+            .as_ref()
+            .ok_or("evaluator HTTP invocation unavailable")?;
+        let requested_timeout = req
+            .timeout_ms
+            .map(|ms| std::time::Duration::from_millis(ms.into()));
+        let timeout = match self.http_deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err("evaluator execution deadline exceeded".into());
+                }
+                Some(requested_timeout.unwrap_or(remaining).min(remaining))
+            }
+            None => requested_timeout,
+        };
+        let response = invocation.send(vigilo::evaluator_http::transport::Request {
+            method: req.method,
+            uri: req.uri,
+            headers: req.headers.into_iter().map(|h| (h.name, h.value)).collect(),
+            body: req.body.unwrap_or_default(),
+            timeout,
+        })?;
+        Ok(bindings::vigilo::evaluator::executor::HttpResponse {
+            status: response.status,
+            headers: response
+                .headers
+                .into_iter()
+                .map(
+                    |(name, value)| bindings::vigilo::evaluator::executor::HttpHeader {
+                        name,
+                        value,
+                    },
+                )
+                .collect(),
+            body: response.body,
+        })
     }
 }
 
@@ -344,6 +383,7 @@ mod tests {
     fn evaluator_input() -> EvaluatorInput {
         EvaluatorInput {
             http_policy: None,
+            http_invocation: None,
             run_id: "run-1".to_string(),
             execution_id: "execution-1".to_string(),
             attempt_id: "attempt-1".to_string(),
@@ -494,7 +534,7 @@ mod tests {
 
 #[cfg(test)]
 #[test]
-fn http_import_checks_host_policy_before_disabled_transport() {
+fn http_import_requires_host_authority_and_clamps_the_execution_deadline() {
     use bindings::vigilo::evaluator::executor::{
         Host,
         HttpRequest,
@@ -540,6 +580,35 @@ fn http_import_checks_host_policy_before_disabled_transport() {
     ));
     assert_eq!(
         store.data_mut().send_http_request(request()).unwrap_err(),
-        "evaluator HTTP transport is disabled"
+        "evaluator HTTP invocation unavailable"
+    );
+    #[derive(Debug)]
+    struct DeadlineCheck;
+    impl vigilo::evaluator_http::transport::BlockingTransport for DeadlineCheck {
+        fn send(
+            &self,
+            request: vigilo::evaluator_http::transport::Request,
+        ) -> Result<vigilo::evaluator_http::transport::Response, String> {
+            assert!(request.timeout.unwrap() <= std::time::Duration::from_secs(1));
+            Ok(vigilo::evaluator_http::transport::Response {
+                status: 200,
+                headers: vec![],
+                body: vec![],
+            })
+        }
+    }
+    store.data_mut().http_invocation = Some(std::sync::Arc::new(DeadlineCheck));
+    store.data_mut().http_deadline =
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+    let mut bounded = request();
+    bounded.timeout_ms = Some(u32::MAX);
+    assert_eq!(
+        store.data_mut().send_http_request(bounded).unwrap().status,
+        200
+    );
+    store.data_mut().http_deadline = Some(std::time::Instant::now());
+    assert_eq!(
+        store.data_mut().send_http_request(request()).unwrap_err(),
+        "evaluator execution deadline exceeded"
     );
 }
