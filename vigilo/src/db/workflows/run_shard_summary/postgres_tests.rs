@@ -141,6 +141,7 @@ async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool
         1,
         &[
             crate::db::workflows::execution_processing::ExecutionTerminalTransition {
+                http_policy_revisions: Default::default(),
                 execution_id: partial,
                 attempt_id: partial_attempt,
                 attempt_no: 1,
@@ -656,6 +657,7 @@ async fn terminal_failure_serializes_with_a_waiting_result_writer(pool: PgPool) 
             worker,
             1,
             &[ExecutionTerminalTransition {
+                http_policy_revisions: Default::default(),
                 execution_id: execution,
                 attempt_id: attempt,
                 attempt_no: 1,

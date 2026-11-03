@@ -666,3 +666,33 @@ evaluators. Binary, empty, and malformed JSON bodies remain scoreable through ra
 access. Only an explicitly selected JSON mapping requires valid JSON. No inferred
 text, structured output, or trace is populated in `actual`. See [Evaluator Compatibility](../guides/evaluator-compatibility.mdx#response-evidence-contract)
 for resource read limits and availability.
+
+## Evaluator HTTP authorization
+
+Operator-managed `evaluator_http_policies` rows grant permissions to an exact
+installed evaluator ID. Installing an evaluator grants no network access. Rules
+contain an exact `uri`, uppercase `method`, `allow`/`deny` action and optional
+`networks` (IP CIDR strings). Missing rules deny access; a matching deny overrides
+all matching allows. Rules are not supplied by evaluator code or inferred from
+package metadata. Administrators manage these rows through trusted database access.
+
+Matching uses scheme, hostname, effective port and path. Query parameters do not
+expand destination permissions. Wildcards, trailing-dot hosts, userinfo, fragments,
+encoded destination paths and dot segments are rejected. HTTPS defaults to port
+443. Empty networks allow public addresses only; explicit CIDRs restrict the
+connection addresses. HTTP requires explicit network ranges. Private, loopback,
+link-local and special-use addresses require explicit grants. IPv4-mapped IPv6
+addresses are checked as IPv4. Network permission never bypasses exact URL matching.
+
+Workers share a bounded cache of 256 evaluator snapshots and load misses or expired
+entries in one bounded control-database read. No policy SQL runs inside evaluator
+HTTP calls. `--evaluator-http-policy-max-age-seconds` (environment variable
+`VIGILO_EVALUATOR_HTTP_POLICY_MAX_AGE_SECONDS`) defaults to 30, with a range of 1–3600.
+Expired entries cannot authorize new attempts when refresh fails. Each attempt uses
+its immutable snapshot; retries resolve again and may reuse a still-fresh revision.
+The attempt terminal summary records `evaluator_http_policy_revisions` alongside
+existing diagnostics in the same database update.
+
+The evaluator ABI checks destination authorization but outbound HTTP transport is
+disabled. An allowed rule does not enable network access. Address authorization is
+a separate capability check, not a claim that a live DNS/connection path is enabled.

@@ -177,6 +177,7 @@ mod tests {
     #[cfg(feature = "evaluator-abi-fixtures")]
     fn evaluator_input() -> EvaluatorInput {
         EvaluatorInput {
+            http_policy: None,
             run_id: "run-1".to_string(),
             execution_id: "execution-1".to_string(),
             attempt_id: "attempt-1".to_string(),

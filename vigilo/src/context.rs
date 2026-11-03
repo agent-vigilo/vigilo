@@ -19,6 +19,7 @@ pub(crate) mod storage;
 pub(crate) mod wasm;
 
 struct ContextInner {
+    http_policies: vigilo::evaluator_http::cache::Cache,
     pub dbr: database::Context,
     pub http: http::Context,
     pub mq: messaging::Context,
@@ -44,6 +45,7 @@ impl Context {
     ) -> Self {
         Self(
             Arc::new(ContextInner {
+                http_policies: Default::default(),
                 storage: storage::Context::default(),
                 dbr: database::Context {
                     config: database_config,
@@ -71,6 +73,25 @@ impl Context {
             crate::agent_client::limits::Limits::default(),
             Arc::new(crate::agent_client::credentials::Provider::default()),
         )
+    }
+
+    /// Configure freshness before sharing the process context.
+    pub(crate) fn with_http_policy_max_age(mut self, seconds: u64) -> anyhow::Result<Self> {
+        let cache = vigilo::evaluator_http::cache::Cache::new(
+            std::time::Duration::from_secs(seconds),
+            256,
+        )?;
+        Arc::get_mut(&mut self.0)
+            .ok_or_else(|| {
+                anyhow::anyhow!("policy cache must be configured before sharing context")
+            })?
+            .http_policies = cache;
+        Ok(self)
+    }
+
+    /// Shared worker cache; callers freeze returned policies for one attempt.
+    pub(crate) fn http_policies(&self) -> &vigilo::evaluator_http::cache::Cache {
+        &self.0.http_policies
     }
 
     /// Set process-local agent HTTP ceilings before dispatching the command.

@@ -17,6 +17,7 @@ repository = "https://github.com/agent-vigilo/vigilo"
 homepage = "https://agentvigilo.com"
 
 [dependencies]
+ipnet = "2.12.0"
 anyhow = { version = "1.0.102" }
 async-compression = { version = "0.4", default-features = false, features = ["tokio", "gzip", "zlib"] }
 async-trait = {  version = "0.1.89" }

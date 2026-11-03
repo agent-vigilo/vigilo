@@ -40,6 +40,9 @@ pub(super) trait Executable {
     after_help = "Agent tip: use `-q -f toon` for compact structured output in AI agent and LLM tool-call workflows. Use `-f json` when exact JSON parsing is required."
 )]
 pub(crate) struct App {
+    /// Maximum age of evaluator HTTP permission snapshots in the worker cache.
+    #[arg(long, env = "VIGILO_EVALUATOR_HTTP_POLICY_MAX_AGE_SECONDS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub evaluator_http_policy_max_age_seconds: u64,
     /// Database URL (connection string)
     #[arg(long, env = "DATABASE_URL")]
     pub database_url: Option<String>,

@@ -93,3 +93,12 @@ the requested range into guest memory. Store destruction releases the table afte
 success, errors, or traps. Resource reads on a store with no table return unavailable;
 foreign handles cannot authorize access. This path does not persist captured bytes
 or resource handles.
+
+### Evaluator HTTP permissions
+
+Workers load operator policy snapshots in bounded batches through a process-local
+cache. Newly allocated attempts retain immutable evaluator-specific snapshots;
+revision IDs accompany the existing terminal update. Cache expiry requires a
+successful refresh before new authorization. No policy database call occurs inside
+Wasm HTTP imports. The import validates the destination but transport is disabled.
+See [evaluator HTTP authorization](/docs/configuration/run-profile#evaluator-http-authorization).

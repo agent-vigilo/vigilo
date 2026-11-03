@@ -365,6 +365,7 @@ const EXECUTION_RETRY_MAX_SECONDS: i32 = 600;
 /// worker-owned transitions, the worker still owns a live attempt lease.
 #[derive(Debug, Clone)]
 pub(crate) struct ExecutionTerminalTransition {
+    pub(crate) http_policy_revisions: BTreeMap<Uuid, String>,
     pub(crate) execution_id: Uuid,
     pub(crate) attempt_id: Uuid,
     pub(crate) attempt_no: i32,
@@ -502,6 +503,7 @@ fn processed_terminal_failure(
         attempt_id,
         result_count: 0,
         terminal_transition: ExecutionTerminalTransition {
+            http_policy_revisions: Default::default(),
             execution_id,
             attempt_id,
             attempt_no,
@@ -526,6 +528,7 @@ fn processed_terminal_failure_without_worker_lease(
         attempt_id,
         result_count: 0,
         terminal_transition: ExecutionTerminalTransition {
+            http_policy_revisions: Default::default(),
             execution_id,
             attempt_id,
             attempt_no,
@@ -864,6 +867,7 @@ fn interpret_measurement(
 #[allow(clippy::too_many_arguments)]
 async fn evaluate_case_execution(
     context: &Context,
+    http_policies: &BTreeMap<Uuid, std::sync::Arc<vigilo::evaluator_http::Snapshot>>,
     run_id: Uuid,
     run_shard: i16,
     run_profile: &RunProfile,
@@ -991,6 +995,10 @@ async fn evaluate_case_execution(
                     .get(&binding.dimension)
                     .map(|policy| policy.blocking)
                     .unwrap_or(false);
+                let http_policy = http_policies
+                    .get(&evaluator_entry.evaluator_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("evaluator policy snapshot missing"))?;
                 let context = context.clone();
                 let test_case = test_case.clone();
                 let agent_output = agent_output.clone();
@@ -1006,6 +1014,7 @@ async fn evaluate_case_execution(
                     let wasm_permit = wasm.acquire_evaluation_permit().await?;
 
                     let evaluator_input = EvaluatorInput {
+                        http_policy: Some(http_policy),
                         run_id: run_id.to_string(),
                         execution_id: execution_id.to_string(),
                         attempt_id: attempt_id.to_string(),
@@ -1342,6 +1351,7 @@ async fn evaluate_case_execution(
                 attempt_id,
                 result_count: records.len(),
                 terminal_transition: ExecutionTerminalTransition {
+                    http_policy_revisions: Default::default(),
                     execution_id,
                     attempt_id,
                     attempt_no,
@@ -1451,6 +1461,28 @@ pub(crate) async fn process_case_batch_execution(
         )
         .await?;
 
+    let ids = evaluation_plans_by_case
+        .iter()
+        .zip(&allocations)
+        .filter(|(_, allocation)| allocation.should_process)
+        .flat_map(|(plan, _)| plan.evaluator_bindings.iter())
+        .map(|binding| {
+            evaluator_catalog
+                .get(&binding.evaluator_ref)
+                .map(|entry| entry.evaluator_id)
+                .ok_or_else(|| anyhow::anyhow!("evaluator missing from pinned catalog"))
+        })
+        .collect::<anyhow::Result<std::collections::BTreeSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let http_policies = context
+        .http_policies()
+        .snapshots(&ids, |ids| async move {
+            let control = database_router.control().await?;
+            crate::db::tables::evaluator_http_policies::load(control, &ids).await
+        })
+        .await?;
+
     debug!(
         run_id = %run_id,
         case_count = cases.len(),
@@ -1471,6 +1503,7 @@ pub(crate) async fn process_case_batch_execution(
             let case = &cases[index];
             let evaluation_plan = &evaluation_plans_by_case[index];
             let allocation = &allocations[index];
+            let http_policies = &http_policies;
             pending.push(async move {
                 if allocation.case_id != case.case_id {
                     anyhow::bail!(
@@ -1480,7 +1513,7 @@ pub(crate) async fn process_case_batch_execution(
                     );
                 }
 
-                let outcome = if allocation.retry_not_due || allocation.already_terminal {
+                let mut outcome = if allocation.retry_not_due || allocation.already_terminal {
                     CaseExecutionOutcome {
                         processed: None,
                         persistence: None,
@@ -1507,6 +1540,7 @@ pub(crate) async fn process_case_batch_execution(
                 } else if allocation.should_process {
                     evaluate_case_execution(
                         context,
+                        http_policies,
                         run_id,
                         run_shard,
                         run_profile,
@@ -1525,6 +1559,20 @@ pub(crate) async fn process_case_batch_execution(
                     }
                 };
 
+                if allocation.should_process
+                    && let Some(processed) = &mut outcome.processed
+                {
+                    processed.terminal_transition.http_policy_revisions = evaluation_plan
+                        .evaluator_bindings
+                        .iter()
+                        .filter_map(|binding| evaluator_catalog.get(&binding.evaluator_ref))
+                        .filter_map(|entry| {
+                            http_policies
+                                .get(&entry.evaluator_id)
+                                .map(|p| (entry.evaluator_id, p.revision().to_owned()))
+                        })
+                        .collect();
+                }
                 Ok::<_, anyhow::Error>((index, outcome))
             });
         }

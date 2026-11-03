@@ -83,6 +83,7 @@ use crate::{
 mod resources;
 
 pub(crate) struct EvaluatorHost {
+    pub(crate) http_policy: Option<std::sync::Arc<vigilo::evaluator_http::Snapshot>>,
     resources: Option<resources::Resources>,
     resource_max_bytes: u64,
     resource_timeout: Option<Duration>,
@@ -921,6 +922,7 @@ impl Wasm {
         let mut store = Store::new(
             &self.engine,
             EvaluatorHost {
+                http_policy: None,
                 resources: None,
                 resource_max_bytes: self.config.max_memory_bytes,
                 resource_timeout: (self.config.timeout_ms > 0)
@@ -994,6 +996,7 @@ mod tests {
 
     fn test_host(max_log_message_bytes: usize, max_log_messages: u32) -> EvaluatorHost {
         EvaluatorHost {
+            http_policy: None,
             resources: None,
             resource_max_bytes: Config::default().max_memory_bytes,
             resource_timeout: None,

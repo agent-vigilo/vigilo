@@ -141,3 +141,8 @@ flowchart TD
     %% links
     click Vigilo "/docs/architecture/structure/components/vigilo/"
     click Coordinator "/docs/architecture/structure/components/coordinator/"
+
+    HttpPolicyCache["Evaluator HTTP policy cache<br/>30-second default maximum age"]:::component
+    PolicyStore["Control database operator policy rows"]:::storage
+    ExecutionProcessor -->|"Freeze evaluator snapshots per attempt"| HttpPolicyCache
+    HttpPolicyCache -->|"Bounded batched misses and refreshes"| PolicyStore

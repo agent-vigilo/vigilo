@@ -217,8 +217,9 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 $17::int8[],
                 $18::jsonb[],
                 $19::jsonb[],
-                $20::bytea[]
-            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs, agent_invocation, response_evidence, response_bytes)
+                $20::bytea[],
+                $21::jsonb[]
+            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs, agent_invocation, response_evidence, response_bytes, http_policy_revisions)
         ),
         transition_count AS (
             SELECT COUNT(*) AS expected_count
@@ -350,6 +351,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 response_evidence = COALESCE(terminal_input.response_evidence, execution_attempts.response_evidence),
                 response_evidence_bytes = COALESCE(terminal_input.response_bytes, execution_attempts.response_evidence_bytes),
                 outcome_summary = execution_attempts.outcome_summary
+                    || jsonb_build_object('evaluator_http_policy_revisions', terminal_input.http_policy_revisions)
                     || CASE WHEN terminal_input.agent_failure IS NOT NULL
                         THEN jsonb_build_object('agent_failure', terminal_input.agent_failure)
                         ELSE '{}'::jsonb END
@@ -501,6 +503,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     .bind(agent_invocations)
     .bind(response_evidence)
     .bind(response_bytes)
+    .bind(transitions.iter().map(|t| serde_json::to_value(&t.http_policy_revisions)).collect::<Result<Vec<_>, _>>()?)
     .fetch_one(&mut *tx)
     .await?;
 

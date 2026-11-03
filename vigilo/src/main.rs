@@ -113,6 +113,15 @@ async fn main() -> ExitCode {
             )
             .with_agent_http_limits(command_context.agent_http);
 
+            let context =
+                match context.with_http_policy_max_age(app.evaluator_http_policy_max_age_seconds) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        error!(%error, "invalid evaluator HTTP policy freshness");
+                        return ExitCode::FAILURE;
+                    }
+                };
+
             let context = if let Some(path) = command_context.agent_credentials {
                 match agent_client::credentials::Provider::load(&path).await {
                     Ok(provider) => context.with_agent_credentials(provider),

@@ -586,6 +586,7 @@ async fn terminal_transition_rejects_expired_attempt_lease(pool: PgPool) {
         seed.worker_id,
         1,
         &[ExecutionTerminalTransition {
+            http_policy_revisions: Default::default(),
             execution_id: seed.execution_id,
             attempt_id: seed.attempt_id,
             attempt_no: 1,
@@ -905,6 +906,7 @@ async fn authentication_failure_is_terminal_before_attempt_budget_exhaustion(poo
         seed.worker_id,
         3,
         &[ExecutionTerminalTransition {
+            http_policy_revisions: Default::default(),
             execution_id: seed.execution_id,
             attempt_id: seed.attempt_id,
             attempt_no: 1,
@@ -982,6 +984,10 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
         let seed = seed_running_attempt(&pool, 120, 120).await;
         let floor = failure.as_ref().and_then(|f| f.retry_not_before);
         let transition = ExecutionTerminalTransition {
+            http_policy_revisions: std::collections::BTreeMap::from([(
+                Uuid::nil(),
+                "frozen-policy-revision".to_owned(),
+            )]),
             execution_id: seed.execution_id,
             attempt_id: seed.attempt_id,
             attempt_no: 1,
@@ -1008,6 +1014,10 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
         let (status, retry_after, summary, attempt_status): (String, Option<chrono::DateTime<chrono::Utc>>, serde_json::Value, String) = sqlx::query_as(
             "SELECT e.status::text, e.retry_after, a.outcome_summary, a.status::text FROM executions e JOIN execution_attempts a ON a.run_id=e.run_id AND a.run_shard=e.run_shard AND a.id=e.current_attempt_id WHERE e.id=$1"
         ).bind(seed.execution_id).fetch_one(&mut *connection).await.unwrap();
+        assert_eq!(
+            summary["evaluator_http_policy_revisions"][Uuid::nil().to_string()],
+            "frozen-policy-revision"
+        );
         assert_eq!(status, expected);
         if let Some(floor) = floor {
             assert!(retry_after.unwrap() >= floor);
@@ -1063,6 +1073,7 @@ async fn invocation_diagnostics_use_existing_terminal_summary_for_every_outcome(
             seed.worker_id,
             2,
             &[ExecutionTerminalTransition {
+                http_policy_revisions: Default::default(),
                 execution_id: seed.execution_id,
                 attempt_id: seed.attempt_id,
                 attempt_no: 1,
@@ -1137,6 +1148,7 @@ async fn evidence_for_seed(
 
 fn terminal(seed: &SeededAttempt) -> ExecutionTerminalTransition {
     ExecutionTerminalTransition {
+        http_policy_revisions: Default::default(),
         execution_id: seed.execution_id,
         attempt_id: seed.attempt_id,
         attempt_no: 1,

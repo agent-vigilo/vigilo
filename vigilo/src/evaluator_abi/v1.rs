@@ -86,6 +86,7 @@ impl EvaluatorAbiAdapter for V1Adapter {
         input: EvaluatorInput,
     ) -> anyhow::Result<EvaluatorOutput> {
         let mut store = runtime.evaluator_store()?;
+        store.data_mut().http_policy = input.http_policy.clone();
         let instance = instance_pre.instantiate(&mut store)?;
         let bindings = bindings::EvaluatorWorld::new(&mut store, &instance)?;
         let requirements = bindings
@@ -159,9 +160,16 @@ impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
 
     fn send_http_request(
         &mut self,
-        _req: bindings::vigilo::evaluator::executor::HttpRequest,
+        req: bindings::vigilo::evaluator::executor::HttpRequest,
     ) -> Result<bindings::vigilo::evaluator::executor::HttpResponse, String> {
-        Err("send_http_request is not enabled yet; outbound HTTP policy enforcement is not configured".to_string())
+        let policy = self
+            .http_policy
+            .as_ref()
+            .ok_or("evaluator HTTP policy unavailable")?;
+        let _destination = policy
+            .authorize(policy.evaluator_id(), &req.method, &req.uri)
+            .map_err(|error| error.to_string())?;
+        Err("evaluator HTTP transport is disabled".to_string())
     }
 }
 
@@ -335,6 +343,7 @@ mod tests {
 
     fn evaluator_input() -> EvaluatorInput {
         EvaluatorInput {
+            http_policy: None,
             run_id: "run-1".to_string(),
             execution_id: "execution-1".to_string(),
             attempt_id: "attempt-1".to_string(),
@@ -481,4 +490,56 @@ mod tests {
             assert_eq!(map_severity(input), expected);
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn http_import_checks_host_policy_before_disabled_transport() {
+    use bindings::vigilo::evaluator::executor::{
+        Host,
+        HttpRequest,
+    };
+    use vigilo::evaluator_http::{
+        Action,
+        Rule,
+        Snapshot,
+    };
+    let runtime = Wasm::new(crate::context::wasm::Config::default()).unwrap();
+    let mut store = runtime.evaluator_store().unwrap();
+    let request = || HttpRequest {
+        method: "POST".into(),
+        uri: "https://judge.example/v1".into(),
+        headers: vec![],
+        body: None,
+        timeout_ms: None,
+    };
+    assert_eq!(
+        store.data_mut().send_http_request(request()).unwrap_err(),
+        "evaluator HTTP policy unavailable"
+    );
+    let id = uuid::Uuid::nil();
+    store.data_mut().http_policy = Some(std::sync::Arc::new(Snapshot::new(id, vec![]).unwrap()));
+    assert!(
+        store
+            .data_mut()
+            .send_http_request(request())
+            .unwrap_err()
+            .contains("not granted")
+    );
+    store.data_mut().http_policy = Some(std::sync::Arc::new(
+        Snapshot::new(
+            id,
+            vec![Rule {
+                uri: request().uri,
+                method: "POST".into(),
+                action: Action::Allow,
+                networks: vec![],
+            }],
+        )
+        .unwrap(),
+    ));
+    assert_eq!(
+        store.data_mut().send_http_request(request()).unwrap_err(),
+        "evaluator HTTP transport is disabled"
+    );
 }

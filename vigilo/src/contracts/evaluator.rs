@@ -53,6 +53,9 @@ pub(crate) struct TestCase {
 /// Input envelope passed into a WASM evaluator invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EvaluatorInput {
+    /// Host-owned attempt authorization, never part of evaluator-controlled input.
+    #[serde(skip)]
+    pub(crate) http_policy: Option<std::sync::Arc<vigilo::evaluator_http::Snapshot>>,
     /// Logical run identifier owning this execution.
     pub(crate) run_id: String,
     /// Unique execution identifier for this case evaluation.
