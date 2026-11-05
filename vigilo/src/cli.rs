@@ -322,3 +322,13 @@ mod tests {
             .any(|arg| arg.get_long() == Some(name))
     }
 }
+
+mod entry;
+
+/// Runs the command-line adapter in the caller’s Tokio runtime.
+///
+/// Reads process arguments, configures CLI logging and writes command output.
+/// Embedding applications should call [`crate::operations`] instead.
+pub async fn run() -> std::process::ExitCode {
+    entry::run().await
+}

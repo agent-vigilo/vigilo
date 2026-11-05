@@ -63,7 +63,7 @@ This file records Vigilo-specific constraints that are easy to miss. A nearer
   ownership, and end-to-end tests for distributed runtime behavior.
 - Service-free tests must not require Docker, PostgreSQL, RabbitMQ, external network
   access, or platform-specific shell tools. Fixtures must be deterministic, bounded,
-  and cross-platform. Reserve `#[ignore]` in the `vigilo` binary for PostgreSQL;
+  and cross-platform. Reserve `#[ignore]` in the `vigilo` library for PostgreSQL;
   put other opt-in services in a named target.
 - Reproduce a reported regression with its exact command, environment, and
   platform when available. Report required checks that did not run and why;
@@ -85,7 +85,7 @@ cargo test --workspace --locked --lib --bins
 - Run `cargo perf check` for performance harness changes. For service or topology
   changes, also run `cargo test -p xtask --locked --features performance-services --test performance_services -- --nocapture`.
 - For SQL, locking, leases, sharding, or database workflow changes, run
-  `cargo test -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4`;
+  `cargo test -p vigilo --locked --lib -- --ignored --nocapture --test-threads=4`;
   apply changed migrations through setup against a fresh PostgreSQL database.
 - Run the named end-to-end tier for distributed routing or runtime changes when
   its full dependency set is available. Run `npm --prefix web run typecheck` and

@@ -11,10 +11,36 @@ keywords:
 
 import Mermaid from '@theme/Mermaid';
 import vigiloDiagram from './diagram.mmd';
+import statusFlow from './status-flow.mmd';
 
 # Vigilo Components
 
-Describes the major internal responsibilities of the Vigilo command runtime.
+The library owns runtime implementation and database workflows. The CLI adapter
+owns argument parsing, process logging, signal handling and output formatting.
+`vigilo::operations::Client` exposes typed standalone run status without CLI parsing
+or process setup. Its operator-supplied configuration creates shared lazy database
+pools; the caller owns the Tokio runtime. Database models and pools remain private.
+
+```rust
+use vigilo::operations::{Client, Config};
+
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = Client::new(Config::new(std::env::var("DATABASE_URL")?))?;
+let run_id = "0198f36d-f7db-7d90-998c-d60d498dd979".parse()?;
+let status = client.run_status(run_id).await?;
+println!("{}", status.details.status);
+Ok(())
+}
+```
+
+The client assumes an authorized standalone operator. It does not authenticate
+callers. Status reports progress source and completeness explicitly; observations
+across databases are not one atomic snapshot. Missing runs and dependency failures
+have typed errors. Dropping a status future cancels the read, not the run.
+
+The CLI uses the same typed projection for status/watch output. Other commands and
+daemon adapters call private library workflows. Neither pools nor persistence
+records are part of the public operation API.
 
 <Mermaid value={vigiloDiagram} />
 
@@ -30,6 +56,10 @@ Execution admission verifies compact local metadata before activation. The
 foreground caller resumes preparation; coordinators recover requested admission
 under the run creation lease. See
 [Run Preparation](/docs/architecture/case-storage/run-preparation).
+
+## Status read flow
+
+<Mermaid value={statusFlow} />
 
 ## Related
 

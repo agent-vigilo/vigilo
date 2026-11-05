@@ -93,6 +93,16 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
         .unwrap()
         .unwrap();
 
+    let typed = crate::operations::status::read(&database_router, run_id)
+        .await
+        .unwrap();
+    assert_eq!(typed, crate::operations::RunStatus::from(&status));
+    assert!(typed.terminal);
+    assert!(!typed.gate_passed);
+    assert!(matches!(
+        crate::operations::status::read(&database_router, Uuid::now_v7()).await,
+        Err(crate::operations::Error::NotFound(_))
+    ));
     assert_eq!(status.execution_route_count, 0);
     assert_eq!(
         status
@@ -101,6 +111,12 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
             .map(|progress| progress.failed_placement_count),
         Some(0)
     );
+    database_router.control().await.unwrap().close().await;
+    let error = crate::operations::status::read(&database_router, run_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::operations::Error::Dependency(_)));
+    assert_eq!(error.to_string(), "run status dependency failed");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -124,6 +140,17 @@ async fn status_batches_same_database_shards_and_preserves_partial_progress(pool
 
     let (result, queries) = record_queries(select_run_status(&router, run)).await;
     let projection = result.unwrap().unwrap();
+    let (typed, typed_queries) =
+        record_queries(crate::operations::status::read(&router, run)).await;
+    assert_eq!(
+        typed.unwrap(),
+        crate::operations::RunStatus::from(&projection)
+    );
+    // Compare initialized routing paths: cold pool metadata is intentionally outside
+    // this preservation assertion, while all per-read SQL stays accounted for.
+    let (_, warm_queries) = record_queries(select_run_status(&router, run)).await;
+    assert_eq!(typed_queries, warm_queries);
+
     assert_eq!(projection.execution_route_count, 127);
     assert_eq!(projection.shard_summary_count, 126);
     assert!(!projection.live_progress_complete());

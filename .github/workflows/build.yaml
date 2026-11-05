@@ -86,6 +86,13 @@ jobs:
       - name: Run service-free tests
         if: ${{ !matrix.coverage }}
         run: cargo test --workspace --locked --lib --bins --verbose
+      - name: Verify independent library consumer
+        if: ${{ !matrix.coverage }}
+        run: |
+          python3 -c "import shutil; shutil.copyfile('Cargo.lock', 'vigilo/tests/fixtures/library-consumer/Cargo.lock')"
+          cargo run --manifest-path vigilo/tests/fixtures/library-consumer/Cargo.toml --offline
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
       - name: Run service-free tests with coverage
         if: matrix.coverage
         run: >-
@@ -175,19 +182,19 @@ jobs:
           DATABASE_URL: postgresql://postgres:password@localhost:5432/template1
       - name: Run PostgreSQL-backed SQLx tests with coverage
         run: >-
-          cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
+          cargo llvm-cov --no-report -p vigilo --locked --lib
           -- --ignored --nocapture --test-threads=4
       - name: Build portable evaluator fixture
         run: cargo build -p sentiment-basic-en --locked --target wasm32-wasip2 --release
       - name: Verify portable evaluator publication with coverage
         run: >-
-          cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
+          cargo llvm-cov --no-report -p vigilo --locked --lib
           --features evaluator-abi-fixtures --
           evaluators::postgres_tests::portable_publication_matches_source_and_preserves_conflict_guards
           --ignored --exact --nocapture
       - name: Verify core collection publication with coverage
         run: >-
-          cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
+          cargo llvm-cov --no-report -p vigilo --locked --lib
           --features evaluator-abi-fixtures --
           core_evaluators::tests::collection_publication_replays_without_download_and_rejects_conflicts
           --ignored --exact --nocapture
@@ -493,13 +500,13 @@ jobs:
           cargo build --target wasm32-wasip2 --release --locked "${package_args[@]}"
       - name: Verify evaluator ABI compatibility
         run: >-
-          cargo test -p vigilo --locked --bin vigilo
+          cargo test -p vigilo --locked --lib
           --features evaluator-abi-fixtures
           evaluator_abi::tests::
           -- --nocapture
       - name: Verify portable evaluator identity and ABI validation
         run: >-
-          cargo test -p vigilo --locked --bin vigilo
+          cargo test -p vigilo --locked --lib
           --features evaluator-abi-fixtures
           context::wasm::tests::portable_artifacts_preserve_exact_bytes_and_verify_embedded_identity_and_host_abi
           -- --exact

@@ -83,7 +83,7 @@ Build both fixtures before running the ABI tests:
 
 ```bash
 cargo build -p sentiment-basic-en -p response-resource-fixture --locked --target wasm32-wasip2 --release
-cargo test -p vigilo --locked --features evaluator-abi-fixtures --bin vigilo evaluator_abi::
+cargo test -p vigilo --locked --features evaluator-abi-fixtures --lib evaluator_abi::
 ```
 
 The resource fixture exercises reads through actual Wasm imports, including invalid

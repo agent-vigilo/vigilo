@@ -64,9 +64,9 @@ requires them. Their setup remains outside the measured process boundary.
 
 The `performance` directory is for the external process and service harness.
 Criterion targets are added under `vigilo/benches` only when production already
-has a stable library surface worth measuring. Vigilo keeps runtime,
-database, and CLI modules binary-private, so there is no Criterion target and no
-API is widened solely for benchmarking.
+has a stable library surface worth measuring. Vigilo keeps runtime and database implementation modules library-private. The
+CLI adapter and typed operations share those workflows; no API is widened solely
+for benchmarking.
 
 See [`schemas/README.md`](schemas/README.md) for the registry, profile,
 environment, and generated-artifact field reference.
@@ -533,7 +533,7 @@ generating a Cartesian product:
 
 The router/cache contract remains registered but unavailable because the
 release CLI cannot keep its process-local cache alive across calls. Adding a
-benchmark-only command or exposing binary-private modules would measure a new
+benchmark-only command or exposing library-private modules would measure a new
 path rather than the shipped one, so selection fails closed until a legitimate
 reusable production boundary exists.
 

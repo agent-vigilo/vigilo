@@ -21,7 +21,7 @@ an explicit scheme and compatibility decision, not updated snapshots alone.
 Run with:
 
 ```bash
-cargo test -p vigilo --locked --bin vigilo identity_tests
+cargo test -p vigilo --locked --lib identity_tests
 ```
 
 These fixtures verify logical input identity independently from stored-object

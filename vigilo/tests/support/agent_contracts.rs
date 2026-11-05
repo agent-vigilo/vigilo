@@ -1,4 +1,4 @@
-//! Actual binary contracts reused by the opt-in agent HTTP transport tests.
+//! Actual runtime contracts reused by the opt-in agent HTTP transport tests.
 #[path = "../../src/contracts/evaluator.rs"]
 pub(crate) mod evaluator;
 #[path = "../../src/contracts/normalization.rs"]

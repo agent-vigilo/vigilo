@@ -15,6 +15,9 @@ keywords:
 
 # System Structure
 
+The library owns runtime implementation; the CLI adapter owns process interaction,
+and standalone Rust hosts can read typed run status through the operation API.
+
 This section describes the static structure of Agent Vigilo: the CLI runtime, coordinator, worker, PostgreSQL placement model, immutable object storage, RabbitMQ message broker, evaluator registry, and Wasmtime evaluator boundary.
 
 Agent Vigilo is structured as a distributed AI evaluation system. Runs are created through the CLI, dispatched by coordinators, processed by workers, evaluated through isolated Wasm components, persisted through routed PostgreSQL workflows, and signaled through durable outbox publication.

@@ -1,0 +1,11 @@
+[package]
+name = "vigilo-library-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+vigilo = { path = "../../..", version = "=0.1.0" }
+tokio = { version = "1", features = ["rt-multi-thread"] }

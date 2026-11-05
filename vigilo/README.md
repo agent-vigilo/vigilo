@@ -48,6 +48,12 @@ installs the latest compatible core evaluators. Use
 `--evaluators YYYY.MM.DD.N` to pin a published collection, or
 `--skip-evaluators` for database-only setup.
 
+## Rust Integration
+
+`vigilo::operations::Client` provides typed standalone run status using shared lazy
+database pools. The caller owns its runtime and presentation. See the
+[library boundary and example](https://agentvigilo.com/docs/architecture/structure/components/vigilo/).
+
 ## Explore
 
 - [CLI reference](https://agentvigilo.com/docs/guides/cli-reference)

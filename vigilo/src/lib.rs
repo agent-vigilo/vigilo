@@ -1,18 +1,37 @@
-//! Public library surface for the Vigilo crate.
+//! Application operations and evaluator contracts for embedding Vigilo.
 //!
-//! The runtime currently lives in the binary crate, so this module is reserved
-//! for reusable APIs that evaluator crates or external integrations should
-//! import directly. Keep this surface small and stable; do not expose runtime,
-//! database, or CLI internals here until they are intended as public contracts.
+//! Runtime implementation stays private. Hosts own process setup and presentation;
+//! standalone operations expose bounded typed values without database internals.
 
-//! Public library surface for the Vigilo crate.
-//!
-//! The runtime currently lives in the binary crate, so this module is reserved
-//! for reusable APIs that evaluator crates or external integrations should
-//! import directly. Keep this surface small and stable; do not expose runtime,
-//! database, or CLI internals here until they are intended as public contracts.
+extern crate self as vigilo;
 
-// todo - export traits and utilities for evaluators
+#[cfg(test)]
+#[path = "../build_support.rs"]
+mod build_support;
+
+mod agent_client;
+mod blob_storage;
+mod case_reader;
+mod circuit_breaker;
+pub mod cli;
+mod context;
+mod contracts;
+mod core_evaluators;
+mod dataset_ingestion;
+mod db;
+mod evaluator_abi;
+mod evaluator_package;
+mod evaluator_requests;
+mod evaluators;
+mod manifest;
+mod models;
+mod mq;
+mod outbox;
+mod run_admission;
+mod run_planning;
+mod runtime;
+
+pub mod operations;
 
 /// Versioned agent response configuration and evidence contracts.
 #[path = "contracts/response.rs"]

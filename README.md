@@ -132,11 +132,15 @@ CI includes these transport tests in the end-to-end coverage report.
 After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:
 
 ```bash
-cargo test -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
+cargo test -p vigilo --locked --lib -- --ignored --nocapture --test-threads=4
 ```
 
-Within the `vigilo` binary target, `#[ignore]` is reserved for this database
+Within the `vigilo` library target, `#[ignore]` is reserved for this database
 integration tier so the command remains complete.
+
+The independent library consumer fixture lives in `vigilo/tests/fixtures/library-consumer`.
+CI seeds its lockfile from the workspace lockfile and builds it as a separate package
+using only the supported public API.
 
 The end-to-end tier runs `multi_database_routing` and `multi_database_e2e`
 separately because they require the complete distributed dependency set. The
@@ -175,7 +179,7 @@ cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services -
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features agent-http-services --test agent_http_services
 cargo llvm-cov --no-report -p vigilo --locked --features evaluator-http-services --test evaluator_http_services
-cargo llvm-cov --no-report -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
+cargo llvm-cov --no-report -p vigilo --locked --lib -- --ignored --nocapture --test-threads=4
 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_routing -- --nocapture
 VIGILO_E2E_MULTI_DATABASE=1 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e -- --nocapture
 cargo llvm-cov report --fail-under-lines 80 --ignore-filename-regex '[/\\]postgres_tests(\.rs|[/\\])' --lcov --output-path lcov.info

@@ -427,59 +427,19 @@ fn run_watch_payload_from_status(
     status: &run_status_workflow::RunStatusProjection,
     terminal: bool,
 ) -> Value {
-    let run = &status.run;
+    let mut result = crate::operations::RunStatus::from(status);
+    result.terminal = terminal;
+    status_payload(&result)
+}
+
+fn status_payload(status: &crate::operations::RunStatus) -> Value {
     json!({
-        "data": {
-            "run_id": run.id,
-            "run_key": run.run_key,
-            "status": run.status,
-            "gate_status": run.gate_status,
-            "expected_execution_count": run.expected_execution_count,
-            "terminal_execution_count": run.terminal_execution_count,
-            "passed_execution_count": run.passed_execution_count,
-            "failed_execution_count": run.failed_execution_count,
-            "errored_execution_count": run.errored_execution_count,
-            "summary": run.summary,
-            "error_message": run.error_message,
-            "created_at": run.created_at,
-            "started_at": run.started_at,
-            "dispatched_at": run.dispatched_at,
-            "finalized_at": run.finalized_at,
-            "completed_at": run.completed_at,
-            "updated_at": run.updated_at,
-            "live_progress": {
-                "expected_execution_count": status.live_progress.expected_execution_count,
-                "execution_count": status.live_progress.execution_count,
-                "terminal_execution_count": status.live_progress.terminal_execution_count,
-                "passed_execution_count": status.live_progress.passed_execution_count,
-                "failed_execution_count": status.live_progress.failed_execution_count,
-                "errored_execution_count": status.live_progress.errored_execution_count,
-                "skipped_execution_count": status.live_progress.skipped_execution_count,
-                "missing_aggregate_count": status.live_progress.missing_aggregate_count,
-                "missing_execution_count": status.live_progress.missing_execution_count,
-                "unresolved_execution_count": status.live_progress.unresolved_execution_count,
-                "planned_chunk_count": status.live_progress.planned_chunk_count,
-                "settled_chunk_count": status.live_progress.settled_chunk_count,
-                "sealed_shard_count": status.live_progress.sealed_shard_count,
-                "failed_chunk_count": status.live_progress.failed_chunk_count,
-                "cancelled_chunk_count": status.live_progress.cancelled_chunk_count,
-            },
-            "creation_progress": status.creation_progress.as_ref().map(|progress| json!({
-                "placement_count": progress.placement_count,
-                "pending_placement_count": progress.pending_placement_count,
-                "seeded_placement_count": progress.seeded_placement_count,
-                "failed_placement_count": progress.failed_placement_count,
-                "attempt_count": progress.attempt_count,
-                "last_error": progress.last_error,
-                "plan_status": progress.plan_status,
-                "plan_chunk_cursor": progress.plan_chunk_cursor,
-            })),
-        },
+        "data": status.details,
         "meta": {
-            "terminal": terminal,
-            "gate_passed": run.status == "completed" && run.gate_status == "pass",
-            "progress_source": status.progress_source(),
-            "live_progress_complete": status.live_progress_complete(),
+            "terminal": status.terminal,
+            "gate_passed": status.gate_passed,
+            "progress_source": status.progress_source,
+            "live_progress_complete": status.live_progress_complete,
             "execution_route_count": status.execution_route_count,
             "shard_summary_count": status.shard_summary_count,
         }
@@ -1104,6 +1064,56 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().starts_with("invalid run_id"));
+    }
+
+    #[test]
+    fn typed_status_preserves_cli_fields_and_lifecycle_metadata() {
+        for state in ["creating", "running", "completed", "failed", "cancelled"] {
+            let projection = run_status_workflow::RunStatusProjection::from_control_run(
+                run_with_status(state, "pass"),
+            );
+            let typed = crate::operations::RunStatus::from(&projection);
+            let payload = super::status_payload(&typed);
+            let mut keys = payload["data"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut expected = vec![
+                "run_id",
+                "run_key",
+                "status",
+                "gate_status",
+                "expected_execution_count",
+                "terminal_execution_count",
+                "passed_execution_count",
+                "failed_execution_count",
+                "errored_execution_count",
+                "summary",
+                "error_message",
+                "created_at",
+                "started_at",
+                "dispatched_at",
+                "finalized_at",
+                "completed_at",
+                "live_progress",
+                "creation_progress",
+            ];
+            expected.sort_unstable();
+            assert_eq!(keys, expected);
+            assert_eq!(
+                typed.terminal,
+                matches!(state, "completed" | "failed" | "cancelled")
+            );
+            assert_eq!(typed.gate_passed, state == "completed");
+            assert_eq!(typed.details.run_id, projection.run.id);
+            assert_eq!(typed.details.summary, projection.run.summary);
+            assert_eq!(typed.progress_source, "control_run");
+            assert!(!typed.live_progress_complete);
+            assert!(payload["data"]["creation_progress"].is_null());
+        }
     }
 
     #[test]

@@ -301,7 +301,7 @@ pub(crate) struct ExecutionWriteRoute {
 }
 
 impl DatabaseRouter {
-    fn new(config: Config) -> Self {
+    pub(crate) fn new(config: Config) -> Self {
         Self {
             uri: config.uri,
             max_connections_per_pool: config.max_connections_per_pool,

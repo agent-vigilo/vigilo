@@ -14,6 +14,12 @@ flowchart TD
     AgentClient(["fa:fa-robot <br/> <b>Agentic Client</b> <br/> <small>[Software System]</small>"]):::actor
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
+    LibraryHost["Rust host<br/>Caller-owned runtime and presentation"]:::actor
+    StatusOperations["Typed status operation<br/>Shared lazy pools; no output state"]:::component
+    LibraryHost --> StatusOperations
+    CliRouter -->|status| StatusOperations
+    StatusOperations --> RunQueries
+
     %% components
     CliRouter["fa:fa-terminal <br/> <b>CLI App and Command Router</b> <br/> <small>[Component: Rust / Clap]</small> <br/> <small>Parses global options and dispatches setup, dataset, evaluator, run, database, rebalance, coordinator, and worker commands.</small>"]:::component
     RuntimeContext["fa:fa-layer-group <br/> <b>Runtime Context Provider</b> <br/> <small>[Component: Rust]</small> <br/> <small>Lazily initializes routed database access, storage adapters, messaging, output, registry cache, and Wasm runtime clients.</small>"]:::component
@@ -39,6 +45,7 @@ flowchart TD
     %% command runtime boundary
     subgraph VigiloRuntime["&nbsp;"]
         CliRouter
+        StatusOperations
         RuntimeContext
         OutputRenderer
         SetupManager
