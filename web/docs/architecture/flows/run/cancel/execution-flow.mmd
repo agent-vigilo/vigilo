@@ -7,38 +7,26 @@ config:
     edgeLabelBackground: 'transparent'
 ---
 sequenceDiagram
-    actor User
-    participant Vigilo
-    participant ControlDB as Control DB
-    participant ExecDB as Execution DBs
-
-    User->>Vigilo: vigilo run cancel
-    activate Vigilo
-    Vigilo->>Vigilo: Parse run id
-    Vigilo->>ControlDB: Lock run and mark cancellation requested
-    ControlDB-->>Vigilo: Run status
-
-    alt Run does not exist
-        Vigilo-->>User: Run not found error
-    else Run is completed or failed
-        Vigilo-->>User: Cancellation error
-    else Run is already cancelled
-        Vigilo->>ControlDB: Mark dispatch cursors drained
-        Vigilo->>ControlDB: Resolve readable execution routes
-        ControlDB-->>Vigilo: Route list
-        Vigilo->>ExecDB: Idempotently cancel local work and record missing receipts
-        ExecDB-->>Vigilo: Cancellation counts
-        Vigilo->>ControlDB: Refresh cancellation summary and event
-        Vigilo-->>User: Success response
-    else Run is pending, running, finalizing or in blob preparation
-        Vigilo->>ControlDB: Mark dispatch cursors drained
-        Vigilo->>ControlDB: Resolve readable execution routes
-        ControlDB-->>Vigilo: Route list
-        Vigilo->>ExecDB: Lock chunks, cancel open work, and commit immutable receipts
-        ExecDB-->>Vigilo: Cancellation counts and summaries
-        Vigilo->>ControlDB: Persist final cancellation summary
-        Vigilo->>ControlDB: Enqueue run.cancelled
-        Vigilo-->>User: Success response
+    actor Operator
+    participant API as CLI / library operation
+    participant Control as Control DB
+    participant Coordinator
+    participant Execution as Execution DBs
+    participant Worker
+    Operator->>API: Cancel run
+    API->>Control: Commit revoked revision + pending destinations
+    API->>Execution: Attempt bounded revision-fenced delivery
+    Execution-->>API: Applied; live leases may remain
+    API-->>Operator: Current outcome; terminal may be false
+    loop Outstanding delivery only
+        Coordinator->>Control: Claim bounded pending destinations
+        Coordinator->>Execution: Apply control revision
+        Worker->>Execution: Existing heartbeat observes control
+        Worker->>Worker: Stop new cases; cancel supported calls
+        Worker->>Execution: Persist safe results; release chunk lease
+        Execution-->>Coordinator: Applied / quiescent observations
+        Coordinator->>Control: Acknowledge claimed revision
     end
-    Note over Vigilo,ControlDB: Blob preparation has no admitted execution routes, cancellation fences plan publication.
-    deactivate Vigilo
+    Coordinator->>Execution: Settle unfinished work and receipts
+    Coordinator->>Control: Cancellation summary + event
+    Note over Coordinator,Execution: A partition delays settlement; application is not a global stop.

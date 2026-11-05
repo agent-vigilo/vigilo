@@ -266,6 +266,7 @@ fn persisted_evaluator_manifest(
 /// Runtime metadata needed to execute one evaluator binding for a run.
 #[derive(Debug, Clone)]
 pub(crate) struct RunEvaluatorCatalogEntry {
+    pub(crate) http_policy: vigilo::evaluator_http::Snapshot,
     pub(crate) evaluator_id: Uuid,
     pub(crate) evaluator_version: String,
     pub(crate) content_hash: String,
@@ -332,6 +333,10 @@ pub(crate) fn build_pinned_evaluator_catalog(
         crate::evaluator_abi::resolve_identity(&evaluator.abi)?;
         let identity = parse_fully_qualified_evaluator(&evaluator.evaluator_ref)?;
         let entry = RunEvaluatorCatalogEntry {
+            http_policy: vigilo::evaluator_http::Snapshot::new(
+                evaluator.evaluator_id,
+                evaluator.http_rules,
+            )?,
             evaluator_id: evaluator.evaluator_id,
             evaluator_version: identity.version,
             content_hash: evaluator.content_hash,
@@ -1441,8 +1446,9 @@ pub(crate) async fn process_case_batch_execution(
     evaluator_catalog: &RunEvaluatorCatalog,
     response_identity: &response::Identity,
     cases: &[chunk_processing::WorkerCaseBatchItem],
+    control: &crate::operations::control::Observation,
 ) -> anyhow::Result<Vec<ProcessedExecution>> {
-    if cases.is_empty() {
+    if cases.is_empty() || !control.enabled() {
         return Ok(Vec::new());
     }
 
@@ -1491,6 +1497,19 @@ pub(crate) async fn process_case_batch_execution(
             crate::db::tables::evaluator_http_policies::load(control, &ids).await
         })
         .await?;
+    let accepted_policies = evaluator_catalog
+        .values()
+        .map(|entry| (entry.evaluator_id, &entry.http_policy))
+        .collect::<BTreeMap<_, _>>();
+    let http_policies = http_policies
+        .into_iter()
+        .map(|(id, current)| {
+            let accepted = accepted_policies.get(&id).ok_or_else(|| {
+                anyhow::anyhow!("HTTP policy missing from accepted evaluator catalog")
+            })?;
+            Ok((id, std::sync::Arc::new(current.restrict_to(accepted)?)))
+        })
+        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
 
     debug!(
         run_id = %run_id,
@@ -1504,8 +1523,8 @@ pub(crate) async fn process_case_batch_execution(
     let mut pending = FuturesUnordered::new();
     let mut ordered_outcomes = Vec::with_capacity(cases.len());
 
-    while next_index < cases.len() || !pending.is_empty() {
-        while next_index < cases.len() && pending.len() < parallelism {
+    while (next_index < cases.len() && control.enabled()) || !pending.is_empty() {
+        while next_index < cases.len() && pending.len() < parallelism && control.enabled() {
             let index = next_index;
             next_index += 1;
 
@@ -1547,7 +1566,9 @@ pub(crate) async fn process_case_batch_execution(
                         persistence: None,
                     }
                 } else if allocation.should_process {
-                    evaluate_case_execution(
+                    tokio::select! {
+                    biased;
+                    outcome = evaluate_case_execution(
                         context,
                         http_policies,
                         run_id,
@@ -1559,8 +1580,9 @@ pub(crate) async fn process_case_batch_execution(
                         &evaluation_plan.evaluator_bindings,
                         &evaluation_plan.aggregation,
                         allocation,
-                    )
-                    .await
+                    ) => outcome,
+                    _ = control.revoked.cancelled() => CaseExecutionOutcome { processed: None, persistence: None },
+                    }
                 } else {
                     CaseExecutionOutcome {
                         processed: None,
@@ -1709,6 +1731,7 @@ mod tests {
 
     fn evaluator_catalog_entry() -> RunEvaluatorCatalogEntry {
         RunEvaluatorCatalogEntry {
+            http_policy: vigilo::evaluator_http::Snapshot::new(Uuid::nil(), vec![]).unwrap(),
             evaluator_id: Uuid::nil(),
             evaluator_version: "1.0.0".to_string(),
             content_hash: "artifact-hash".to_string(),

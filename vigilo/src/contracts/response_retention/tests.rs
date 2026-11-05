@@ -189,6 +189,7 @@ fn replay_dependency_check_never_treats_identity_as_availability() {
     changed_plan
         .evaluators
         .push(crate::contracts::evaluator_abi::ResolvedEvaluator {
+            http_rules: vec![],
             evaluator_ref: "vigilo/test:1.0.0".into(),
             evaluator_id: Uuid::nil(),
             content_hash: hash(b"evaluator"),

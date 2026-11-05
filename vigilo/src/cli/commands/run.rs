@@ -40,7 +40,10 @@ use super::{
     shard,
 };
 #[cfg(test)]
-use crate::contracts::case_storage::identity::normalized_case_payload;
+use crate::contracts::case_storage::identity::{
+    hash_serialized_json,
+    normalized_case_payload,
+};
 #[cfg(test)]
 use crate::models::{
     case_blob::CaseBlobDraft,
@@ -55,10 +58,8 @@ use crate::{
     contracts::{
         case_storage::identity::{
             canonical_json,
-            hash_serialized_json,
             uuid_from_json,
         },
-        evaluator_abi::EvaluatorExecutionPlan,
         run::{
             RunDataset,
             RunProfile,
@@ -67,8 +68,6 @@ use crate::{
     db::{
         tables::runs,
         workflows::{
-            run_cancel,
-            run_create,
             run_export as run_export_workflow,
             run_profile_validation,
             run_results::{
@@ -86,15 +85,14 @@ use crate::{
         execution::Execution,
         execution_aggregate::ExecutionAggregate,
         execution_attempt::ExecutionAttempt,
-        run::{
-            Run,
-            RunDraft,
-        },
+        run::Run,
     },
 };
 #[cfg(test)]
 mod identity_tests;
 
+#[cfg(test)]
+use crate::db::workflows::run_cancel;
 mod cancel;
 mod create;
 mod create_blob;
@@ -104,7 +102,6 @@ mod status;
 mod validate;
 mod watch;
 
-const DEFAULT_CHUNK_SIZE: usize = 100;
 const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 5;
 const MAX_WATCH_INTERVAL_SECONDS: u64 = 3_600;
 const MAX_WATCH_TIMEOUT_SECONDS: u64 = 604_800;
@@ -210,30 +207,8 @@ fn compute_dataset_version_id(
     }))
 }
 
-/// Computes the hash of all profile policy that can change scoring or gating.
-fn compute_aggregation_policy_hash(profile: &RunProfile) -> anyhow::Result<String> {
-    let groups = profile
-        .case_groups
-        .iter()
-        .map(|group| {
-            json!({
-                "id": group.id,
-                "applies_to": group.applies_to,
-                "evaluators": group.evaluators,
-                "aggregation": group.aggregation,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    hash_serialized_json(&json!({
-        "defaults": {
-            "fail_on_any_blocking_failure": profile.defaults.fail_on_any_blocking_failure,
-            "min_execution_score": profile.defaults.min_execution_score,
-        },
-        "case_groups": groups,
-        "scorecard": profile.scorecard,
-    }))
-}
+#[cfg(test)]
+use crate::operations::creation::compute_aggregation_policy_hash;
 
 /// Builds run chunk drafts from total case count and requested chunk size.
 ///

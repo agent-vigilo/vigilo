@@ -3,14 +3,16 @@ stateDiagram-v2
     Preparing --> Preparing: Register file group, verify bytes, checkpoint prefix
     Preparing --> Ready: Verified manifest published and lease released
     Ready --> Ready: Preparation-only run held
-    Ready --> Admitting: Execution requested and creation lease claimed
-    Admitting --> Ready: Deferred work or errors yield lease
+    Ready --> Accepted: Exact verified manifest accepted
+    Accepted --> Admitting: Creation lease claimed
+    Admitting --> Accepted: Deferred work or errors yield lease
     Admitting --> Admitting: Replay bounded placement commits and acknowledge pages
     Admitting --> Failed: Immutable seed conflict
     Failed --> [*]: No dispatch
     Admitting --> Pending: Exact local coverage, fenced activation and lease release
     Preparing --> Cancelled: Cancellation fences publication
     Ready --> Cancelled: Cancellation revokes execution intent
+    Accepted --> Cancelled: Cancellation prevents admission
     Admitting --> Cancelled: Close partial local admission
     Pending --> [*]: Coordinator dispatch owns execution
     Cancelled --> [*]: Delayed creators rejected

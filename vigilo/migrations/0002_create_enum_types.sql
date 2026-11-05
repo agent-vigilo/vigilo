@@ -105,3 +105,5 @@ CREATE TYPE outbox_status AS ENUM (
 
 COMMENT ON TYPE outbox_status IS
     'Represents the delivery state of an outbox event. Used to ensure reliable, idempotent publication of events to external systems.';
+
+CREATE TYPE execution_control AS ENUM ('enabled', 'paused', 'revoked');

@@ -1,5 +1,7 @@
 CREATE TABLE run_chunks (
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    execution_control execution_control NOT NULL DEFAULT 'enabled',
+    control_revision BIGINT NOT NULL DEFAULT 0 CHECK (control_revision >= 0),
     id UUID NOT NULL,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),

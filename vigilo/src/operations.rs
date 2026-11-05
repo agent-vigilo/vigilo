@@ -7,9 +7,31 @@
 //! and fixed-role pools; authentication and database policy installation belong to
 //! the embedding host.
 
+pub(crate) mod cancellation;
+pub(crate) mod control;
+pub(crate) mod creation;
+mod lifecycle;
+pub use cancellation::{
+    Cancellation,
+    CancellationDetails,
+    CancellationMetadata,
+};
+pub use control::{
+    ControlOutcome,
+    ExecutionControl,
+};
 pub(crate) mod status;
 use std::time::Duration;
 
+pub use lifecycle::{
+    CreationDetails,
+    CreationMetadata,
+    PlanReference,
+    PrepareRun,
+    PreparedRun,
+    RunClient,
+    RunSubmission,
+};
 pub use status::{
     CreationProgress,
     LiveProgress,
@@ -49,6 +71,15 @@ impl Config {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// Invalid bounded command input; the message contains no request payload.
+    #[error("invalid operation input: {0}")]
+    InvalidInput(&'static str),
+    /// A supplied prepared value belongs to a different operation client.
+    #[error("operation conflict: {0}")]
+    Conflict(&'static str),
+    /// The caller cancelled before committing this operation's acceptance.
+    #[error("operation cancelled")]
+    Cancelled,
     /// Invalid operator configuration; no service connection was attempted.
     #[error("invalid operation configuration: {0}")]
     InvalidConfiguration(&'static str),
@@ -57,7 +88,7 @@ pub enum Error {
     NotFound(Uuid),
     /// Database or routing failure. The source is for trusted diagnostics only;
     /// interfaces must not serialize its chain as a user response.
-    #[error("run status dependency failed")]
+    #[error("operation dependency failed")]
     Dependency(#[source] anyhow::Error),
 }
 
@@ -102,6 +133,51 @@ impl Client {
                 placement,
             ))),
         })
+    }
+
+    /// Binds run operations to operator-owned storage TOML, without reading a
+    /// configuration path or accepting storage settings in ordinary run requests.
+    pub fn runs(&self, storage_toml: &str) -> Result<RunClient, Error> {
+        if storage_toml.len() > 64 * 1024 {
+            return Err(Error::InvalidConfiguration("storage config exceeds 64 KiB"));
+        }
+        let owner: crate::blob_storage::config::OwnerConfig = toml::from_str(storage_toml)
+            .map_err(|_| Error::InvalidConfiguration("invalid storage configuration"))?;
+        owner
+            .validate(&Default::default())
+            .map_err(|_| Error::InvalidConfiguration("invalid storage binding"))?;
+        Ok(RunClient::from_context(
+            crate::context::Context::for_operations(self.database.clone()),
+            owner,
+            Default::default(),
+        ))
+    }
+
+    /// Durably changes execution permission. Delivery and worker quiescence are
+    /// asynchronous; a successful request is not a global stop acknowledgment.
+    pub async fn control_run(
+        &self,
+        run_id: Uuid,
+        control: ExecutionControl,
+    ) -> Result<ControlOutcome, Error> {
+        let db = self.database.control().await.map_err(Error::Dependency)?;
+        crate::db::workflows::run_control::request(db, run_id, control)
+            .await
+            .map_err(Error::Dependency)
+    }
+
+    /// Reads execution-control delivery progress separately from lifecycle status.
+    pub async fn run_control_status(&self, run_id: Uuid) -> Result<ControlOutcome, Error> {
+        let db = self.database.control().await.map_err(Error::Dependency)?;
+        crate::db::workflows::run_control::progress(db, run_id)
+            .await
+            .map_err(Error::Dependency)
+    }
+
+    /// Requests durable cancellation and attempts bounded routed settlement. Committed control changes survive
+    /// caller disconnect; retrying the same run is idempotent.
+    pub async fn cancel_run(&self, run_id: Uuid) -> Result<Cancellation, Error> {
+        cancellation::cancel(&self.database, run_id).await
     }
 
     /// Reads bounded run progress. A snapshot may combine observations from several

@@ -254,16 +254,19 @@ impl Config {
 
 pub(crate) struct Context {
     pub(crate) config: Config,
-    pub(crate) cell: OnceCell<DatabaseRouter>,
+    pub(crate) cell: OnceCell<Arc<DatabaseRouter>>,
 }
 
 impl Context {
     pub(crate) async fn get(&self) -> anyhow::Result<&DatabaseRouter> {
         self.cell
             .get_or_try_init(|| async {
-                Ok::<DatabaseRouter, anyhow::Error>(DatabaseRouter::new(self.config.clone()))
+                Ok::<Arc<DatabaseRouter>, anyhow::Error>(Arc::new(DatabaseRouter::new(
+                    self.config.clone(),
+                )))
             })
             .await
+            .map(Arc::as_ref)
     }
 }
 
@@ -1804,6 +1807,7 @@ mod tests {
             7,
             chunk_id,
             60,
+            None,
         )
         .await
         .unwrap_err();
@@ -1876,6 +1880,7 @@ mod tests {
             &database_router,
             &hinted_route,
             chunk_id,
+            None,
         )
         .await
         .unwrap();

@@ -13,7 +13,7 @@ flowchart TD
     SeedGuard{Every placement seeded?}
     Activate[Publish routes and cursors after exact coverage verification]
     Pending[Run pending]
-    DispatchGuard{Pending or running with open shard cursor?}
+    DispatchGuard{Enabled with open shard cursor?}
     DispatchLock[Claim one run-shard dispatch cursor]
     Running[Run running]
     DispatchEvents[Insert run.started once and one chunk-ready outbox record per selected chunk]
@@ -40,7 +40,7 @@ flowchart TD
     Create --> Creating
     Creating --> Prepare[Verify cases and publish immutable run plan]
     Prepare --> Prepared[Plan ready, run creating]
-    Prepared -->|Execution requested| Seed --> SeedGuard
+    Prepared -->|Exact manifest accepted and enabled| Seed --> SeedGuard
     Prepared -->|Prepare only| Prepared
     Prepare --> CancelGuard
     Prepared --> CancelGuard
@@ -67,7 +67,11 @@ flowchart TD
     Pending --> CancelGuard
     Running --> CancelGuard
     Finalizing --> CancelGuard
-    CancelGuard -- Open run, including creation --> CancelCascade --> Cancelled --> CancelEvent
+    CancelGuard -- Open run, including creation --> Revoke[Commit revoked revision and delivery work]
+    Revoke --> Deliver[Apply control to placements]
+    Deliver --> Quiet{All placements quiescent?}
+    Quiet -- No --> Deliver
+    Quiet -- Yes --> CancelCascade --> Cancelled --> CancelEvent
     CancelGuard -- Completed or failed --> Reject
     Cancelled -->|Repeated cancel| Noop
 

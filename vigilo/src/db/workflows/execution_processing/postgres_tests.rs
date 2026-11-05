@@ -407,7 +407,7 @@ async fn seed_running_attempt(
     let chunk = sqlx::query_as::<_, crate::models::run_chunk::RunChunk>(
         r#"
             SELECT
-                1::bigint AS write_epoch,
+                1::bigint AS write_epoch, execution_control,
                 id, run_id, run_shard, dataset_version_id, profile_group_id,
                 ordinal_start, ordinal_end, status, lease_token, leased_until,
                 created_at, updated_at

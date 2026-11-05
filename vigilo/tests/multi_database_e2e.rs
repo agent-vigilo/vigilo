@@ -497,6 +497,128 @@ async fn agent_failure_completes_run_with_failed_gate() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn durable_control_survives_submission_disconnect_and_resumes_routed_work()
+-> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "controlled",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    let client = vigilo::operations::Client::new(vigilo::operations::Config::new(
+        fixture.config.primary_url.clone(),
+    ))?;
+    let paused = client
+        .control_run(run, vigilo::operations::ExecutionControl::Paused)
+        .await?;
+    assert_eq!(paused.revision, 1);
+    assert_eq!(paused.applied_placement_count, 0);
+    drop(client);
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+    let paused:bool=sqlx::query_scalar("SELECT bool_and(execution_control='paused' AND control_revision=1 AND status='pending') FROM run_chunks WHERE run_id=$1").bind(run).fetch_one(&fixture.shard).await?;
+    assert!(paused);
+    assert_eq!(
+        outbox_event_count(&fixture.shard, run, "run.chunk.ready").await?,
+        0
+    );
+    let client = vigilo::operations::Client::new(vigilo::operations::Config::new(
+        fixture.config.primary_url.clone(),
+    ))?;
+    assert_eq!(
+        client
+            .control_run(run, vigilo::operations::ExecutionControl::Enabled)
+            .await?
+            .revision,
+        2
+    );
+    let result = drive_run_to_status(
+        &fixture,
+        "control resume",
+        SHARD_ALIAS,
+        "single-default",
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(result["data"]["gate_status"], "pass");
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancellation_delivery_failure_remains_pending_and_coordinator_retries()
+-> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "control_retry",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    sqlx::raw_sql("CREATE FUNCTION reject_control_delivery() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.control_revision>OLD.control_revision THEN RAISE EXCEPTION 'control delivery unavailable'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_control_delivery BEFORE UPDATE ON runs FOR EACH ROW EXECUTE FUNCTION reject_control_delivery();").execute(&fixture.shard).await?;
+    let result = run_vigilo_json(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["run", "cancel", &run.to_string()],
+    )?;
+    assert_eq!(result["meta"]["terminal"], false);
+    assert_eq!(
+        run_chunk_status_count(&fixture.shard, run, "cancelled").await?,
+        0
+    );
+    let outstanding: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM run_control_deliveries WHERE run_id=$1 AND applied_at IS NULL",
+    )
+    .bind(run)
+    .fetch_one(&fixture.primary)
+    .await?;
+    assert_eq!(outstanding, 1);
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_control_delivery ON runs; DROP FUNCTION reject_control_delivery();",
+    )
+    .execute(&fixture.shard)
+    .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+    assert_eq!(
+        run_chunk_status_count(&fixture.shard, run, "cancelled").await?,
+        1
+    );
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.cancelled").await?,
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn run_cancellation_updates_routed_storage() -> anyhow::Result<()> {
     let Some(fixture) = E2eFixture::setup().await? else {
         return Ok(());

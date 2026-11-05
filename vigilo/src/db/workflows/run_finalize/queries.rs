@@ -19,6 +19,7 @@ pub(crate) async fn select_next_finalization_candidate(
         SELECT r.id, r.run_key, r.aggregation_policy_hash
         FROM runs r
         WHERE r.status IN ('running'::run_status, 'finalizing'::run_status)
+          AND r.execution_control = 'enabled'
           AND (
               r.status <> 'finalizing'::run_status
               OR r.coordinator_leased_until IS NULL
@@ -85,6 +86,7 @@ pub(crate) async fn select_finalization_candidate_backlog(
             SELECT r.updated_at
             FROM runs r
             WHERE r.status IN ('running'::run_status, 'finalizing'::run_status)
+          AND r.execution_control = 'enabled'
               AND (
                   r.status <> 'finalizing'::run_status
                   OR r.coordinator_leased_until IS NULL
@@ -134,6 +136,7 @@ pub(crate) async fn claim_finalization_candidate(
             FROM runs r
             WHERE r.id = $1::uuid
               AND r.status IN ('running'::run_status, 'finalizing'::run_status)
+              AND r.execution_control = 'enabled'
               AND (
                   r.status <> 'finalizing'::run_status
                   OR r.coordinator_leased_until IS NULL
@@ -181,6 +184,7 @@ pub(super) async fn finalize_claimed_run(
             FROM runs
             WHERE id = $1::uuid
               AND status = 'finalizing'::run_status
+              AND execution_control = 'enabled'
               AND coordinator_id = $14::uuid
               AND coordinator_leased_until >= now()
               AND aggregation_policy_hash = $16::text

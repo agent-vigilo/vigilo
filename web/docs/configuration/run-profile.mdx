@@ -684,12 +684,19 @@ connection addresses. HTTP requires explicit network ranges. Private, loopback,
 link-local and special-use addresses require explicit grants. IPv4-mapped IPv6
 addresses are checked as IPv4. Network permission never bypasses exact URL matching.
 
+Run preparation freezes each evaluator's HTTP grants into the immutable execution
+plan. Current policy can restrict that authority, but cannot add destinations,
+methods or network ranges to an existing run. Using expanded grants requires a new run.
+Secret values are not stored in the plan; credential rotation remains independent.
+
 Workers share a bounded cache of 256 evaluator snapshots and load misses or expired
 entries in one bounded control-database read. No policy SQL runs inside evaluator
 HTTP calls. `--evaluator-http-policy-max-age-seconds` (environment variable
 `VIGILO_EVALUATOR_HTTP_POLICY_MAX_AGE_SECONDS`) defaults to 30, with a range of 1–3600.
 Expired entries cannot authorize new attempts when refresh fails. Each attempt uses
-its immutable snapshot; retries resolve again and may reuse a still-fresh revision.
+its immutable intersection of accepted grants and current policy; retries resolve
+again and may reuse a still-fresh current revision. Both policies must permit the
+destination and the actual connection address.
 The attempt terminal summary records `evaluator_http_policy_revisions` alongside
 existing diagnostics in the same database update.
 

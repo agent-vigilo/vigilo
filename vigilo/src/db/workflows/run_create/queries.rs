@@ -170,7 +170,7 @@ pub(crate) async fn bulk_insert_run_chunks(
 
     for chunk_batch in chunks.chunks(RUN_CHUNK_INSERT_CHUNK_SIZE) {
         let mut query_builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO run_chunks (id, run_id, run_shard, dataset_version_id, profile_group_id, ordinal_start, ordinal_end, status) ",
+            "INSERT INTO run_chunks (tenant_id,execution_control,control_revision,id,run_id,run_shard,dataset_version_id,profile_group_id,ordinal_start,ordinal_end,status) SELECT r.tenant_id,r.execution_control,r.control_revision,v.* FROM runs r CROSS JOIN (",
         );
 
         query_builder.push_values(chunk_batch, |mut b, chunk| {
@@ -184,7 +184,7 @@ pub(crate) async fn bulk_insert_run_chunks(
                 .push_bind("pending");
         });
 
-        query_builder.push(
+        query_builder.push(") AS v(id,run_id,run_shard,dataset_version_id,profile_group_id,ordinal_start,ordinal_end,status) WHERE r.id=").push_bind(run_id).push(
             r#"
             ON CONFLICT (run_id, run_shard, id) DO UPDATE
             SET updated_at = run_chunks.updated_at

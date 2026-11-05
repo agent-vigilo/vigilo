@@ -36,6 +36,7 @@ pub(crate) mod dataset_upload;
 pub(crate) mod execution_processing;
 pub(crate) mod local_shard_admission;
 pub(crate) mod run_cancel;
+pub(crate) mod run_control;
 pub(crate) mod run_create;
 pub(crate) mod run_creation;
 pub(crate) mod run_dispatch;

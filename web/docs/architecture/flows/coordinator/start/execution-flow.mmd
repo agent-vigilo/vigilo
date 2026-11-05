@@ -26,7 +26,14 @@ sequenceDiagram
             Vigilo-->>User: Success response
         else Tick elapsed
             Vigilo->>Vigilo: Run coordinator cycle
-            Vigilo->>ControlDB: Claim bounded ready plans with execution requested and available lease
+            Vigilo->>ControlDB: Claim bounded pending execution controls
+            Vigilo->>ExecutionDB: Apply revision or observe worker quiescence
+            Vigilo->>ControlDB: Acknowledge matching revision and claim; retry failures
+            Vigilo->>ExecutionDB: Settle quiescent revoked runs with bounded concurrency
+            Vigilo->>ControlDB: Record completed settlement
+            Note over Vigilo,ExecutionDB: Controls use direct database calls; unavailable placements remain pending
+
+            Vigilo->>ControlDB: Claim bounded ready plans with accepted identity and execution enabled and available lease
             Vigilo->>Objects: Verify roots, configuration, gate counts and bounded chunk pages
             Vigilo->>ExecutionDB: Replay compact admission and verify exact local coverage
             Vigilo->>ControlDB: Checkpoint progress or publish routes and activate

@@ -50,6 +50,7 @@ pub(crate) struct DispatchedRun {
 /// Immutable run context copied from the control database before execution dispatch.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DispatchRunSnapshot {
+    pub(crate) tenant_id: Uuid,
     pub(crate) run_id: Uuid,
     pub(crate) run_shard: i16,
     pub(crate) run_key: String,
@@ -75,6 +76,7 @@ pub(crate) struct DispatchRunSnapshot {
 /// Control-database route selected for one dispatch attempt.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DispatchRoute {
+    pub(crate) tenant_id: Uuid,
     pub(crate) run_id: Uuid,
     pub(crate) run_shard: i16,
     pub(crate) database_alias: String,

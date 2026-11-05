@@ -29,6 +29,12 @@ Evaluator HTTP uses the attempt's frozen permission snapshot and host-owned
 credential bindings. The host bounds request count, bytes and time; cancellation
 releases pending HTTP work. No per-request database query is required.
 
+Chunk claims verify accepted work identity and require enabled execution. The
+existing lease heartbeat also observes execution controls; paused messages remain
+available through delayed delivery without spending message retry budget.
+Revocation cancels supported in-flight work while lease-fenced persistence retains
+safely completed results. See [cancellation](/docs/architecture/flows/run/cancel/).
+
 ## Execution Flow
 
 <Mermaid value={executionFlowDiagram} />

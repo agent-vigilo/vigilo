@@ -61,7 +61,7 @@ pub(super) async fn cancel_open_attempts(
             UPDATE execution_attempts
             SET status = 'cancelled'::attempt_status,
                 leased_until = NULL,
-                error_message = COALESCE(error_message, $2),
+                error_message = COALESCE(error_message, (SELECT control_reason FROM runs WHERE id=$1), $2),
                 completed_at = COALESCE(completed_at, now()),
                 updated_at = now()
             WHERE run_id = $1::uuid
@@ -92,7 +92,7 @@ pub(super) async fn cancel_open_executions(
         WITH updated AS (
             UPDATE executions
             SET status = 'cancelled'::execution_status,
-                last_error_message = COALESCE(last_error_message, $2),
+                last_error_message = COALESCE(last_error_message, (SELECT control_reason FROM runs WHERE id=$1), $2),
                 completed_at = COALESCE(completed_at, now()),
                 updated_at = now()
             WHERE run_id = $1::uuid

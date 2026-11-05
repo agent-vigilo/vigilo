@@ -11,7 +11,9 @@ flowchart TD
 
     CoordinatorId[Load throughput knobs and generate coordinator id]
     Database{Database context available?}
-    RecoverCreation[Claim ready plans with execution requested]
+    Controls[Deliver bounded controls and observe quiescence]
+    SettleControls[Retry cleanup for quiescent revoked runs]
+    RecoverCreation[Claim accepted ready plans with execution enabled]
     ReadPlan[Verify immutable roots, configuration and gate counts]
     AdmitPlan[Replay compact admission and verify coverage]
     CreationDeferred[Release ownership and continue bounded candidates]
@@ -57,7 +59,7 @@ flowchart TD
     CoordinatorId --> Database
 
     Database -- No --> ContextFail
-    Database -- Yes --> RecoverCreation
+    Database -- Yes --> Controls --> SettleControls --> RecoverCreation
 
     RecoverCreation --> ReadPlan --> AdmitPlan --> RecoveryCatalog
     ReadPlan -. Unavailable or invalid object .-> CreationDeferred
@@ -127,6 +129,6 @@ flowchart TD
 
     class Start command
     class Success success
-    class CoordinatorId,Database,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeCandidate,ReadSummaries,FinalizeClaim,FinalizeRun,FinalizeIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
+    class CoordinatorId,Database,Controls,SettleControls,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeCandidate,ReadSummaries,FinalizeClaim,FinalizeRun,FinalizeIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
     class Publish component
     class ContextFail,RecoveryFail,DispatchFail,FinalizeFail,OutboxFail error

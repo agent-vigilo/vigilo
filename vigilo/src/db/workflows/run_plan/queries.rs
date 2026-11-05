@@ -24,7 +24,24 @@ pub(super) const INSERT_PLAN: &str = r#"
 
 pub(super) const REQUEST_EXECUTION: &str = r#"
     UPDATE run_plans SET execution_requested=true
-    WHERE run_id=$1 AND EXISTS(SELECT 1 FROM runs WHERE id=$1 AND status='creating')
+    WHERE run_id=$1 AND EXISTS(SELECT 1 FROM runs WHERE id=$1 AND status='creating' AND execution_control='enabled')
+"#;
+
+// The row lock and approval share one statement/transaction. Concurrent control
+// changes are rechecked after waiting; no transaction spans object-store I/O.
+pub(super) const ACCEPT_PLAN: &str = r#"
+    WITH owner AS MATERIALIZED (
+        SELECT id,tenant_id FROM runs
+        WHERE id=$1 AND status='creating' AND execution_control='enabled'
+          AND tenant_id=NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid
+        FOR UPDATE
+    )
+    UPDATE run_plans p
+    SET accepted_manifest=$2,execution_requested=true,updated_at=clock_timestamp()
+    FROM owner
+    WHERE p.run_id=owner.id AND p.tenant_id=owner.tenant_id
+      AND p.status='ready' AND p.manifest=$2
+      AND (p.accepted_manifest IS NULL OR p.accepted_manifest=$2)
 "#;
 
 pub(super) const LOCK_RUN: &str = r#"
@@ -38,7 +55,7 @@ pub(super) const CLAIM_RUN: &str = r#"
     UPDATE runs
     SET coordinator_id=$2,coordinator_leased_until=clock_timestamp()+interval '300 seconds',coordinator_heartbeat_at=clock_timestamp(),updated_at=clock_timestamp()
     WHERE id=$1
-    AND status='creating'
+    AND status='creating' AND execution_control='enabled'
     AND (coordinator_leased_until IS NULL OR coordinator_leased_until<=clock_timestamp())
     AND EXISTS(SELECT 1
     FROM run_plans
@@ -57,7 +74,7 @@ pub(super) const RENEW_RUN: &str = r#"
     UPDATE runs
     SET coordinator_leased_until=clock_timestamp()+interval '300 seconds',coordinator_heartbeat_at=clock_timestamp(),updated_at=clock_timestamp()
     WHERE id=$1
-    AND status='creating'
+    AND status='creating' AND execution_control='enabled'
     AND coordinator_id=$2
     AND coordinator_leased_until>clock_timestamp()
     AND EXISTS(SELECT 1

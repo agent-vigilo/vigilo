@@ -1,5 +1,12 @@
 CREATE TABLE runs (
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    execution_control execution_control NOT NULL DEFAULT 'enabled',
+    control_revision BIGINT NOT NULL DEFAULT 0 CHECK (control_revision >= 0),
+    control_settled_revision BIGINT NOT NULL DEFAULT 0 CHECK (control_settled_revision BETWEEN 0 AND control_revision),
+    control_settlement_token UUID,
+    control_settlement_until TIMESTAMPTZ,
+    CHECK ((control_settlement_token IS NULL) = (control_settlement_until IS NULL)),
+    control_reason TEXT CHECK (octet_length(control_reason) <= 256),
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     -- external/run-level identity
@@ -64,6 +71,8 @@ CREATE TABLE runs (
     UNIQUE (tenant_id, run_key),
     FOREIGN KEY (tenant_id, dataset_version_id) REFERENCES dataset_versions(tenant_id, dataset_version_id)
 );
+
+CREATE INDEX idx_runs_control_settlement ON runs(updated_at,id) WHERE execution_control='revoked' AND control_settled_revision<control_revision;
 
 CREATE INDEX idx_runs_status ON runs(status);
 

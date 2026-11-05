@@ -32,7 +32,7 @@ sequenceDiagram
             Vigilo->>Queue: Acknowledge message
             Vigilo-->>User: Success response
         else Valid payload
-            Vigilo->>ExecutionDB: Validate hinted write epoch and claim chunk lease
+            Vigilo->>ExecutionDB: Validate epoch, accepted identity and enabled control; claim lease
             ExecutionDB-->>Vigilo: Claimed chunk or no claim
 
             opt Route hint rejected
@@ -41,11 +41,14 @@ sequenceDiagram
                 Vigilo->>ExecutionDB: Validate refreshed admission and retry claim
             end
 
-            alt Chunk not claimable
+            alt Chunk paused
+                Vigilo->>Queue: Delay message without consuming retry budget
+                Vigilo-->>User: Success response
+            else Chunk not claimable
                 Vigilo->>Queue: Acknowledge duplicate or stale message
                 Vigilo-->>User: Success response
             else Chunk claimed
-                Vigilo->>ExecutionDB: Extend chunk lease and start heartbeat
+                Vigilo->>ExecutionDB: Extend chunk lease; observe controls through the same heartbeat
                 Vigilo->>ExecutionDB: Read compact snapshot and immutable plan reference
                 ExecutionDB-->>Vigilo: Compact plan, binding and gate metadata
                 Vigilo->>Vigilo: Look up exact binding and file references in bounded byte cache

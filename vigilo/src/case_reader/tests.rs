@@ -223,6 +223,7 @@ impl Fixture {
                 case_projection_hash: hash.finalize().to_hex().to_string(),
             });
             chunks.push(ClaimedChunk {
+                execution_control: crate::operations::ExecutionControl::Enabled,
                 write_epoch: 1,
                 id,
                 run_id: run,

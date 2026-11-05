@@ -13,9 +13,11 @@ CREATE TABLE run_plans (
     admission_cursor INTEGER NOT NULL DEFAULT 0 CHECK (admission_cursor >= 0 AND admission_cursor <= chunk_cursor),
     admission_state JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (octet_length(admission_state::text) <= 131072),
     manifest JSONB CHECK (octet_length(manifest::text) <= 8192),
+    accepted_manifest JSONB CHECK (octet_length(accepted_manifest::text) <= 8192),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((status = 'ready') = (manifest IS NOT NULL)),
+    CHECK (accepted_manifest IS NULL OR (status = 'ready' AND accepted_manifest = manifest AND execution_requested)),
     CONSTRAINT fk_run_plans_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE,
     FOREIGN KEY (tenant_id, dataset_upload_id) REFERENCES dataset_catalog(tenant_id, id)
 );
@@ -25,3 +27,6 @@ COMMENT ON TABLE run_plans IS
 
 COMMENT ON COLUMN run_plans.chunk_cursor IS
     'Number of contiguous chunk identities acknowledged in object storage; preparation replays deterministic plans after interruption.';
+
+COMMENT ON COLUMN run_plans.accepted_manifest IS
+    'Exact immutable manifest approved for execution. Execution intent alone does not authorize admission or recovery.';

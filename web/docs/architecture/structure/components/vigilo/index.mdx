@@ -17,7 +17,7 @@ import statusFlow from './status-flow.mmd';
 
 The library owns runtime implementation and database workflows. The CLI adapter
 owns argument parsing, process logging, signal handling and output formatting.
-`vigilo::operations::Client` exposes typed standalone run status without CLI parsing
+`vigilo::operations::Client` exposes typed standalone status, cancellation and execution control without CLI parsing
 or process setup. Its operator-supplied configuration creates shared lazy database
 pools; the caller owns the Tokio runtime. Database models and pools remain private.
 
@@ -38,8 +38,15 @@ callers. Status reports progress source and completeness explicitly; observation
 across databases are not one atomic snapshot. Missing runs and dependency failures
 have typed errors. Dropping a status future cancels the read, not the run.
 
-The CLI uses the same typed projection for status/watch output. Other commands and
-daemon adapters call private library workflows. Neither pools nor persistence
+`Client::runs` binds operator-owned storage configuration to a shared run client.
+`prepare_run` returns privately constructed verified work without authorizing
+execution. `accept_run` commits acceptance of that exact work; `create_run` combines
+the two for a trusted operator. `resume_creation` retries the same immutable inputs
+and run ID. It is distinct from resuming paused execution. Dropping a request does
+not undo committed preparation, acceptance or control changes.
+
+The CLI uses the same typed operations for creation, cancellation and status/watch
+output. Other commands and daemon adapters call private library workflows. Neither pools nor persistence
 records are part of the public operation API.
 
 <Mermaid value={vigiloDiagram} />

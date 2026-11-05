@@ -29,6 +29,13 @@ pub(crate) use queries::{
     release_chunk_as_pending,
 };
 
+/// Immutable identity supplied by the trusted dispatch path and checked against
+/// the execution-local snapshot in the same statement that claims a chunk.
+pub(crate) struct AcceptedWork<'a> {
+    pub tenant_id: Uuid,
+    pub plan_digest: &'a str,
+}
+
 /// Claims a chunk through a previously resolved execution route.
 pub(crate) async fn claim_routed_chunk_for_processing(
     database_router: &database::DatabaseRouter,
@@ -37,6 +44,7 @@ pub(crate) async fn claim_routed_chunk_for_processing(
     run_shard: i16,
     chunk_id: Uuid,
     lease_seconds: i32,
+    identity: Option<&AcceptedWork<'_>>,
 ) -> anyhow::Result<Option<RunChunk>> {
     let mut tx = database_router.begin_execution_admission(route).await?;
     let mut chunk = claim_chunk_for_processing_in_transaction(
@@ -45,6 +53,7 @@ pub(crate) async fn claim_routed_chunk_for_processing(
         run_shard,
         chunk_id,
         lease_seconds,
+        identity,
     )
     .await?;
     if let Some(chunk) = &mut chunk {
@@ -60,6 +69,7 @@ pub(crate) async fn claim_hinted_chunk_for_processing(
     route: &ExecutionWriteRoute,
     chunk_id: Uuid,
     lease_seconds: i32,
+    identity: Option<&AcceptedWork<'_>>,
 ) -> anyhow::Result<Option<RunChunk>> {
     let mut tx = database_router
         .begin_execution_write_admission(route)
@@ -70,6 +80,7 @@ pub(crate) async fn claim_hinted_chunk_for_processing(
         route.hint.run_shard,
         chunk_id,
         lease_seconds,
+        identity,
     )
     .await?;
     if let Some(chunk) = &mut chunk {
@@ -191,6 +202,7 @@ mod tests {
     fn chunk(lease_token: Option<Uuid>) -> RunChunk {
         let timestamp = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
         RunChunk {
+            execution_control: crate::operations::ExecutionControl::Enabled,
             write_epoch: 3,
             id: Uuid::from_u128(2),
             run_id: Uuid::from_u128(3),
@@ -205,5 +217,102 @@ mod tests {
             created_at: timestamp,
             updated_at: timestamp,
         }
+    }
+}
+
+#[cfg(test)]
+mod identity_postgres_tests {
+    use super::*;
+    use crate::db::workflows::run_shard_summary::test_support::{
+        fixture,
+        ranged_chunk,
+        record_queries,
+    };
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn accepted_identity_is_checked_inside_claim_and_heartbeat_retains_settlement_authority(
+        pool: PgPool,
+    ) {
+        let (run, dataset) = fixture(&pool, 10).await;
+        let chunk = ranged_chunk(&pool, run, dataset, 0, 10, "pending").await;
+        sqlx::query("UPDATE run_snapshots SET config_snapshot=config_snapshot || '{\"run_plan\":{\"digest\":\"accepted-root\"}}'::jsonb WHERE run_id=$1")
+            .bind(run).execute(&pool).await.unwrap();
+        for identity in [
+            AcceptedWork {
+                tenant_id: Uuid::now_v7(),
+                plan_digest: "accepted-root",
+            },
+            AcceptedWork {
+                tenant_id: Uuid::nil(),
+                plan_digest: "forged-root",
+            },
+        ] {
+            let mut tx = pool.begin().await.unwrap();
+            assert!(
+                queries::claim_chunk_for_processing_in_transaction(
+                    &mut tx,
+                    run,
+                    4,
+                    chunk,
+                    60,
+                    Some(&identity)
+                )
+                .await
+                .unwrap()
+                .is_none()
+            );
+            tx.commit().await.unwrap();
+        }
+        let mut tx = pool.begin().await.unwrap();
+        let (result, queries) = record_queries(queries::claim_chunk_for_processing_in_transaction(
+            &mut tx,
+            run,
+            4,
+            chunk,
+            60,
+            Some(&AcceptedWork {
+                tenant_id: Uuid::nil(),
+                plan_digest: "accepted-root",
+            }),
+        ))
+        .await;
+        let mut leased = result.unwrap().unwrap();
+        assert_eq!(queries.len(), 1, "{queries:#?}");
+        leased.write_epoch = 1;
+        tx.commit().await.unwrap();
+        sqlx::query(
+            "UPDATE run_chunks SET execution_control='paused',control_revision=1 WHERE run_id=$1",
+        )
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (result, queries) = record_queries(extend_chunk_lease(&pool, &leased, 60)).await;
+        let extended = result.unwrap().unwrap();
+        assert_eq!(queries.len(), 1, "{queries:#?}");
+        assert_eq!(
+            extended.execution_control,
+            crate::operations::ExecutionControl::Paused
+        );
+        assert_eq!(extended.lease_token, leased.lease_token);
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            queries::claim_chunk_for_processing_in_transaction(
+                &mut tx,
+                run,
+                4,
+                chunk,
+                60,
+                Some(&AcceptedWork {
+                    tenant_id: Uuid::nil(),
+                    plan_digest: "accepted-root"
+                })
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        tx.rollback().await.unwrap();
     }
 }

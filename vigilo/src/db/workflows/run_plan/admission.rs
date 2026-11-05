@@ -25,22 +25,26 @@ use super::{
 };
 use crate::db::workflows::run_shard_summary::plan::Manifest;
 
-/// Requests admission for a held plan outside foreground creation. Foreground
-/// creation records intent in `begin`; recovery resumes only requested plans.
-pub(crate) async fn request(db: &PgPool, id: Uuid) -> Result<()> {
+/// Durably accepts the exact published plan on behalf of a trusted caller.
+/// The caller verifies immutable inputs before this boundary. Recovery cannot
+/// call it to manufacture approval. Locking the run serializes cancellation;
+/// an identical retry is safe after an uncertain commit.
+pub(crate) async fn accept(
+    db: &PgPool,
+    id: Uuid,
+    manifest: &crate::contracts::case_storage::ObjectRef,
+) -> Result<()> {
     bounded(async {
-        let mut tx = db.begin().await?;
-        sqlx::query(queries::LOCK_RUN)
+        let n = sqlx::query(queries::ACCEPT_PLAN)
             .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let n = sqlx::query(queries::REQUEST_EXECUTION)
-            .bind(id)
-            .execute(&mut *tx)
+            .bind(sqlx::types::Json(manifest))
+            .execute(db)
             .await?
             .rows_affected();
-        ensure!(n == 1, "run is no longer creating");
-        tx.commit().await?;
+        ensure!(
+            n == 1,
+            "run acceptance requires the exact published plan of an accessible creating run"
+        );
         Ok(())
     })
     .await
@@ -53,9 +57,10 @@ pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
             .fetch_one(&mut *tx)
             .await?;
         let owner = Uuid::now_v7();
-        let n = sqlx::query(
-            &queries::CLAIM_RUN.replace("'preparing'", "'ready' AND execution_requested"),
-        )
+        let n = sqlx::query(&queries::CLAIM_RUN.replace(
+            "'preparing'",
+            "'ready' AND execution_requested AND accepted_manifest = manifest",
+        ))
         .bind(id)
         .bind(owner)
         .execute(&mut *tx)
@@ -83,13 +88,15 @@ async fn guard(tx: &mut Transaction<'_, Postgres>, lease: Lease) -> Result<()> {
         .bind(lease.run_id)
         .fetch_one(&mut **tx)
         .await?;
-    let n = sqlx::query(&queries::RENEW_RUN.replace("'preparing'", "'ready'"))
-        .bind(lease.run_id)
-        .bind(lease.owner)
-        .bind(lease.generation)
-        .execute(&mut **tx)
-        .await?
-        .rows_affected();
+    let n = sqlx::query(
+        &queries::RENEW_RUN.replace("'preparing'", "'ready' AND accepted_manifest = manifest"),
+    )
+    .bind(lease.run_id)
+    .bind(lease.owner)
+    .bind(lease.generation)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
     ensure!(n == 1, "execution admission lost its live creation lease");
     Ok(())
 }

@@ -1127,6 +1127,7 @@ async fn change_empty_shard_placement(
             expected.run_shard
         )
     })?;
+    super::run_control::synchronize_destination(control_db, &target_db, expected.run_id).await?;
     transition_local_admission_with_fence(
         &target_db,
         LocalShardAdmissionDraft {
@@ -1633,6 +1634,7 @@ pub(crate) async fn move_shard_placement(
             )
             .await?;
         }
+        super::run_control::synchronize_destination(control_db, &target_db, run_id).await?;
         transition_local_admission_with_fence(
             &target_db,
             LocalShardAdmissionDraft {
@@ -1987,6 +1989,7 @@ pub(crate) async fn move_shard_placement(
             next_write_epoch
         );
     }
+    super::run_control::synchronize_destination(control_db, &target_db, run_id).await?;
     transition_local_admission_with_fence(
         &target_db,
         LocalShardAdmissionDraft {
@@ -2259,6 +2262,7 @@ pub(crate) async fn abort_shard_move(
     }
     source_tx.commit().await?;
     if !same_database {
+        super::run_control::synchronize_destination(control_db, &target_db, run_id).await?;
         transition_local_admission_with_fence(
             &target_db,
             LocalShardAdmissionDraft {
@@ -2723,7 +2727,7 @@ async fn activate_moved_shard_placement_on_target_with(
     target_database_alias: &str,
 ) -> anyhow::Result<Option<ShardPlacement>> {
     validate_new_ownership_target(tx, target_database_alias).await?;
-    shard_placements::activate_moved_shard_placement(
+    let placement = shard_placements::activate_moved_shard_placement(
         &mut **tx,
         run_id,
         run_shard,
@@ -2731,7 +2735,9 @@ async fn activate_moved_shard_placement_on_target_with(
         expected_route_version,
         target_database_alias,
     )
-    .await
+    .await?;
+    super::run_control::include_current_destinations(tx, run_id).await?;
+    Ok(placement)
 }
 
 async fn validate_source_placement(db: &PgPool, alias: &str) -> anyhow::Result<()> {

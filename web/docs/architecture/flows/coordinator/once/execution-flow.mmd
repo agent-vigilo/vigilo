@@ -19,7 +19,14 @@ sequenceDiagram
     Vigilo->>Vigilo: Load throughput knobs and generate coordinator id
     Vigilo->>Vigilo: Load database context
 
-    loop Bounded ready-plan recovery candidates with execution requested
+    Vigilo->>ControlDB: Claim bounded pending execution controls
+    Vigilo->>ExecutionDB: Apply revision or observe worker quiescence
+    Vigilo->>ControlDB: Acknowledge matching revision and claim; retry failures
+    Vigilo->>ExecutionDB: Settle quiescent revoked runs with bounded concurrency
+    Vigilo->>ControlDB: Record completed settlement
+    Note over Vigilo,ExecutionDB: Controls use direct database calls; unavailable placements remain pending
+
+    loop Bounded ready-plan recovery candidates with accepted identity and execution enabled
         Vigilo->>ControlDB: Claim available creation lease and generation
         ControlDB-->>Vigilo: Compact plan references and admission progress, or no work
         Vigilo->>Objects: Verify roots, configuration, gate counts and bounded chunk pages

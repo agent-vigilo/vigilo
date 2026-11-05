@@ -19,6 +19,10 @@ fn main() {
     // Construction and future creation must work without Tokio, environment, or I/O.
     let client = Client::new(Config::new("postgresql://localhost:1/vigilo".into())).unwrap();
     drop(status(&client));
+    let run_id = "0198f36d-f7db-7d90-998c-d60d498dd979".parse().unwrap();
+    drop(client.cancel_run(run_id));
+    drop(client.control_run(run_id, vigilo::operations::ExecutionControl::Paused));
+    let _runs = client.runs("provider='s3'\nalias='cases'\nbucket='cases'\nprefix='consumer'\nregion='us-east-1'\n").unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         let restricted = UserClient::new(UserConfig {

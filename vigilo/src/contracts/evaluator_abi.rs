@@ -30,6 +30,8 @@ impl EvaluatorAbiIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResolvedEvaluator {
+    /// Immutable outbound permission ceiling; no rules means no HTTP authority.
+    pub(crate) http_rules: Vec<crate::evaluator_http::Rule>,
     pub(crate) evaluator_ref: String,
     pub(crate) evaluator_id: Uuid,
     pub(crate) content_hash: String,
@@ -86,6 +88,7 @@ mod tests {
     #[test]
     fn execution_plan_hash_is_order_independent_and_artifact_specific() {
         let evaluator = |evaluator_ref: &str, content_hash: &str| ResolvedEvaluator {
+            http_rules: vec![],
             evaluator_ref: evaluator_ref.to_string(),
             evaluator_id: Uuid::nil(),
             content_hash: content_hash.to_string(),
@@ -116,5 +119,16 @@ mod tests {
         let mut changed_adapter = first.clone();
         changed_adapter.evaluators[0].abi.adapter = "different-adapter".to_string();
         assert_ne!(first.hash().unwrap(), changed_adapter.hash().unwrap());
+
+        let mut changed_grants = first.clone();
+        changed_grants.evaluators[0]
+            .http_rules
+            .push(crate::evaluator_http::Rule {
+                uri: "https://judge.example/score".into(),
+                method: "POST".into(),
+                action: crate::evaluator_http::Action::Allow,
+                networks: vec![],
+            });
+        assert_ne!(first.hash().unwrap(), changed_grants.hash().unwrap());
     }
 }

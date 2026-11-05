@@ -36,7 +36,7 @@ sequenceDiagram
         else Delivery received
             Queue-->>Vigilo: Chunk-ready message with alias and write epoch
             Vigilo->>Vigilo: Deserialize message payload
-            Vigilo->>ExecutionDB: Validate local admission and claim chunk lease
+            Vigilo->>ExecutionDB: Validate local admission, accepted identity and enabled control; claim lease
             ExecutionDB-->>Vigilo: Claimed chunk or no claim
 
             opt Route hint rejected
@@ -46,7 +46,7 @@ sequenceDiagram
             end
 
             alt Chunk claimed
-                Vigilo->>ExecutionDB: Extend chunk lease and start heartbeat
+                Vigilo->>ExecutionDB: Extend chunk lease; observe controls through the same heartbeat
                 Vigilo->>ExecutionDB: Read compact snapshot and immutable plan reference
                 ExecutionDB-->>Vigilo: Compact plan, binding and gate metadata
                 Vigilo->>Vigilo: Look up exact binding and file references in bounded byte cache
@@ -104,6 +104,8 @@ sequenceDiagram
                     Vigilo->>ExecutionDB: Complete chunk and commit immutable settlement receipt
                     Vigilo->>Queue: Acknowledge message
                 end
+            else Chunk paused
+                Vigilo->>Queue: Delay message without consuming retry budget
             else Invalid payload or unclaimable chunk
                 Vigilo->>Queue: Acknowledge duplicate or invalid message
             else Recoverable processing failure

@@ -20,8 +20,9 @@ execution databases before acknowledging progress in control storage.
 
 If a process stops after a local commit but before its acknowledgement, a
 coordinator claims the available creation lease and replays identical metadata.
-Recovery selects only ready plans with execution requested. Unpublished plans
-and preparation-only runs remain with their caller; resume with the same run ID.
+Recovery selects only ready plans whose exact manifest has been accepted for
+execution. Execution intent alone is insufficient. Unpublished, unaccepted and
+preparation-only runs remain with their caller; resume with the same run ID.
 One fenced control transaction publishes routes and dispatch cursors and moves
 the run to `pending` after independent local coverage verification. Immutable
 plan objects remain available to workers; activation does not delete them.

@@ -132,6 +132,7 @@ fn retained_provider_shapes_reproduce_mapped_inputs_and_wasm_scores() {
     let plan = EvaluatorExecutionPlan::new(
         hash(b"frozen scoring policy"),
         vec![ResolvedEvaluator {
+            http_rules: vec![],
             evaluator_ref: "vigilo/sentiment-basic-en:0.1.0".into(),
             evaluator_id: Uuid::nil(),
             content_hash: evaluator_digest.clone(),

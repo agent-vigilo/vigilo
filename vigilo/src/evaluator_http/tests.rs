@@ -60,6 +60,99 @@ fn exact_authority_and_deny_precedence() {
             .is_err()
     );
 }
+
+#[test]
+fn accepted_policy_bounds_destinations_methods_and_actual_addresses() {
+    let id = Uuid::nil();
+    let mut original = rule();
+    original.networks = vec!["10.0.0.0/24".into()];
+    let accepted = Snapshot::new(id, vec![original.clone()]).unwrap();
+    let mut expanded = original.clone();
+    expanded.networks = vec!["10.0.0.0/8".into()];
+    let mut added = rule();
+    added.uri = "https://other.example/v1/responses".into();
+    let mut get = expanded.clone();
+    get.method = "GET".into();
+    let current = Snapshot::new(id, vec![expanded, added.clone(), get]).unwrap();
+    let effective = current.restrict_to(&accepted).unwrap();
+    let grant = effective.authorize(id, "POST", &original.uri).unwrap();
+    assert!(grant.permits_address("10.0.0.1".parse().unwrap()));
+    assert!(grant.permits_address("::ffff:10.0.0.1".parse().unwrap()));
+    assert!(!grant.permits_address("10.1.0.1".parse().unwrap()));
+    assert!(effective.authorize(id, "POST", &added.uri).is_err());
+    assert!(effective.authorize(id, "GET", &original.uri).is_err());
+
+    let mut narrowed = original.clone();
+    narrowed.networks = vec!["10.0.0.1/32".into()];
+    let narrowed = Snapshot::new(id, vec![narrowed])
+        .unwrap()
+        .restrict_to(&accepted)
+        .unwrap();
+    let grant = narrowed.authorize(id, "POST", &original.uri).unwrap();
+    assert!(grant.permits_address("10.0.0.1".parse().unwrap()));
+    assert!(!grant.permits_address("10.0.0.2".parse().unwrap()));
+    assert_ne!(effective.revision(), narrowed.revision());
+    assert_eq!(
+        effective.revision(),
+        current.restrict_to(&accepted).unwrap().revision()
+    );
+    // In-flight snapshots remain unchanged when subsequent policy narrows.
+    assert!(
+        effective
+            .authorize(id, "POST", &original.uri)
+            .unwrap()
+            .permits_address("10.0.0.2".parse().unwrap())
+    );
+}
+
+#[test]
+fn policy_intersection_denies_missing_grants_denies_and_identity_mismatch() {
+    let id = Uuid::nil();
+    let allow = Snapshot::new(id, vec![rule()]).unwrap();
+    let absent = Snapshot::new(id, vec![]).unwrap();
+    let mut deny = rule();
+    deny.action = Action::Deny;
+    let denied = Snapshot::new(id, vec![rule(), deny]).unwrap();
+    for other in [&absent, &denied] {
+        assert!(
+            allow
+                .restrict_to(other)
+                .unwrap()
+                .authorize(id, "POST", &rule().uri)
+                .is_err()
+        );
+        assert!(
+            other
+                .restrict_to(&allow)
+                .unwrap()
+                .authorize(id, "POST", &rule().uri)
+                .is_err()
+        );
+    }
+    assert!(
+        allow
+            .restrict_to(&Snapshot::new(Uuid::from_u128(1), vec![rule()]).unwrap())
+            .is_err()
+    );
+    assert!(
+        allow
+            .restrict_to(&allow)
+            .unwrap()
+            .restrict_to(&allow)
+            .is_err()
+    );
+    // Explicit private grants in the current policy cannot enlarge a public-only ceiling.
+    let mut private = rule();
+    private.networks = vec!["0.0.0.0/0".into()];
+    let current = Snapshot::new(id, vec![private]).unwrap();
+    let grant = current
+        .restrict_to(&allow)
+        .unwrap()
+        .authorize(id, "POST", &rule().uri)
+        .unwrap();
+    assert!(grant.permits_address("8.8.8.8".parse().unwrap()));
+    assert!(!grant.permits_address("127.0.0.1".parse().unwrap()));
+}
 #[test]
 fn reject_ambiguous_urls_and_malformed_rules() {
     for uri in [

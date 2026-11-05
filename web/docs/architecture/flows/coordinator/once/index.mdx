@@ -18,7 +18,8 @@ import decisionFlowDiagram from './decision-flow.mmd';
 # Once
 
 How `vigilo coordinator once` executes one configurable bounded orchestration
-cycle and exits. It first resumes ready `creating` runs with execution requested and an available lease, then performs chunk
+cycle and exits. It first delivers pending execution controls and retries quiescent cancellation cleanup.
+It then resumes accepted `creating` runs with execution enabled and an available lease, followed by chunk
 lease recovery, dispatch, receipt aggregation, finalization, and outbox publication. Dispatch work is
 claimed through a `run_id + run_shard` cursor, and each operation selects a
 partition-local chunk window before inserting one outbox event record per chunk.

@@ -30,6 +30,7 @@ sequenceDiagram
         Creator->>Control: Read current status, error and progress in one snapshot
         Creator-->>Caller: Creating, plan ready, execution held
     else Execution requested
+        Creator->>Control: Accept exact verified manifest under run lock
         Creator->>Control: Claim creation authority for admission
         Creator->>Objects: Recovery reads roots and gate counts under its lease
         Note over Creator,Objects: Foreground creation reuses already verified roots
@@ -53,5 +54,5 @@ sequenceDiagram
         Creator-->>Caller: Current status and progress
     end
     Note over Creator,Control: Admission renews by elapsed time<br/>Checkpoints and activation check live authority
-    Note over Creator,Control: Coordinators resume requested admission after lease release or expiry
+    Note over Creator,Control: Coordinators resume only accepted manifests after lease release or expiry
     Note over Creator,Control: Deferred work and errors attempt fenced release<br/>Confirmed commits need no extra release; process death uses expiry

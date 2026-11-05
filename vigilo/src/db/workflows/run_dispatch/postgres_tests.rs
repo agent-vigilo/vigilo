@@ -502,6 +502,7 @@ async fn count_dispatch_cursor_backlog_matches_dispatchable_routes(pool: PgPool)
 async fn dispatch_routed_run_window_dispatches_exact_route(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1), (1, 1)]).await;
     let route = DispatchRoute {
+        tenant_id: Uuid::nil(),
         run_id,
         run_shard: 1,
         database_alias: "primary".to_string(),

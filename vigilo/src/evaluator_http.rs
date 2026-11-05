@@ -3,7 +3,8 @@
 //! Operators supply exact destination grants. Immutable snapshots deny by default,
 //! with deny overriding allow. Authorization returns a destination capability whose
 //! address check must be applied to the actual connection; it does not send traffic.
-//! The worker cache batches loading and freezes snapshots for execution attempts.
+//! The worker cache batches loading. Attempts intersect current permission with
+//! the immutable run ceiling, so refreshed policy cannot enlarge accepted work.
 //! The transport consumes authorized destinations under invocation budgets; host
 //! adapters own credentials, cancellation and runtime scheduling.
 
@@ -24,7 +25,7 @@ use uuid::Uuid;
 pub mod cache;
 
 /// One operator-authored rule. Empty networks allow only public HTTPS addresses.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     pub uri: String,
@@ -110,7 +111,9 @@ struct CompiledRule {
 pub struct Snapshot {
     evaluator_id: Uuid,
     revision: String,
-    rules: Vec<CompiledRule>,
+    // Share immutable rule sets across attempts instead of copying accepted
+    // grants on each chunk. Intersection always contains exactly two sets.
+    constraints: Vec<std::sync::Arc<[CompiledRule]>>,
 }
 
 impl Snapshot {
@@ -170,7 +173,7 @@ impl Snapshot {
         Ok(Self {
             evaluator_id,
             revision,
-            rules: compiled,
+            constraints: vec![compiled.into()],
         })
     }
     /// Verified evaluator identity to which this snapshot is bound.
@@ -181,6 +184,32 @@ impl Snapshot {
     /// Content-derived revision, including evaluator identity and canonical rules.
     pub fn revision(&self) -> &str {
         &self.revision
+    }
+
+    /// Intersects current permission with the immutable permission accepted for
+    /// the run. Both destination and actual connection address must pass both
+    /// policies. Inputs must be ordinary snapshots, keeping composition bounded.
+    pub fn restrict_to(&self, accepted: &Self) -> Result<Self> {
+        ensure!(
+            self.evaluator_id == accepted.evaluator_id,
+            "evaluator policy identity mismatch"
+        );
+        ensure!(
+            self.constraints.len() == 1 && accepted.constraints.len() == 1,
+            "HTTP policy intersection requires two ordinary snapshots"
+        );
+        let revision = blake3::hash(&serde_json::to_vec(&(
+            "run-http-policy",
+            &accepted.revision,
+            &self.revision,
+        ))?)
+        .to_hex()
+        .to_string();
+        Ok(Self {
+            evaluator_id: self.evaluator_id,
+            revision,
+            constraints: vec![self.constraints[0].clone(), accepted.constraints[0].clone()],
+        })
     }
 
     /// Match the evaluator, method and exact destination before resolving DNS.
@@ -197,22 +226,25 @@ impl Snapshot {
             "evaluator policy identity mismatch"
         );
         let (url, dest) = destination(uri)?;
-        let matches = self
-            .rules
-            .iter()
-            .filter(|r| r.destination == dest && r.method == method)
-            .collect::<Vec<_>>();
-        ensure!(
-            !matches.iter().any(|r| r.action == Action::Deny),
-            "evaluator HTTP explicitly denied"
-        );
-        let allows = matches
-            .into_iter()
-            .filter(|r| r.action == Action::Allow)
-            .map(|r| r.networks.clone())
-            .collect::<Vec<_>>();
-        ensure!(!allows.is_empty(), "evaluator HTTP destination not granted");
-        Ok(AuthorizedDestination { url, allows })
+        let mut constraints = Vec::with_capacity(self.constraints.len());
+        for rules in &self.constraints {
+            let matches = rules
+                .iter()
+                .filter(|r| r.destination == dest && r.method == method)
+                .collect::<Vec<_>>();
+            ensure!(
+                !matches.iter().any(|r| r.action == Action::Deny),
+                "evaluator HTTP explicitly denied"
+            );
+            let allows = matches
+                .into_iter()
+                .filter(|r| r.action == Action::Allow)
+                .map(|r| r.networks.clone())
+                .collect::<Vec<_>>();
+            ensure!(!allows.is_empty(), "evaluator HTTP destination not granted");
+            constraints.push(allows);
+        }
+        Ok(AuthorizedDestination { url, constraints })
     }
 }
 
@@ -223,7 +255,8 @@ impl Snapshot {
 #[derive(Debug)]
 pub struct AuthorizedDestination {
     url: Url,
-    allows: Vec<Vec<IpNet>>,
+    // Every policy must allow the address; each policy may have several grants.
+    constraints: Vec<Vec<Vec<IpNet>>>,
 }
 impl AuthorizedDestination {
     /// Parsed request URL; authorization does not change query parameters.
@@ -249,12 +282,14 @@ impl AuthorizedDestination {
                 return false;
             }
         }
-        self.allows.iter().any(|ranges| {
-            if ranges.is_empty() {
-                public_address(address)
-            } else {
-                ranges.iter().any(|net| net.contains(&address))
-            }
+        self.constraints.iter().all(|allows| {
+            allows.iter().any(|ranges| {
+                if ranges.is_empty() {
+                    public_address(address)
+                } else {
+                    ranges.iter().any(|net| net.contains(&address))
+                }
+            })
         })
     }
 }

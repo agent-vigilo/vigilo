@@ -99,6 +99,7 @@ mod tests {
         let execution_plan = EvaluatorExecutionPlan::new(
             "aggregation-hash".to_string(),
             vec![ResolvedEvaluator {
+                http_rules: vec![],
                 evaluator_ref: "vigilo/sentiment-basic-en:0.1.0".to_string(),
                 evaluator_id: Uuid::now_v7(),
                 content_hash: "content-hash".to_string(),

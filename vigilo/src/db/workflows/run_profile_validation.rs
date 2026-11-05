@@ -138,12 +138,19 @@ pub(crate) async fn resolve_evaluators(
     db: &PgPool,
     profile: &RunProfile,
 ) -> anyhow::Result<Vec<ResolvedEvaluator>> {
-    let (_, resolved, issues) = resolve_profile(db, profile).await?;
+    let (_, mut resolved, issues) = resolve_profile(db, profile).await?;
     anyhow::ensure!(
         issues.is_empty(),
         "profile executability validation failed:\n- {}",
         issues.join("\n- ")
     );
+    let ids = resolved.iter().map(|e| e.evaluator_id).collect::<Vec<_>>();
+    let mut policies = crate::db::tables::evaluator_http_policies::load(db, &ids).await?;
+    for evaluator in &mut resolved {
+        let rules = policies.remove(&evaluator.evaluator_id).unwrap_or_default();
+        crate::evaluator_http::Snapshot::new(evaluator.evaluator_id, rules.clone())?;
+        evaluator.http_rules = rules;
+    }
     Ok(resolved)
 }
 
@@ -256,6 +263,7 @@ async fn resolve_profile(
 
         runnable_by_ref.insert(evaluator_ref.clone(), true);
         resolved_evaluators.push(ResolvedEvaluator {
+            http_rules: vec![],
             evaluator_ref,
             evaluator_id: evaluator_record.id,
             content_hash: evaluator_record.content_hash.clone(),
@@ -772,6 +780,64 @@ mod tests {
             pass_threshold: 0.5,
             config: serde_json::json!({}),
         }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn resolved_run_grants_are_frozen_and_worker_catalog_enforces_them(db: sqlx::PgPool) {
+        let abi = crate::evaluator_abi::current_identity();
+        let id: Uuid = sqlx::query_scalar("INSERT INTO evaluators(namespace,name,version,content_hash,wasm_bytes,wasm_size_bytes,interface_name,interface_version,wit_world,abi_contract_hash,abi_adapter,runtime,runtime_version,runtime_fingerprint,state) VALUES('test','judge','1.0.0','hash','',0,$1,$2,$3,$4,$5,'wasmtime','test','test','active') RETURNING id")
+            .bind(format!("{}/{}", abi.package, abi.interface)).bind(&abi.version).bind(&abi.world)
+            .bind(&abi.contract_hash).bind(&abi.adapter).fetch_one(&db).await.unwrap();
+        let mut profile = profile();
+        profile.case_groups[0]
+            .evaluators
+            .push(evaluator_binding("judge", "test/judge:1.0.0"));
+        let empty = super::resolve_evaluators(&db, &profile).await.unwrap();
+        assert!(empty[0].http_rules.is_empty());
+        sqlx::query("INSERT INTO evaluator_http_policies(evaluator_id,uri,method,action) VALUES($1,'https://judge.example/score','POST','allow')")
+            .bind(id).execute(&db).await.unwrap();
+        let accepted = super::resolve_evaluators(&db, &profile).await.unwrap();
+        assert_eq!(accepted[0].http_rules.len(), 1);
+        let catalog = crate::db::workflows::execution_processing::build_pinned_evaluator_catalog(
+            accepted.clone(),
+        )
+        .unwrap();
+        sqlx::query("INSERT INTO evaluator_http_policies(evaluator_id,uri,method,action) VALUES($1,'https://other.example/score','POST','allow')")
+            .bind(id).execute(&db).await.unwrap();
+        let changed = super::resolve_evaluators(&db, &profile).await.unwrap();
+        let current =
+            crate::evaluator_http::Snapshot::new(id, changed[0].http_rules.clone()).unwrap();
+        let effective = current
+            .restrict_to(&catalog["test/judge:1.0.0"].http_policy)
+            .unwrap();
+        assert!(
+            effective
+                .authorize(id, "POST", "https://judge.example/score")
+                .is_ok()
+        );
+        assert!(
+            effective
+                .authorize(id, "POST", "https://other.example/score")
+                .is_err()
+        );
+        assert_eq!(accepted[0].http_rules.len(), 1);
+        let empty_catalog =
+            crate::db::workflows::execution_processing::build_pinned_evaluator_catalog(empty)
+                .unwrap();
+        assert!(
+            current
+                .restrict_to(&empty_catalog["test/judge:1.0.0"].http_policy)
+                .unwrap()
+                .authorize(id, "POST", "https://judge.example/score")
+                .is_err()
+        );
+        sqlx::query("UPDATE evaluator_http_policies SET uri='not-a-uri' WHERE evaluator_id=$1 AND uri='https://judge.example/score'")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(super::resolve_evaluators(&db, &profile).await.is_err());
     }
 
     #[test]

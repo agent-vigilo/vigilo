@@ -7,63 +7,16 @@ config:
     edgeLabelBackground: 'transparent'
 ---
 flowchart TD
-    Start([vigilo run cancel])
-
-    RunId{Run id valid?}
-    RequestCancel[Mark control cancellation requested]
-    Found{Run exists?}
-    Status{Run status?}
-    Drain[Mark control dispatch cursors drained]
-    Routes[Resolve execution routes]
-    CancelWork[Cancel local work and commit chunk receipts by placement]
-    Summary[Refresh routed cancellation summary]
-    Event[Enqueue control cancellation event]
-    Payload[Build cancellation payload]
-
-    Success([Success response])
-
-    RunIdFail([Run id error])
-    NotFoundFail([Run not found error])
-    TerminalFail([Cancellation error])
-    UnsupportedFail([Unsupported status error])
-    PersistenceFail([Persistence error])
-    OutputFail([Output write error])
-
-    Start --> RunId
-
-    RunId -- No --> RunIdFail
-    RunId -- Yes --> RequestCancel
-
-    RequestCancel --> Found
-    RequestCancel -. Lookup fails .-> PersistenceFail
-
-    Found -- No --> NotFoundFail
-    Found -- Yes --> Status
-
-    Status -- Completed or failed --> TerminalFail
-    Status -- Already cancelled --> Drain
-    Status -- Pending, running, finalizing or blob preparation --> Drain
-    Status -- Other --> UnsupportedFail
-
-    Drain --> Routes
-    Drain -. Update fails .-> PersistenceFail
-
-    Routes --> CancelWork
-    Routes -. Lookup fails .-> PersistenceFail
-
-    CancelWork --> Summary
-    CancelWork -. Update fails .-> PersistenceFail
-
-    Summary --> Event
-    Summary -. Update fails .-> PersistenceFail
-
-    Event --> Payload
-    Event -. Enqueue fails .-> PersistenceFail
-
-    Payload --> Success
-    Payload -. Write fails .-> OutputFail
-
-    class Start command
-    class Success success
-    class RunId,RequestCancel,Found,Status,Drain,Routes,CancelWork,Summary,Event,Payload system
-    class RunIdFail,NotFoundFail,TerminalFail,UnsupportedFail,PersistenceFail,OutputFail error
+    Start([Cancel run]) --> Valid{Accessible active run?}
+    Valid -- No --> Error([Not found or terminal-state error])
+    Valid -- Yes --> Commit[Atomically record revocation and destinations]
+    Commit --> Deliver[Bounded direct DB delivery]
+    Deliver --> Applied{Every destination applied?}
+    Applied -- No --> Pending[Return pending; coordinator retries outstanding work]
+    Pending --> Deliver
+    Applied -- Yes --> Quiet{Every destination quiescent?}
+    Quiet -- No --> Finish[Workers stop new work and preserve safe results]
+    Finish --> Pending
+    Quiet -- Yes --> Settle[Cancel unfinished work and commit receipts]
+    Settle --> Event[Persist cancellation summary and event]
+    Event --> Done([Terminal cancellation])

@@ -17,7 +17,10 @@ pub(super) async fn claim_chunk_for_processing_in_transaction(
     run_shard: i16,
     chunk_id: Uuid,
     lease_seconds: i32,
+    identity: Option<&AcceptedWork<'_>>,
 ) -> anyhow::Result<Option<RunChunk>> {
+    #[cfg(not(test))]
+    anyhow::ensure!(identity.is_some(), "accepted work identity is required");
     let updated = sqlx::query_as::<_, RunChunk>(
         r#"
 		UPDATE run_chunks
@@ -28,6 +31,8 @@ pub(super) async fn claim_chunk_for_processing_in_transaction(
 		WHERE run_id = $1::uuid
           AND run_shard = $2
 		  AND id = $3::uuid
+          AND execution_control = 'enabled'
+          AND ($5::uuid IS NULL OR tenant_id=$5)
 		  AND (
 			status = 'pending'
 			OR (status = 'leased' AND leased_until < now())
@@ -37,8 +42,10 @@ pub(super) async fn claim_chunk_for_processing_in_transaction(
 			FROM run_snapshots rs
 			WHERE rs.run_id = run_chunks.run_id
 			  AND rs.run_shard = run_chunks.run_shard
+              AND ($6::text IS NULL OR rs.config_snapshot #>> '{run_plan,digest}' = $6)
 		  )
 		RETURNING
+            execution_control,
 			id,
 			run_id,
             run_shard,
@@ -57,6 +64,8 @@ pub(super) async fn claim_chunk_for_processing_in_transaction(
     .bind(run_shard)
     .bind(chunk_id)
     .bind(lease_seconds)
+    .bind(identity.map(|i| i.tenant_id))
+    .bind(identity.map(|i| i.plan_digest))
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -176,6 +185,7 @@ pub(crate) async fn extend_chunk_lease(
 			  AND rs.run_shard = run_chunks.run_shard
 		  )
 		RETURNING
+            execution_control,
 			id,
 			run_id,
             run_shard,

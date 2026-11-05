@@ -38,6 +38,8 @@ pub(crate) struct RunChunkDraft {
 /// Persisted run scheduling chunk.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub(crate) struct RunChunk {
+    /// Control observed in the existing claim or heartbeat statement.
+    pub(crate) execution_control: crate::operations::ExecutionControl,
     /// Route generation admitted for this in-memory lease; not persisted on the chunk row.
     #[serde(skip, default)]
     #[sqlx(default)]

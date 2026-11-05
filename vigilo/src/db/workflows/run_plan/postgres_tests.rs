@@ -919,7 +919,19 @@ async fn preparation_only_is_held_until_execution_is_requested(db: PgPool) {
     .await
     .unwrap();
     assert_eq!(stats.claimed_runs, 0);
-    admission::request(&db, f.plan.run_id).await.unwrap();
+    admission::accept(
+        &db,
+        f.plan.run_id,
+        load(&db, f.plan.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .manifest
+            .as_ref()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let lease = admission::claim(&db, f.plan.run_id).await.unwrap();
     assert!(
         admission::activate(&db, lease, &std::collections::BTreeMap::new())

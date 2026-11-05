@@ -68,6 +68,15 @@ pub(crate) async fn resume(
         "admission budgets must be positive"
     );
     let budget = Budget::standard();
+    // Test callers act as the trusted submitter of their fixture's exact root.
+    ledger::accept(
+        context.dbr().await?.control().await?,
+        plan.run_id,
+        plan.manifest
+            .as_ref()
+            .context("run plan is not published")?,
+    )
+    .await?;
     with_claim(context, plan, |lease| async move {
         let reader = open_reader(plan, std::future::ready(Ok(store)), budget, cancel).await?;
         admit(context, plan, &reader, config, cancel, lease).await
@@ -76,7 +85,8 @@ pub(crate) async fn resume(
 }
 
 /// Reuses roots already verified by the foreground creator, avoiding duplicate
-/// storage reads just to emit its existing creation response metadata.
+/// storage reads just to emit its existing creation response metadata. The caller
+/// must first commit exact acceptance; this function cannot manufacture it.
 pub(crate) async fn resume_verified(
     context: &Context,
     plan: &Plan,
@@ -109,9 +119,6 @@ where
     Fut: std::future::Future<Output = Result<bool>>,
 {
     let db = context.dbr().await?.control().await?;
-    if !plan.execution_requested {
-        ledger::request(db, plan.run_id).await?;
-    }
     let lease = ledger::claim(db, plan.run_id).await?;
     let result = work(lease).await;
     // Only the confirmed activation commit returns true. Another write must not
@@ -478,7 +485,7 @@ pub(crate) async fn recover(
         "creation budgets must be positive"
     );
     let db = context.dbr().await?.control().await?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT r.id FROM runs r JOIN run_plans p ON p.run_id=r.id WHERE r.status='creating' AND p.status='ready' AND p.execution_requested AND (r.coordinator_leased_until IS NULL OR r.coordinator_leased_until<=clock_timestamp()) ORDER BY r.updated_at,r.id LIMIT $1")
+    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT r.id FROM runs r JOIN run_plans p ON p.run_id=r.id WHERE r.status='creating' AND r.execution_control='enabled' AND p.status='ready' AND p.execution_requested AND p.accepted_manifest=p.manifest AND (r.coordinator_leased_until IS NULL OR r.coordinator_leased_until<=clock_timestamp()) ORDER BY r.updated_at,r.id LIMIT $1")
         .bind(i64::try_from(limit.min(1024))?).fetch_all(db).await?;
     let mut stats = crate::db::workflows::run_creation::RunCreationRecoveryStats::default();
     for id in ids {

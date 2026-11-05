@@ -16,7 +16,9 @@ flowchart TD
     Event{Next worker event?}
     Decode{Delivery JSON valid?}
     Payload{Chunk-ready payload valid?}
-    Claim{Chunk claimable?}
+    Claim{Accepted identity matches and chunk enabled?}
+    Paused{Chunk paused?}
+    DelayPaused[Delay message without spending retry budget]
     Context[Load run context]
     Warm[Warm evaluator components]
     Cases[Read exact immutable bytes from bounded cache or storage; verify complete files and membership]
@@ -64,7 +66,10 @@ flowchart TD
     Payload -- No --> Ack
     Payload -- Yes --> Claim
 
-    Claim -- No --> Ack
+    Claim -- No --> Paused
+    Paused -- Yes --> DelayPaused
+    Paused -- No --> Ack
+    DelayPaused --> Event
     Claim -- Yes --> Context
     Claim -. Claim fails .-> ServiceFail
 
@@ -122,6 +127,6 @@ flowchart TD
 
     class Start command
     class Success success
-    class Loader,Runner,BrokerCircuit,Stream,Event,Decode,Payload,Claim,Context,Cases,Persist,CheckRetry,Delay,Complete,Ack,Release,Released,Requeue,Reopen,Shutdown,Stop system
+    class Loader,Runner,BrokerCircuit,Stream,Event,Decode,Payload,Claim,Paused,DelayPaused,Context,Cases,Persist,CheckRetry,Delay,Complete,Ack,Release,Released,Requeue,Reopen,Shutdown,Stop system
     class Warm,Permit,Execute component
     class ServiceFail,ShutdownFail error

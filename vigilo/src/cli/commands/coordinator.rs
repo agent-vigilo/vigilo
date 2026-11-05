@@ -262,11 +262,12 @@ impl Executable for Command {
 /// Executes one full coordinator cycle.
 ///
 /// The cycle is intentionally ordered to keep run progression deterministic:
-/// 1. resume stale multi-database run creation
-/// 2. recover expired worker chunk leases
-/// 3. atomically start pending runs and dispatch bounded chunk windows
-/// 4. aggregate bounded receipt pages, then finalize exact sealed shard sets
-/// 5. publish bounded batches of pending outbox records from serviceable placements
+/// 1. deliver pending execution control and settle quiescent revocations
+/// 2. resume stale multi-database run creation
+/// 3. recover expired worker chunk leases
+/// 4. atomically start pending runs and dispatch bounded chunk windows
+/// 5. aggregate bounded receipt pages, then finalize exact sealed shard sets
+/// 6. publish bounded batches of pending outbox records from serviceable placements
 async fn run_coordinator_cycle(
     context: Context,
     coordinator_id: Uuid,
@@ -281,6 +282,8 @@ async fn run_coordinator_cycle(
     debug!(coordinator_id = %coordinator_id, "acquiring database router");
     let database_router = context.dbr().await?;
     debug!(coordinator_id = %coordinator_id, "database router ready");
+
+    crate::db::workflows::run_control::deliver(database_router, None).await?;
 
     // --- Resume incomplete run creation ---
     let creation_recovery_started = Instant::now();

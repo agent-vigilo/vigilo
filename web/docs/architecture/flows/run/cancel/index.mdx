@@ -17,7 +17,7 @@ import decisionFlowDiagram from './decision-flow.mmd';
 
 # Cancel
 
-How `vigilo run cancel` marks the control run cancelled, fans out execution-local cleanup, and returns the cancellation outcome.
+How `vigilo run cancel` records durable revocation, delivers it to execution placements, and reports cancellation progress.
 
 ## Execution Flow
 
@@ -27,9 +27,28 @@ How `vigilo run cancel` marks the control run cancelled, fans out execution-loca
 
 <Mermaid value={decisionFlowDiagram} />
 
-Each placement commits terminal chunk receipts with cancellation, preserving committed results and retiring unfinished authority. Undispatched shards obtain snapshots from their frozen local run context. Coordinator pages subsequently publish progress and seals; the control lifecycle remains `cancelled`. A run in blob-plan preparation can also be cancelled while `creating`.
-The control transition revokes its publication authority; no execution rows are
-fabricated and the shared finalized dataset is retained.
+The command atomically records execution control and pending delivery destinations.
+It attempts bounded direct database delivery; coordinators retry outstanding work
+without requiring the submitting process to remain connected. RabbitMQ carries
+workload notifications and domain events, not control delivery.
+
+Workers observe control through their existing lease heartbeat. Revocation stops
+new cases and cancels supported in-flight operations. Results that finish safely
+are persisted under the existing lease fences. Application on a database is distinct
+from worker quiescence: cleanup waits until live chunk leases have been released or
+expired on every destination. It then cancels unfinished work, records terminal
+chunk receipts, and publishes the cancellation summary and event. Committed results
+and the shared finalized dataset are retained.
+
+A response with `meta.terminal: false` means cancellation remains pending. Run status and watch report lifecycle progress; `Client::run_control_status`
+reports applied, quiescent and settled control progress separately. Unreachable placements delay
+completion; there is no instantaneous global stop guarantee.
+
+Library execution control also supports `paused` and `enabled`. Paused chunks
+cannot acquire new leases. Resume permits fresh claims; it cannot
+restore revoked work or restart a terminal run. Revisions prevent delayed delivery
+from overwriting a newer decision. Newly seeded chunks inherit their run control;
+shard destinations reconcile control after copying and before opening admission.
 
 ## Related
 

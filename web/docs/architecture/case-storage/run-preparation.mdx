@@ -29,13 +29,15 @@ with an 8 MiB input and encoded limit. Storage configuration resolves the same
 recorded physical owner as the dataset; credentials remain outside SQL and files.
 
 Creation records execution intent atomically with the validated run identity,
-admits the published plan to execution storage, and returns `pending` after
+accepts the exact verified manifest, admits that plan to execution storage, and returns `pending` after
 exact placement verification. On initial creation, `--prepare-only` holds a run
 in `creating` with `plan_status: ready` and `dispatchable: false`. Repeat the same
 command without that flag to request execution. Replay validates immutable inputs
 before recording intent under the run lock; a preparation-only retry does not
-revoke an existing request. Coordinators resume requested admission after the
-foreground process stops; they leave preparation-only runs held.
+revoke an existing request. Execution intent does not approve a plan: acceptance
+binds the exact published manifest before admission can claim authority.
+Coordinators resume accepted admission after the foreground process stops;
+unaccepted plans stay held until their caller retries.
 Inline and file YAML/JSON inputs use the same ingestion and preparation path.
 Set `VIGILO_STORAGE_CONFIG` for creators, coordinators, and workers, or supply
 `--storage-config` to creation. Runtime credentials need read access to the
@@ -246,8 +248,9 @@ are local copies linked by run/shard identity; their logical relationship to
 control runs is not a cross-database foreign key.
 
 `run_plans` freezes the dataset catalog ID, storage binding, limits, evaluator
-artifacts and initial placements, then records generation, acknowledged chunk
-progress, execution intent, admission cursor/folds and the published root. `run_plan_objects` holds one compact reference
+artifacts, HTTP grant ceilings and initial placements, then records generation,
+acknowledged chunk progress, execution intent, admission cursor/folds, the published
+root and its exact accepted reference. `run_plan_objects` holds one compact reference
 per owned file. `run_plan_shards` holds at most 128 rows of verified totals,
 placement aliases and membership hashes. There are no per-case plan rows, case
 payloads, or temporary per-chunk SQL plans in this preparation path.

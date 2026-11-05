@@ -119,6 +119,8 @@ struct WorkerRunContextKey {
 #[derive(Debug, Deserialize)]
 /// Queue payload that signals a run chunk is ready for processing.
 struct ChunkReadyMessage {
+    tenant_id: Uuid,
+    plan_digest: String,
     run_id: Uuid,
     run_shard: i16,
     chunk_id: Uuid,
@@ -127,6 +129,7 @@ struct ChunkReadyMessage {
 }
 
 struct ChunkLeaseGuard {
+    control: crate::operations::control::Observation,
     db: sqlx::PgPool,
     chunk: Mutex<crate::models::run_chunk::RunChunk>,
     lease_seconds: i32,
@@ -163,6 +166,7 @@ impl ChunkLeaseGuard {
     ) -> Arc<Self> {
         Arc::new(Self {
             db: db.clone(),
+            control: crate::operations::control::Observation::new(chunk.execution_control),
             chunk: Mutex::new(chunk),
             lease_seconds,
         })
@@ -179,6 +183,7 @@ impl ChunkLeaseGuard {
         else {
             return Ok(false);
         };
+        self.control.update(renewed.execution_control);
         *self.chunk.lock().await = renewed;
         Ok(true)
     }
@@ -1004,7 +1009,15 @@ async fn run_worker_message_admitted(
         .run_database_operation(
             &payload.database_alias,
             "worker_chunk_claim",
-            claim_hinted_chunk_with_route_refresh(database_router, &hinted_route, payload.chunk_id),
+            claim_hinted_chunk_with_route_refresh(
+                database_router,
+                &hinted_route,
+                payload.chunk_id,
+                Some(&chunk_processing::AcceptedWork {
+                    tenant_id: payload.tenant_id,
+                    plan_digest: &payload.plan_digest,
+                }),
+            ),
         )
         .await
     {
@@ -1031,6 +1044,18 @@ async fn run_worker_message_admitted(
     };
     let db = &db;
     let Some(mut chunk) = claimed else {
+        let paused: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM run_chunks WHERE run_id=$1 AND run_shard=$2 AND id=$3 AND execution_control='paused' AND status IN ('pending','leased'))")
+            .bind(payload.run_id).bind(payload.run_shard).bind(payload.chunk_id).fetch_one(db).await?;
+        if paused {
+            mq.delay_worker_message(
+                &message.raw,
+                WORKER_ROUTE_RETRY_DELAY_SECONDS,
+                "run execution is paused",
+                "run_paused",
+            )
+            .await?;
+            return Ok(WorkerCycleOutcome::Processed);
+        }
         mq.ack(&message.raw).await?;
         info!(
             chunk_id = %payload.chunk_id,
@@ -1185,7 +1210,10 @@ async fn run_worker_message_admitted(
             // for retry_after.
             let processed = match async {
                 let mut outcomes = Vec::new();
-                while let Some(cases) = batches.next(&heartbeat.cancel).await? {
+                while heartbeat.guard.control.enabled() {
+                    let Some(cases) = batches.next(&heartbeat.cancel).await? else {
+                        break;
+                    };
                     case_ids.extend(cases.iter().map(|case| case.case_id));
                     outcomes.extend(
                         execution_processing::process_case_batch_execution(
@@ -1198,6 +1226,7 @@ async fn run_worker_message_admitted(
                             &run_context.evaluator_catalog,
                             &run_context.response_identity,
                             &cases,
+                            &heartbeat.guard.control,
                         )
                         .await?,
                     );
@@ -1306,6 +1335,24 @@ async fn run_worker_message_admitted(
                     ?settlement,
                     "failed chunk-level execution terminal transitions; handled claimed chunk lease"
                 );
+                return Ok(WorkerCycleOutcome::Processed);
+            }
+
+            if !heartbeat.guard.control.enabled() {
+                let chunk = heartbeat.stop().await;
+                settle_chunk_waiting_for_execution_retry(
+                    ChunkSettlementContext::new(
+                        database_router,
+                        &payload.database_alias,
+                        db,
+                        mq,
+                        message,
+                        &chunk,
+                    ),
+                    "run execution is suspended",
+                    None,
+                )
+                .await?;
                 return Ok(WorkerCycleOutcome::Processed);
             }
 
@@ -1433,12 +1480,14 @@ pub(crate) async fn claim_hinted_chunk_with_route_refresh(
     database_router: &crate::context::database::DatabaseRouter,
     hinted_route: &crate::context::database::ExecutionWriteRoute,
     chunk_id: Uuid,
+    identity: Option<&chunk_processing::AcceptedWork<'_>>,
 ) -> anyhow::Result<(sqlx::PgPool, Option<crate::models::run_chunk::RunChunk>)> {
     match chunk_processing::claim_hinted_chunk_for_processing(
         database_router,
         hinted_route,
         chunk_id,
         CHUNK_LEASE_SECONDS,
+        identity,
     )
     .await
     {
@@ -1464,6 +1513,7 @@ pub(crate) async fn claim_hinted_chunk_with_route_refresh(
                 hinted_route.hint.run_shard,
                 chunk_id,
                 CHUNK_LEASE_SECONDS,
+                identity,
             )
             .await?;
             Ok((route.pool, claim))
@@ -1522,6 +1572,8 @@ mod tests {
         let chunk_id = Uuid::now_v7();
 
         let message: ChunkReadyMessage = serde_json::from_value(json!({
+            "tenant_id": "00000000-0000-0000-0000-000000000000",
+            "plan_digest": "fixture-digest",
             "run_id": run_id,
             "run_shard": 42,
             "chunk_id": chunk_id,

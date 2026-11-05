@@ -116,7 +116,7 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
         .await
         .unwrap_err();
     assert!(matches!(error, crate::operations::Error::Dependency(_)));
-    assert_eq!(error.to_string(), "run status dependency failed");
+    assert_eq!(error.to_string(), "operation dependency failed");
 }
 
 #[sqlx::test(migrations = "./migrations")]

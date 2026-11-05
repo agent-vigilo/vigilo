@@ -33,6 +33,7 @@ pub(crate) async fn claim_next_dispatch_route(
     let route = sqlx::query_as::<_, DispatchRoute>(
         r#"
         SELECT
+            r.tenant_id,
             c.run_id,
             c.run_shard,
             sp.database_alias,
@@ -48,6 +49,7 @@ pub(crate) async fn claim_next_dispatch_route(
         JOIN database_placements dp
           ON dp.alias = sp.database_alias
         WHERE c.status = 'open'
+          AND r.execution_control = 'enabled'
           AND sp.status = 'active'
           AND dp.status IN ('active', 'draining')
           AND dp.role IN ('shard', 'control_and_shard')
@@ -97,6 +99,7 @@ pub(crate) async fn count_dispatch_cursor_backlog(db: &PgPool) -> anyhow::Result
         JOIN database_placements dp
           ON dp.alias = sp.database_alias
         WHERE c.status = 'open'
+          AND r.execution_control = 'enabled'
           AND sp.status = 'active'
           AND dp.status IN ('active', 'draining')
           AND dp.role IN ('shard', 'control_and_shard')
@@ -137,6 +140,8 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
                 updated_at = now()
             WHERE r.id = $1::uuid
               AND r.status = 'pending'::run_status
+              AND r.tenant_id=$5
+              AND r.execution_control = 'enabled'
               AND (
                   r.coordinator_leased_until IS NULL
                   OR r.coordinator_leased_until < now()
@@ -144,8 +149,9 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
             RETURNING r.*
         ),
         started_event AS (
-            INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, dedupe_key, payload)
+            INSERT INTO outbox_events (tenant_id,event_type, aggregate_type, aggregate_id, dedupe_key, payload)
             SELECT
+                started_run.tenant_id,
                 'run.started',
                 'run',
                 started_run.id,
@@ -156,6 +162,7 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
             RETURNING id
         )
         SELECT
+            started_run.tenant_id,
             started_run.id AS run_id,
             $2::smallint AS run_shard,
             started_run.run_key,
@@ -183,6 +190,7 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
     .bind(route.run_shard)
     .bind(coordinator_id)
     .bind(lease_seconds)
+    .bind(route.tenant_id)
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -193,6 +201,7 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
     let running = sqlx::query_as::<_, DispatchRunSnapshot>(
         r#"
         SELECT
+            r.tenant_id,
             r.id AS run_id,
             $2::smallint AS run_shard,
             r.run_key,
@@ -216,11 +225,14 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
         FROM runs r
         WHERE r.id = $1::uuid
           AND r.status = 'running'::run_status
+          AND r.tenant_id=$3
+          AND r.execution_control = 'enabled'
         FOR SHARE
         "#,
     )
     .bind(route.run_id)
     .bind(route.run_shard)
+    .bind(route.tenant_id)
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -342,8 +354,9 @@ pub(super) async fn recover_expired_chunks(
             RETURNING ea.id
         ),
         recovery_events AS (
-            INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, dedupe_key, payload)
+            INSERT INTO outbox_events (tenant_id,event_type, aggregate_type, aggregate_id, dedupe_key, payload)
             SELECT
+                snapshot.tenant_id,
                 'run.chunk.ready',
                 'run',
                 recovered.run_id,
@@ -359,9 +372,12 @@ pub(super) async fn recover_expired_chunks(
                     'chunk_id', recovered.id,
                     'database_alias', admission.database_alias,
                     'write_epoch', admission.write_epoch,
-                    'recovery_count', recovered.recovery_count
+                    'recovery_count', recovered.recovery_count,
+                    'tenant_id', snapshot.tenant_id,
+                    'plan_digest', snapshot.config_snapshot #>> '{run_plan,digest}'
                 )
             FROM recovered
+            JOIN run_snapshots snapshot ON snapshot.run_id=recovered.run_id AND snapshot.run_shard=recovered.run_shard
             JOIN local_shard_admissions admission
               ON admission.run_id = recovered.run_id
              AND admission.run_shard = recovered.run_shard
@@ -389,7 +405,7 @@ pub(super) async fn recover_expired_chunks(
     let failed_rows = sqlx::query_as::<_, (Uuid, i16, Uuid)>(
         r#"
         WITH expired AS (
-            SELECT rc.run_id, rc.run_shard, rc.id
+            SELECT rc.run_id, rc.run_shard, rc.id, rc.tenant_id
             FROM run_chunks rc
             JOIN run_snapshots rs
               ON rs.run_id = rc.run_id
@@ -492,10 +508,12 @@ pub(super) async fn dispatch_run_window(
                 $19::text AS prompt_config_version,
                 $20::jsonb AS config_snapshot,
                 $21::text AS database_alias,
-                $22::bigint AS write_epoch
+                $22::bigint AS write_epoch,
+                $24::uuid AS tenant_id
         ),
         snapshot_upsert AS (
             INSERT INTO run_snapshots (
+                tenant_id,
                 run_id,
                 run_shard,
                 run_key,
@@ -518,6 +536,7 @@ pub(super) async fn dispatch_run_window(
                 expected_execution_count
             )
             SELECT
+                snapshot_input.tenant_id,
                 snapshot_input.run_id,
                 snapshot_input.run_shard,
                 snapshot_input.run_key,
@@ -565,29 +584,33 @@ pub(super) async fn dispatch_run_window(
                     THEN run_snapshots.config_snapshot ELSE EXCLUDED.config_snapshot END,
                 expected_execution_count = EXCLUDED.expected_execution_count,
                 updated_at = now()
-            RETURNING run_id, run_shard, run_key
+            WHERE run_snapshots.tenant_id=EXCLUDED.tenant_id
+            RETURNING run_id, run_shard, run_key, tenant_id
         ),
         claimed AS (
             SELECT
+                snapshot_upsert.tenant_id,
                 snapshot_upsert.run_id AS id,
                 snapshot_upsert.run_key,
                 snapshot_upsert.run_shard
             FROM snapshot_upsert
         ),
         selected_chunks AS (
-            SELECT rc.run_id, rc.run_shard, rc.id
+            SELECT rc.run_id, rc.run_shard, rc.id, rc.tenant_id
             FROM run_chunks rc
             JOIN claimed
               ON claimed.id = rc.run_id
              AND claimed.run_shard = rc.run_shard
             WHERE rc.status = 'pending'
+              AND rc.tenant_id = claimed.tenant_id
               AND rc.dispatched_at IS NULL
             ORDER BY rc.ordinal_start ASC, rc.id ASC
             LIMIT $1
         ),
         chunk_events AS (
-            INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, dedupe_key, payload)
+            INSERT INTO outbox_events (tenant_id,event_type, aggregate_type, aggregate_id, dedupe_key, payload)
             SELECT
+                selected_chunks.tenant_id,
                 'run.chunk.ready',
                 'run',
                 selected_chunks.run_id,
@@ -597,7 +620,9 @@ pub(super) async fn dispatch_run_window(
                     'run_shard', selected_chunks.run_shard,
                     'chunk_id', selected_chunks.id,
                     'database_alias', snapshot_input.database_alias,
-                    'write_epoch', snapshot_input.write_epoch
+                    'write_epoch', snapshot_input.write_epoch,
+                    'tenant_id', selected_chunks.tenant_id,
+                    'plan_digest', snapshot_input.config_snapshot #>> '{run_plan,digest}'
                 )
             FROM selected_chunks
             CROSS JOIN snapshot_input
@@ -666,6 +691,7 @@ pub(super) async fn dispatch_run_window(
     .bind(&route.database_alias)
     .bind(route.write_epoch)
     .bind(snapshot.run_started_event_records_inserted)
+    .bind(snapshot.tenant_id)
     .fetch_optional(&mut **execution_tx)
     .await
     .map_err(anyhow::Error::from)

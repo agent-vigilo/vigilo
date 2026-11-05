@@ -77,6 +77,23 @@ impl Context {
         )
     }
 
+    /// Reuses the application's shared router without initializing presentation or process state.
+    pub(crate) fn for_operations(router: Arc<database::DatabaseRouter>) -> Self {
+        let config = database::Config::new(
+            router.uri.clone(),
+            router.max_connections_per_pool,
+            router.acquire_timeout,
+            Default::default(),
+            router.placement_config.clone(),
+        );
+        let mut context = Self::new(config, None, Default::default(), output::OutputFormat::Json);
+        Arc::get_mut(&mut context.0)
+            .expect("unshared context")
+            .dbr
+            .cell = tokio::sync::OnceCell::new_with(Some(router));
+        context
+    }
+
     pub(crate) fn with_evaluator_http(
         mut self,
         service: crate::evaluator_requests::Service,
