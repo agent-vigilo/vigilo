@@ -729,3 +729,54 @@ async fn finalization_skips_run_with_active_dispatch_lifecycle_share_lock(pool: 
         .unwrap();
     assert_eq!(claimed.unwrap().id, run_id);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_dispatch_claim_preserves_locks_without_table_access(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 1)]).await;
+    let role = format!("claim_test_{}", Uuid::new_v4().simple());
+    let owner = format!("claim_owner_{}", Uuid::new_v4().simple());
+    // Role creation and grants roll back with the test transaction, even on panic.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_dispatch(ARRAY[]::text[]); RAISE EXCEPTION 'unexpected function access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {owner} NOLOGIN; GRANT USAGE ON SCHEMA public TO {owner}; GRANT SELECT ON public.runs, public.shard_placements, public.database_placements, public.run_shard_dispatch_cursors TO {owner}; GRANT UPDATE ON public.run_shard_dispatch_cursors TO {owner}; ALTER FUNCTION public.vigilo_claim_dispatch(text[]) OWNER TO {owner}; GRANT EXECUTE ON FUNCTION public.vigilo_claim_dispatch(text[]) TO {role}; SET LOCAL ROLE {role};"))
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_dispatch(NULL::text[]); RAISE EXCEPTION 'accepted missing exclusions'; EXCEPTION WHEN invalid_parameter_value THEN NULL; END; BEGIN PERFORM * FROM public.vigilo_claim_dispatch(array_fill('x'::text,ARRAY[129])); RAISE EXCEPTION 'accepted oversized exclusions'; EXCEPTION WHEN invalid_parameter_value THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    let excluded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.vigilo_claim_dispatch(ARRAY['primary']::text[])",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(excluded, 0);
+    let access: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.runs','SELECT') OR has_table_privilege(current_user,'public.run_shard_dispatch_cursors','UPDATE')")
+        .fetch_one(&mut *tx).await.unwrap();
+    assert!(!access);
+    let claimed: Uuid =
+        sqlx::query_scalar("SELECT run_id FROM public.vigilo_claim_dispatch(ARRAY[]::text[])")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(claimed, run);
+    assert!(
+        queries::claim_next_dispatch_route(&pool, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tx.rollback().await.unwrap();
+    let recovered = queries::claim_next_dispatch_route(&pool, &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.route.run_id, run);
+    recovered.control_tx.rollback().await.unwrap();
+}

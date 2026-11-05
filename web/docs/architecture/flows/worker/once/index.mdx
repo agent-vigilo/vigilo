@@ -32,6 +32,7 @@ releases pending HTTP work. No per-request database query is required.
 Chunk claims verify accepted work identity and require enabled execution. The
 existing lease heartbeat also observes execution controls; paused messages remain
 available through delayed delivery without spending message retry budget.
+Pause drains the already allocated batch and blocks further batch admission.
 Revocation cancels supported in-flight work while lease-fenced persistence retains
 safely completed results. See [cancellation](/docs/architecture/flows/run/cancel/).
 

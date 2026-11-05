@@ -1431,6 +1431,8 @@ async fn evaluate_case_execution(
 /// - Resolve evaluator bindings from the run profile for each case.
 /// - Ask the database which executions are due, waiting, terminal, or exhausted.
 /// - Run only due cases; waiting and terminal cases are skipped for this pass.
+/// - Pause prevents batch admission; once allocated, drain under the existing
+///   concurrency and deadline limits. Revocation interrupts the drain.
 /// - Convert exhausted open cases into failed terminal transitions so retry
 ///   loops cannot continue indefinitely.
 /// - Persist successful evaluator evidence before returning terminal
@@ -1519,102 +1521,84 @@ pub(crate) async fn process_case_batch_execution(
     );
 
     let parallelism = CASE_EXECUTION_PARALLELISM.min(cases.len().max(1));
-    let mut next_index = 0usize;
-    let mut pending = FuturesUnordered::new();
-    let mut ordered_outcomes = Vec::with_capacity(cases.len());
+    let ordered_outcomes = drain_allocated_cases(cases.len(), parallelism, control, |index| {
+        let case = &cases[index];
+        let evaluation_plan = &evaluation_plans_by_case[index];
+        let allocation = &allocations[index];
+        let http_policies = &http_policies;
+        async move {
+            if allocation.case_id != case.case_id {
+                anyhow::bail!(
+                    "attempt allocation returned case '{}' while processing case '{}'",
+                    allocation.case_id,
+                    case.case_id
+                );
+            }
 
-    while (next_index < cases.len() && control.enabled()) || !pending.is_empty() {
-        while next_index < cases.len() && pending.len() < parallelism && control.enabled() {
-            let index = next_index;
-            next_index += 1;
-
-            let case = &cases[index];
-            let evaluation_plan = &evaluation_plans_by_case[index];
-            let allocation = &allocations[index];
-            let http_policies = &http_policies;
-            pending.push(async move {
-                if allocation.case_id != case.case_id {
-                    anyhow::bail!(
-                        "attempt allocation returned case '{}' while processing case '{}'",
-                        allocation.case_id,
+            let mut outcome = if allocation.retry_not_due || allocation.already_terminal {
+                CaseExecutionOutcome {
+                    processed: None,
+                    persistence: None,
+                }
+            } else if allocation.max_attempts_exhausted {
+                let attempt_id = allocation.attempt_id.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "case '{}' exhausted attempts without a current attempt id",
                         case.case_id
-                    );
+                    )
+                })?;
+                CaseExecutionOutcome {
+                    processed: Some(processed_terminal_failure_without_worker_lease(
+                        allocation.execution_id,
+                        attempt_id,
+                        allocation.attempt_no,
+                        format!(
+                            "execution retry budget exhausted after {} attempts",
+                            allocation.attempt_no
+                        ),
+                    )),
+                    persistence: None,
                 }
-
-                let mut outcome = if allocation.retry_not_due || allocation.already_terminal {
-                    CaseExecutionOutcome {
-                        processed: None,
-                        persistence: None,
-                    }
-                } else if allocation.max_attempts_exhausted {
-                    let attempt_id = allocation.attempt_id.ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "case '{}' exhausted attempts without a current attempt id",
-                            case.case_id
-                        )
-                    })?;
-                    CaseExecutionOutcome {
-                        processed: Some(processed_terminal_failure_without_worker_lease(
-                            allocation.execution_id,
-                            attempt_id,
-                            allocation.attempt_no,
-                            format!(
-                                "execution retry budget exhausted after {} attempts",
-                                allocation.attempt_no
-                            ),
-                        )),
-                        persistence: None,
-                    }
-                } else if allocation.should_process {
-                    tokio::select! {
-                    biased;
-                    outcome = evaluate_case_execution(
-                        context,
-                        http_policies,
-                        run_id,
-                        run_shard,
-                        run_profile,
-                        evaluator_catalog,
-                        response_identity,
-                        case,
-                        &evaluation_plan.evaluator_bindings,
-                        &evaluation_plan.aggregation,
-                        allocation,
-                    ) => outcome,
-                    _ = control.revoked.cancelled() => CaseExecutionOutcome { processed: None, persistence: None },
-                    }
-                } else {
-                    CaseExecutionOutcome {
-                        processed: None,
-                        persistence: None,
-                    }
-                };
-
-                if allocation.should_process
-                    && let Some(processed) = &mut outcome.processed
-                {
-                    processed.terminal_transition.http_policy_revisions = evaluation_plan
-                        .evaluator_bindings
-                        .iter()
-                        .filter_map(|binding| evaluator_catalog.get(&binding.evaluator_ref))
-                        .filter_map(|entry| {
-                            http_policies
-                                .get(&entry.evaluator_id)
-                                .map(|p| (entry.evaluator_id, p.revision().to_owned()))
-                        })
-                        .collect();
+            } else if allocation.should_process {
+                evaluate_case_execution(
+                    context,
+                    http_policies,
+                    run_id,
+                    run_shard,
+                    run_profile,
+                    evaluator_catalog,
+                    response_identity,
+                    case,
+                    &evaluation_plan.evaluator_bindings,
+                    &evaluation_plan.aggregation,
+                    allocation,
+                )
+                .await
+            } else {
+                CaseExecutionOutcome {
+                    processed: None,
+                    persistence: None,
                 }
-                Ok::<_, anyhow::Error>((index, outcome))
-            });
+            };
+
+            if allocation.should_process
+                && let Some(processed) = &mut outcome.processed
+            {
+                processed.terminal_transition.http_policy_revisions = evaluation_plan
+                    .evaluator_bindings
+                    .iter()
+                    .filter_map(|binding| evaluator_catalog.get(&binding.evaluator_ref))
+                    .filter_map(|entry| {
+                        http_policies
+                            .get(&entry.evaluator_id)
+                            .map(|p| (entry.evaluator_id, p.revision().to_owned()))
+                    })
+                    .collect();
+            }
+            Ok::<_, anyhow::Error>(outcome)
         }
-
-        let Some(result) = pending.next().await else {
-            continue;
-        };
-        ordered_outcomes.push(result?);
-    }
-
-    ordered_outcomes.sort_by_key(|(index, _)| *index);
+    })
+    .await?;
 
     let mut processed = Vec::with_capacity(cases.len());
     let mut completed = Vec::new();
@@ -1648,6 +1632,180 @@ pub(crate) async fn process_case_batch_execution(
     );
 
     Ok(processed)
+}
+
+/// Drains already allocated work even after pause, with bounded concurrency and
+/// stable result order. Admission of another batch still requires enabled control.
+/// Completed work wins a simultaneous revocation so safe evidence is retained;
+/// pending calls are dropped on revocation. The caller fences persistence by lease.
+async fn drain_allocated_cases<T, F, Fut>(
+    count: usize,
+    parallelism: usize,
+    control: &crate::operations::control::Observation,
+    mut execute: F,
+) -> anyhow::Result<Vec<(usize, T)>>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let mut next_index = 0;
+    let mut pending = FuturesUnordered::new();
+    let mut outcomes = Vec::with_capacity(count);
+    while (next_index < count && !control.revoked.is_cancelled()) || !pending.is_empty() {
+        while next_index < count && pending.len() < parallelism && !control.revoked.is_cancelled() {
+            let index = next_index;
+            next_index += 1;
+            let work = execute(index);
+            pending.push(async move {
+                // A queued future may first be polled after another case observes
+                // revocation. Do not start its HTTP call in that situation.
+                if control.revoked.is_cancelled() {
+                    return Ok(None);
+                }
+                tokio::select! {
+                    biased;
+                    result = work => result.map(|value| Some((index, value))),
+                    _ = control.revoked.cancelled() => Ok(None),
+                }
+            });
+        }
+        if let Some(result) = pending.next().await
+            && let Some(outcome) = result?
+        {
+            outcomes.push(outcome);
+        }
+    }
+    outcomes.sort_by_key(|(index, _)| *index);
+    Ok(outcomes)
+}
+
+#[cfg(test)]
+mod batch_control_tests {
+    use super::drain_allocated_cases;
+    use crate::operations::{
+        ExecutionControl,
+        control::Observation,
+    };
+
+    #[tokio::test]
+    async fn pause_drains_every_allocated_case_without_readmitting_a_batch() {
+        let control = Observation::new(ExecutionControl::Enabled);
+        let result = drain_allocated_cases(25, 8, &control, |index| {
+            let control = &control;
+            async move {
+                if index == 0 {
+                    control.update(ExecutionControl::Paused);
+                }
+                tokio::task::yield_now().await;
+                Ok(index)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, (0..25).map(|i| (i, i)).collect::<Vec<_>>());
+        assert!(!control.enabled(), "the next batch must remain blocked");
+    }
+
+    #[tokio::test]
+    async fn pause_observed_after_allocation_still_drains_with_bounded_parallelism() {
+        use std::sync::atomic::{
+            AtomicUsize,
+            Ordering,
+        };
+        let control = Observation::new(ExecutionControl::Paused);
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let active_ref = &active;
+        let peak_ref = &peak;
+        let result = drain_allocated_cases(25, 8, &control, |index| async move {
+            let active = active_ref;
+            let peak = peak_ref;
+            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(count, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(index)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.len(), 25);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), 8);
+        assert!(!control.enabled());
+    }
+
+    #[tokio::test]
+    async fn revoked_batch_never_starts_work_even_after_resume_observation() {
+        let control = Observation::new(ExecutionControl::Revoked);
+        control.update(ExecutionControl::Enabled);
+        let result = drain_allocated_cases(25, 8, &control, |_| async {
+            panic!("revoked batch must not start work");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn revocation_drops_active_calls_and_never_starts_queued_calls() {
+        use std::sync::atomic::{
+            AtomicUsize,
+            Ordering,
+        };
+        let control = Observation::new(ExecutionControl::Enabled);
+        let started = AtomicUsize::new(0);
+        let trigger = tokio::sync::Notify::new();
+        let execution = drain_allocated_cases(25, 2, &control, |_| async {
+            if started.fetch_add(1, Ordering::SeqCst) == 1 {
+                trigger.notify_one();
+            }
+            std::future::pending::<anyhow::Result<usize>>().await
+        });
+        let revoke = async {
+            trigger.notified().await;
+            control.update(ExecutionControl::Paused);
+            control.update(ExecutionControl::Revoked);
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(execution, revoke)
+        })
+        .await
+        .expect("active calls must be cancelled");
+        assert!(result.unwrap().is_empty());
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn revocation_interrupts_a_paused_drain_and_preserves_completed_results() {
+        let control = Observation::new(ExecutionControl::Enabled);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drain_allocated_cases(25, 8, &control, |index| {
+                let control = &control;
+                async move {
+                    match index {
+                        0 => {
+                            control.update(ExecutionControl::Paused);
+                            Ok(index)
+                        }
+                        1 => {
+                            control.update(ExecutionControl::Revoked);
+                            Ok(index)
+                        }
+                        _ => std::future::pending().await,
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("revocation must drop pending calls")
+        .unwrap();
+        assert_eq!(result, vec![(0, 0), (1, 1)]);
+        control.update(ExecutionControl::Enabled);
+        assert!(!control.enabled());
+    }
 }
 
 #[cfg(test)]

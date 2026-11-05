@@ -30,48 +30,11 @@ pub(crate) async fn claim_next_dispatch_route(
     excluded_database_aliases: &[String],
 ) -> anyhow::Result<Option<ClaimedDispatchRoute>> {
     let mut control_tx = db.begin().await?;
-    let route = sqlx::query_as::<_, DispatchRoute>(
-        r#"
-        SELECT
-            r.tenant_id,
-            c.run_id,
-            c.run_shard,
-            sp.database_alias,
-            sp.status AS placement_status,
-            sp.route_version,
-            sp.write_epoch
-        FROM run_shard_dispatch_cursors c
-        JOIN runs r
-          ON r.id = c.run_id
-        JOIN shard_placements sp
-          ON sp.run_id = c.run_id
-         AND sp.run_shard = c.run_shard
-        JOIN database_placements dp
-          ON dp.alias = sp.database_alias
-        WHERE c.status = 'open'
-          AND r.execution_control = 'enabled'
-          AND sp.status = 'active'
-          AND dp.status IN ('active', 'draining')
-          AND dp.role IN ('shard', 'control_and_shard')
-          AND NOT (sp.database_alias = ANY($1::text[]))
-          AND (
-              r.status = 'running'::run_status
-              OR (
-                  r.status = 'pending'::run_status
-                  AND (
-                      r.coordinator_leased_until IS NULL
-                      OR r.coordinator_leased_until < now()
-                  )
-              )
-          )
-        ORDER BY c.updated_at ASC, c.run_id ASC, c.run_shard ASC
-        LIMIT 1
-        FOR UPDATE OF c SKIP LOCKED
-        "#,
-    )
-    .bind(excluded_database_aliases)
-    .fetch_optional(&mut *control_tx)
-    .await?;
+    let route =
+        sqlx::query_as::<_, DispatchRoute>("SELECT * FROM vigilo_claim_dispatch($1::text[])")
+            .bind(excluded_database_aliases)
+            .fetch_optional(&mut *control_tx)
+            .await?;
 
     let Some(route) = route else {
         control_tx.rollback().await?;

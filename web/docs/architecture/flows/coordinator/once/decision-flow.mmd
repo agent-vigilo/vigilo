@@ -21,7 +21,7 @@ flowchart TD
     RecoveryPlacement{Execution placements remain?}
     Recover[Recover expired chunk leases]
     RecoveryIsolated[Classify failure, count it, and skip alias]
-    DispatchClaim{Dispatchable run-shard cursor claimed?}
+    DispatchClaim{Restricted cursor claim returned a route?}
     DispatchRun[Start run if needed and enqueue shard chunk window]
     DispatchIsolated[Leave cursor open and exclude alias for this pass]
     FinalizeCandidate{Next finalization candidate within budget?}

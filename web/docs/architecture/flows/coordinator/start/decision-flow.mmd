@@ -23,7 +23,7 @@ flowchart TD
     CircuitSkip[Leave durable work pending and continue]
     Recover[Recover expired chunk leases]
     RecoveryIsolated[Count placement failure and continue aliases]
-    Dispatch[Dispatch ready run-shard windows]
+    Dispatch[Claim cursor through restricted function and dispatch its window]
     DispatchIsolated[Leave cursor open and exclude failed alias]
     Finalize[Read summaries by database and finalize exact valid seals]
     FinalizeIsolated[Defer candidate; inspect next run]

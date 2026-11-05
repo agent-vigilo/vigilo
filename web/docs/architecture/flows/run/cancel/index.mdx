@@ -45,7 +45,11 @@ reports applied, quiescent and settled control progress separately. Unreachable 
 completion; there is no instantaneous global stop guarantee.
 
 Library execution control also supports `paused` and `enabled`. Paused chunks
-cannot acquire new leases. Resume permits fresh claims; it cannot
+cannot acquire new leases. A worker drains its already allocated case batch under
+the existing concurrency and deadline limits, then stops before allocating another
+batch. Already allocated calls may start after pause is observed; their attempts
+are retained without an extra allocation or cleanup query. Revocation interrupts
+that drain and cancels supported pending calls. Resume permits fresh claims; it cannot
 restore revoked work or restart a terminal run. Revisions prevent delayed delivery
 from overwriting a newer decision. Newly seeded chunks inherit their run control;
 shard destinations reconcile control after copying and before opening admission.

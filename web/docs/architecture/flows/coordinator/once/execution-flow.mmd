@@ -50,7 +50,7 @@ sequenceDiagram
 
     loop Dispatch bounded run-shard windows
         Vigilo->>ControlDB: Count dispatchable cursor backlog
-        Vigilo->>ControlDB: Select and lock open run-shard cursor
+        Vigilo->>ControlDB: Call restricted cursor claim function inside dispatch transaction
         ControlDB-->>Vigilo: Dispatch route or no work
         Vigilo->>ExecutionDB: Upsert run snapshot and insert one chunk-ready outbox record per selected chunk
         alt Execution placement write succeeds

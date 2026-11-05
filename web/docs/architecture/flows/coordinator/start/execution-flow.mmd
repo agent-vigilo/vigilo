@@ -55,7 +55,7 @@ sequenceDiagram
             end
             Vigilo->>ControlDB: Log dispatch cursor backlog
             loop Bounded dispatch windows
-                Vigilo->>ControlDB: Select dispatchable run-shard cursor
+                Vigilo->>ControlDB: Call restricted cursor claim function inside dispatch transaction
                 Vigilo->>ExecutionDB: Dispatch routed chunk window
                 alt Execution placement succeeds
                     ExecutionDB-->>Vigilo: Dispatch shard window result
