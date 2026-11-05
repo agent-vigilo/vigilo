@@ -1,4 +1,5 @@
 CREATE TABLE run_snapshots (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     run_key TEXT NOT NULL,
@@ -22,7 +23,8 @@ CREATE TABLE run_snapshots (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT pk_run_snapshots PRIMARY KEY (run_id, run_shard)
+    CONSTRAINT pk_run_snapshots PRIMARY KEY (run_id, run_shard),
+    CONSTRAINT fk_run_snapshots_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_run_snapshots_run

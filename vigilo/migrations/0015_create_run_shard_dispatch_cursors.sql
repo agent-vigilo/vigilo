@@ -1,11 +1,13 @@
 CREATE TABLE run_shard_dispatch_cursors (
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'drained')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT pk_run_shard_dispatch_cursors PRIMARY KEY (run_id, run_shard)
+    CONSTRAINT pk_run_shard_dispatch_cursors PRIMARY KEY (run_id, run_shard),
+    CONSTRAINT fk_run_shard_dispatch_cursors_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_run_shard_dispatch_cursors_open

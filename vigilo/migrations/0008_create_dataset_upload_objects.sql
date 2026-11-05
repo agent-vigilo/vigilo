@@ -1,5 +1,6 @@
 CREATE TABLE dataset_upload_objects (
-    upload_id UUID NOT NULL REFERENCES dataset_uploads(id),
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    upload_id UUID NOT NULL,
     object_key TEXT NOT NULL CHECK (octet_length(object_key) BETWEEN 1 AND 1024),
     kind TEXT NOT NULL CHECK (kind IN ('batch','index','source','manifest','probe')),
     level SMALLINT NOT NULL DEFAULT 0 CHECK (level BETWEEN 0 AND 7),
@@ -11,7 +12,8 @@ CREATE TABLE dataset_upload_objects (
     PRIMARY KEY (upload_id, object_key),
     UNIQUE (upload_id, kind, level, range_start),
     CHECK ((range_start IS NULL AND range_end IS NULL AND kind = 'probe') OR
-           (range_start IS NOT NULL AND range_end > range_start AND kind <> 'probe'))
+           (range_start IS NOT NULL AND range_end > range_start AND kind <> 'probe')),
+    FOREIGN KEY (tenant_id, upload_id) REFERENCES dataset_uploads(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX dataset_upload_pending_cleanup ON dataset_upload_objects (upload_id, object_key)

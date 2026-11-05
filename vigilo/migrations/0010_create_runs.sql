@@ -1,8 +1,9 @@
 CREATE TABLE runs (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     -- external/run-level identity
-    run_key TEXT NOT NULL UNIQUE,
+    run_key TEXT NOT NULL,
 
     -- human/lookup metadata
     name TEXT,
@@ -10,7 +11,7 @@ CREATE TABLE runs (
 
     -- what is being evaluated
     dataset_id UUID NOT NULL,
-    dataset_version_id UUID NOT NULL REFERENCES dataset_versions(dataset_version_id),
+    dataset_version_id UUID NOT NULL,
     dataset_version TEXT NOT NULL,
     evaluation_profile_id TEXT NOT NULL,
     evaluation_profile_version TEXT NOT NULL,
@@ -58,7 +59,10 @@ CREATE TABLE runs (
     completed_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT uq_runs_id_dataset_version_id UNIQUE (id, dataset_version_id)
+    CONSTRAINT uq_runs_id_dataset_version_id UNIQUE (id, dataset_version_id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, run_key),
+    FOREIGN KEY (tenant_id, dataset_version_id) REFERENCES dataset_versions(tenant_id, dataset_version_id)
 );
 
 CREATE INDEX idx_runs_status ON runs(status);
@@ -67,11 +71,11 @@ CREATE INDEX idx_runs_status_created_at ON runs(status, created_at);
 
 CREATE INDEX idx_runs_status_updated_at ON runs(status, updated_at);
 
-CREATE INDEX idx_runs_gate_status ON runs(gate_status);
+CREATE INDEX idx_runs_gate_status ON runs(tenant_id, gate_status);
 
-CREATE INDEX idx_runs_dataset ON runs(dataset_id, dataset_version);
+CREATE INDEX idx_runs_dataset ON runs(tenant_id, dataset_id, dataset_version);
 
-CREATE INDEX idx_runs_dataset_version_id ON runs(dataset_version_id);
+CREATE INDEX idx_runs_dataset_version_id ON runs(tenant_id, dataset_version_id);
 
 CREATE INDEX idx_runs_coordinator_lease ON runs(coordinator_leased_until)
     WHERE status IN ('creating', 'pending', 'running', 'finalizing');

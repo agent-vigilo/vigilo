@@ -152,7 +152,7 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
                 format('run:%s:started', started_run.id),
                 jsonb_build_object('run_id', started_run.id)
             FROM started_run
-            ON CONFLICT (dedupe_key) DO NOTHING
+            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING id
         )
         SELECT
@@ -366,7 +366,7 @@ pub(super) async fn recover_expired_chunks(
               ON admission.run_id = recovered.run_id
              AND admission.run_shard = recovered.run_shard
              AND admission.state = 'open'
-            ON CONFLICT (dedupe_key) DO NOTHING
+            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING id
         )
         SELECT COUNT(*)::bigint
@@ -601,7 +601,7 @@ pub(super) async fn dispatch_run_window(
                 )
             FROM selected_chunks
             CROSS JOIN snapshot_input
-            ON CONFLICT (dedupe_key) DO NOTHING
+            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING id
         ),
         marked_chunks AS (

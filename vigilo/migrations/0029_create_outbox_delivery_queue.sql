@@ -1,5 +1,6 @@
 CREATE TABLE outbox_delivery_queue (
-    event_id UUID NOT NULL REFERENCES outbox_events(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    event_id UUID NOT NULL,
     claim_shard SMALLINT NOT NULL CHECK (claim_shard >= 0 AND claim_shard < 64),
 
     available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -11,7 +12,8 @@ CREATE TABLE outbox_delivery_queue (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT pk_outbox_delivery_queue PRIMARY KEY (claim_shard, event_id)
+    CONSTRAINT pk_outbox_delivery_queue PRIMARY KEY (claim_shard, event_id),
+    FOREIGN KEY (tenant_id, event_id) REFERENCES outbox_events(tenant_id, id) ON DELETE CASCADE
 ) PARTITION BY LIST (claim_shard);
 
 DO $$
@@ -42,8 +44,9 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    INSERT INTO outbox_delivery_queue (event_id, claim_shard)
+    INSERT INTO outbox_delivery_queue (tenant_id, event_id, claim_shard)
     VALUES (
+        NEW.tenant_id,
         NEW.id,
         (get_byte(uuid_send(NEW.id), 15)::int % 64)::smallint
     )

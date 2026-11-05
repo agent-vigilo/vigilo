@@ -2784,7 +2784,7 @@ async fn reserve_active_move_target_and_mark_copying(
 
 fn move_table_key_columns(table: &str) -> anyhow::Result<&'static [&'static str]> {
     match table {
-        "dataset_versions" => Ok(&["dataset_version_id"]),
+        "dataset_versions" => Ok(&["tenant_id", "dataset_version_id"]),
         "runs" => Ok(&["id"]),
         _ => SHARD_TABLES
             .iter()

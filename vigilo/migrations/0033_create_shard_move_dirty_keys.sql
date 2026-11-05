@@ -1,5 +1,6 @@
 CREATE TABLE shard_move_dirty_keys (
-    move_id UUID NOT NULL REFERENCES shard_move_captures(move_id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    move_id UUID NOT NULL,
     table_name TEXT NOT NULL CHECK (table_name IN (
         'run_chunks', 'run_snapshots', 'executions',
         'execution_attempts', 'execution_aggregates', 'evaluator_results',
@@ -9,7 +10,8 @@ CREATE TABLE shard_move_dirty_keys (
     change_version BIGINT NOT NULL DEFAULT 1 CHECK (change_version > 0),
     first_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (move_id, table_name, row_key)
+    PRIMARY KEY (move_id, table_name, row_key),
+    FOREIGN KEY (tenant_id, move_id) REFERENCES shard_move_captures(tenant_id, move_id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_shard_move_dirty_keys_replay

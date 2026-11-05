@@ -1,5 +1,6 @@
 CREATE TABLE shard_move_table_progress (
-    move_id UUID NOT NULL REFERENCES shard_move_operations(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    move_id UUID NOT NULL,
     table_name TEXT NOT NULL CHECK (table_name IN (
         'dataset_versions', 'runs',
         'run_chunks', 'run_snapshots', 'executions', 'execution_attempts',
@@ -13,7 +14,8 @@ CREATE TABLE shard_move_table_progress (
     copied_byte_count BIGINT NOT NULL CHECK (copied_byte_count > 0),
     last_page_checksum TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (move_id, table_name)
+    PRIMARY KEY (move_id, table_name),
+    FOREIGN KEY (tenant_id, move_id) REFERENCES shard_move_operations(tenant_id, id) ON DELETE CASCADE
 );
 
 COMMENT ON TABLE shard_move_table_progress IS

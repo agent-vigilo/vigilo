@@ -4,6 +4,9 @@ use vigilo::operations::{
     Config,
     Error,
     RunStatus,
+    UserClient,
+    UserConfig,
+    UserContext,
 };
 
 async fn status(client: &Client) -> Result<RunStatus, Error> {
@@ -16,6 +19,24 @@ fn main() {
     // Construction and future creation must work without Tokio, environment, or I/O.
     let client = Client::new(Config::new("postgresql://localhost:1/vigilo".into())).unwrap();
     drop(status(&client));
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let restricted = UserClient::new(UserConfig {
+            control: Config::new("postgresql://localhost:1/vigilo".into()),
+            database_role: "reader".into(),
+            execution_databases: Default::default(),
+        })
+        .unwrap();
+        let context = UserContext::new(
+            "0198f36d-f7db-7d90-998c-d60d498dd979".parse().unwrap(),
+            "0198f36d-f7db-7d90-998c-d60d498dd980".parse().unwrap(),
+        )
+        .unwrap();
+        drop(restricted.run_status(
+            context,
+            "0198f36d-f7db-7d90-998c-d60d498dd981".parse().unwrap(),
+        ));
+    });
     // Optional live contract: the host supplies a prepared database and existing run.
     if let Ok(url) = std::env::var("VIGILO_CONSUMER_DATABASE_URL") {
         let client = Client::new(Config::new(url)).unwrap();

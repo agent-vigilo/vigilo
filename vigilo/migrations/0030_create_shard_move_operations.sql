@@ -1,4 +1,5 @@
 CREATE TABLE shard_move_operations (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
@@ -29,7 +30,9 @@ CREATE TABLE shard_move_operations (
         CHECK (
             (claim_token IS NULL AND claimed_until IS NULL)
             OR (claim_token IS NOT NULL AND claimed_until IS NOT NULL)
-        )
+        ),
+    CONSTRAINT fk_shard_move_operations_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE,
+    UNIQUE (tenant_id, id)
 );
 
 CREATE UNIQUE INDEX uq_shard_move_operations_active_shard

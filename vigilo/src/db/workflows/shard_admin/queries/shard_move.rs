@@ -407,6 +407,7 @@ pub(in crate::db::workflows::shard_admin) async fn select_move_source_page(
                 SELECT 1 FROM runs run
                 WHERE run.id = $1::uuid
                   AND run.dataset_version_id = source_row.dataset_version_id
+                  AND run.tenant_id = source_row.tenant_id
             ) AND $2::smallint = $2"
         }
         "runs" => "source_row.id = $1::uuid AND $2::smallint = $2",
@@ -840,6 +841,7 @@ pub(in crate::db::workflows::shard_admin) async fn verify_prerequisite_rows(
         FROM expected
         JOIN {table} target_row
           ON target_row.{key_column} = (expected.row->>'{key_column}')::{key_cast}
+          AND target_row.tenant_id = (expected.row->>'tenant_id')::uuid
         "#
     );
     let target_rows = sqlx::query_scalar::<_, Value>(&sql)
@@ -944,7 +946,7 @@ where
             SELECT (to_jsonb(dv) - 'created_at' - 'updated_at')::text AS row_json
             FROM dataset_versions dv
             JOIN runs r
-              ON r.dataset_version_id = dv.dataset_version_id
+              ON r.dataset_version_id = dv.dataset_version_id AND r.tenant_id = dv.tenant_id
             WHERE r.id = $1::uuid
               AND $2::smallint = $2
             ORDER BY row_json

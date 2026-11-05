@@ -1,4 +1,5 @@
 CREATE TABLE run_chunk_settlements (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL,
     chunk_id UUID NOT NULL,
@@ -11,7 +12,8 @@ CREATE TABLE run_chunk_settlements (
     PRIMARY KEY (run_id, run_shard, chunk_id),
     FOREIGN KEY (run_id, run_shard, chunk_id)
         REFERENCES run_chunks(run_id, run_shard, id) ON DELETE CASCADE,
-    CHECK (octet_length(summary::text) <= 1048576)
+    CHECK (octet_length(summary::text) <= 1048576),
+    CONSTRAINT fk_run_chunk_settlements_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_chunk_settlements_order

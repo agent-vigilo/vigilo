@@ -89,6 +89,7 @@ mod tests {
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx snapshot tests"]
     async fn select_worker_run_snapshot_verifies_execution_plan(pool: PgPool) {
         let run_id = Uuid::now_v7();
+        crate::db::test_support::seed_run_owner(&pool, run_id).await;
         let dataset_id = Uuid::now_v7();
         let dataset_version_id = Uuid::now_v7();
         let profile = serde_yaml::from_str::<serde_json::Value>(include_str!(

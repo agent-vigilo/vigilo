@@ -30,8 +30,8 @@ BEGIN
         );
     END LOOP;
 
-    INSERT INTO shard_move_dirty_keys (move_id, table_name, row_key)
-    VALUES (active_move_id, logical_table, row_key)
+    INSERT INTO shard_move_dirty_keys (tenant_id, move_id, table_name, row_key)
+    VALUES ((source_row->>'tenant_id')::uuid, active_move_id, logical_table, row_key)
     ON CONFLICT ON CONSTRAINT shard_move_dirty_keys_pkey DO UPDATE
     SET change_version = shard_move_dirty_keys.change_version + 1,
         last_changed_at = now();

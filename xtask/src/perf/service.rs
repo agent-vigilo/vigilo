@@ -2027,6 +2027,11 @@ fn database_url(admin_url: &str, name: &str) -> Result<String> {
     let mut url = Url::parse(admin_url)?;
     require_loopback_url(&url)?;
     url.set_path(&format!("/{name}"));
+    // Fixture SQL uses the same explicit standalone identity as runtime pools.
+    url.query_pairs_mut().append_pair(
+        "options",
+        "-cvigilo.tenant_id=00000000-0000-0000-0000-000000000000",
+    );
     Ok(url.to_string())
 }
 
@@ -2395,7 +2400,7 @@ mod tests {
             database_url("postgres://user:secret@localhost:5432/admin", "owned")
                 .unwrap()
                 .as_str(),
-            "postgres://user:secret@localhost:5432/owned"
+            "postgres://user:secret@localhost:5432/owned?options=-cvigilo.tenant_id%3D00000000-0000-0000-0000-000000000000"
         );
         assert_eq!(
             redact_url("postgres://user:secret@localhost/db"),

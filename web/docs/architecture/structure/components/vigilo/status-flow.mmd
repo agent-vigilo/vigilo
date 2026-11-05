@@ -1,14 +1,18 @@
 flowchart TD
     Caller["CLI adapter or Rust host"] --> Operation["Read typed run status"]
-    Operation --> Run["Read control run"]
+    Operation --> Binding{"Database binding"}
+    Binding -->|standalone operator| Run["Read control run"]
+    Binding -->|restricted| Context["Fixed-role pool and transaction-local context"]
+    Context --> Run
     Run --> Exists{"Run exists?"}
     Exists -->|no| Missing["NotFound"]
     Exists -->|yes| Creating{"Creation-owned status?"}
     Creating -->|yes| Creation["Read control creation progress"]
     Creating -->|no| Routes["Resolve and validate shard routes"]
-    Routes --> Summaries["Read summaries grouped by database"]
+    Routes --> Summaries["Read summaries grouped by database<br/>restricted bindings own local transactions"]
     Summaries --> Progress["Combine summaries or use control fallback"]
     Creation --> Result["Typed snapshot and completeness"]
     Progress --> Result
-    Result --> Presentation["Caller formats output"]
-    Operation -. dependency failure .-> Failure["Typed dependency error"]
+    Result --> Cleanup["Finish read transactions and clear context"]
+    Cleanup --> Presentation["Caller formats output"]
+    Operation -. dependency failure .-> Failure["Rollback owned transaction<br/>Typed dependency error"]

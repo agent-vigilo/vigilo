@@ -1,0 +1,87 @@
+//! Transaction-local caller identity on fixed-credential connection pools.
+//!
+//! Identity is supplied by the trusted host, never decoded from workload data.
+//! Every protected statement uses the returned transaction. Setting all values
+//! together prevents inherited optional fields; SQLx rollback-on-drop also covers
+//! setup errors and cancelled futures. This module never switches database roles.
+
+use sqlx::{
+    PgPool,
+    Postgres,
+    Transaction,
+};
+use uuid::Uuid;
+
+/// Identity supplied by an authenticated embedding host.
+#[derive(Clone, Copy, Debug)]
+pub struct UserContext {
+    tenant_id: Uuid,
+    actor_id: Uuid,
+}
+impl UserContext {
+    /// Requires explicit, nonnil identifiers. Construct after authenticating the
+    /// caller; this validates shape, not the caller's authority to claim an identity.
+    pub fn new(tenant_id: Uuid, actor_id: Uuid) -> Result<Self, &'static str> {
+        if tenant_id.is_nil() || actor_id.is_nil() {
+            return Err("caller identifiers must be nonnil");
+        }
+        Ok(Self {
+            tenant_id,
+            actor_id,
+        })
+    }
+}
+
+/// Starts one transaction and installs all request settings in one SQL statement.
+/// No context-setting query is performed per row or per query in the transaction.
+pub(crate) async fn begin(
+    pool: &PgPool,
+    context: UserContext,
+    run_id: Uuid,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('vigilo.tenant_id',$1,true), set_config('vigilo.actor_id',$2,true), set_config('vigilo.run_id',$3,true)")
+        .bind(context.tenant_id.to_string()).bind(context.actor_id.to_string()).bind(run_id.to_string())
+        .execute(&mut *tx).await?;
+    Ok(tx)
+}
+
+/// Connection-time guard for a dedicated restricted credential domain. Policy
+/// contents belong to the deployment; this rejects obvious bypasses and any
+/// directly accessible unprotected table carrying ownership metadata.
+pub(crate) async fn validate_connection(
+    connection: &mut sqlx::PgConnection,
+    expected_role: &str,
+) -> Result<(), sqlx::Error> {
+    let valid: bool = sqlx::query_scalar(r#"
+        SELECT current_user = $1 AND NOT r.rolsuper AND NOT r.rolbypassrls
+          AND NOT r.rolcreaterole AND NOT r.rolcreatedb AND NOT r.rolreplication
+          AND EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid='runs'::regclass AND a.attname='tenant_id' AND NOT a.attisdropped)
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_class c JOIN pg_attribute a ON a.attrelid=c.oid
+            WHERE c.relkind IN ('r','p') AND a.attname='tenant_id' AND NOT a.attisdropped
+              AND (pg_has_role(current_user,c.relowner,'MEMBER') OR
+                   ((has_table_privilege(c.oid,'SELECT') OR has_table_privilege(c.oid,'INSERT') OR has_table_privilege(c.oid,'UPDATE') OR has_table_privilege(c.oid,'DELETE'))
+                    AND (NOT c.relrowsecurity OR NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid)))))
+        FROM pg_roles r WHERE r.rolname=current_user
+    "#).bind(expected_role).fetch_one(&mut *connection).await?;
+    if !valid {
+        return Err(sqlx::Error::Protocol(
+            "database role or row protection does not satisfy the operation boundary".into(),
+        ));
+    }
+    sqlx::query("SELECT set_config('vigilo.tenant_id','',false), set_config('vigilo.actor_id','',false), set_config('vigilo.run_id','',false)")
+        .execute(connection).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn absent_identity_is_not_standalone_or_a_wildcard() {
+        assert!(UserContext::new(Uuid::nil(), Uuid::now_v7()).is_err());
+        assert!(UserContext::new(Uuid::now_v7(), Uuid::nil()).is_err());
+        assert!(UserContext::new(Uuid::now_v7(), Uuid::now_v7()).is_ok());
+    }
+}

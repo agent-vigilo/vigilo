@@ -9,3 +9,8 @@ pub(crate) mod migrations;
 pub(crate) mod shard_write_fence;
 pub(crate) mod tables;
 pub(crate) mod workflows;
+
+pub(crate) mod scope;
+
+#[cfg(test)]
+pub(crate) mod test_support;

@@ -1,6 +1,7 @@
 -- Control-plane ownership and bounded file metadata only; no case payload rows.
 
 CREATE TABLE dataset_uploads (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     id UUID PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'staging' CHECK (status IN ('staging','finalizing','finalized','aborted','expired')),
     storage_alias TEXT NOT NULL CHECK (length(storage_alias) BETWEEN 1 AND 128),
@@ -17,7 +18,8 @@ CREATE TABLE dataset_uploads (
     cleaned_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK ((lease_owner IS NULL) = (leased_until IS NULL)),
-    CHECK ((status IN ('aborted','expired')) = (cleanup_after IS NOT NULL))
+    CHECK ((status IN ('aborted','expired')) = (cleanup_after IS NOT NULL)),
+    UNIQUE (tenant_id, id)
 );
 
 CREATE INDEX dataset_upload_cleanup ON dataset_uploads (cleanup_after, id)

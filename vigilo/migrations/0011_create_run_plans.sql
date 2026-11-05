@@ -1,6 +1,7 @@
 CREATE TABLE run_plans (
-    run_id UUID PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
-    dataset_upload_id UUID NOT NULL REFERENCES dataset_catalog(id),
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    run_id UUID PRIMARY KEY,
+    dataset_upload_id UUID NOT NULL,
     status TEXT NOT NULL DEFAULT 'preparing' CHECK (status IN ('preparing', 'ready')),
     storage_binding_hash TEXT NOT NULL,
     limits JSONB NOT NULL CHECK (octet_length(limits::text) <= 4096),
@@ -14,7 +15,9 @@ CREATE TABLE run_plans (
     manifest JSONB CHECK (octet_length(manifest::text) <= 8192),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CHECK ((status = 'ready') = (manifest IS NOT NULL))
+    CHECK ((status = 'ready') = (manifest IS NOT NULL)),
+    CONSTRAINT fk_run_plans_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, dataset_upload_id) REFERENCES dataset_catalog(tenant_id, id)
 );
 
 COMMENT ON TABLE run_plans IS

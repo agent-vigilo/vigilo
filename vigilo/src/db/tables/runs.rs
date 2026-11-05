@@ -85,7 +85,10 @@ pub(crate) async fn insert_run(db: &PgPool, draft: &RunDraft) -> anyhow::Result<
 }
 
 /// Finds a run by primary key.
-pub(crate) async fn select_run_by_id(db: &PgPool, id: Uuid) -> anyhow::Result<Option<Run>> {
+pub(crate) async fn select_run_by_id<'e, E>(db: E, id: Uuid) -> anyhow::Result<Option<Run>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let run = sqlx::query_as::<_, Run>(
         r#"
         SELECT
@@ -115,7 +118,7 @@ pub(crate) async fn select_run_by_id(db: &PgPool, id: Uuid) -> anyhow::Result<Op
             completed_at,
             updated_at
         FROM runs
-        WHERE id = $1::uuid
+        WHERE id = $1 AND tenant_id = NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid::uuid
         "#,
     )
     .bind(id)

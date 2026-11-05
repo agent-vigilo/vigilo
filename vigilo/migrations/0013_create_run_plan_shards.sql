@@ -1,4 +1,5 @@
 CREATE TABLE run_plan_shards (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL REFERENCES run_plans(run_id) ON DELETE CASCADE,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     database_alias TEXT NOT NULL REFERENCES database_placements(alias),
@@ -6,7 +7,8 @@ CREATE TABLE run_plan_shards (
     chunk_count INTEGER NOT NULL CHECK (chunk_count > 0),
     planned_chunk_hash TEXT NOT NULL,
     case_projection_hash TEXT NOT NULL,
-    PRIMARY KEY (run_id, run_shard)
+    PRIMARY KEY (run_id, run_shard),
+    CONSTRAINT fk_run_plan_shards_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 COMMENT ON TABLE run_plan_shards IS

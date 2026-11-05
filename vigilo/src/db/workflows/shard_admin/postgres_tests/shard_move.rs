@@ -4,6 +4,7 @@ use super::*;
 async fn move_table_progress_is_compact_and_idempotent(pool: PgPool) {
     sqlx::query(             "INSERT INTO database_placements (alias, database_url_env, role, status) VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')",         )         .execute(&pool)         .await         .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     let claim_token = Uuid::now_v7();
     let move_id = sqlx::query_scalar::<_, Uuid>(         r#"             INSERT INTO shard_move_operations (                 run_id, run_shard, source_database_alias,                 target_database_alias, starting_route_version,                 claim_token, claimed_until             )             VALUES (                 $1, 3, 'primary', 'shard_001', 1,                 $2, now() + interval '5 minutes'             )             RETURNING id             "#,     )     .bind(run_id)     .bind(claim_token)     .fetch_one(&pool)     .await     .unwrap();
     let first = MoveSourceRow {
@@ -158,6 +159,7 @@ async fn move_capture_coalesces_repeated_shard_mutations(pool: PgPool) {
 async fn abort_fences_a_prepared_move_before_copying_starts(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(             "INSERT INTO shard_placements (run_id, run_shard, database_alias, status) VALUES ($1, 3, 'primary', 'active')",         )         .bind(run_id)         .execute(&pool)         .await         .unwrap();
     let move_id = sqlx::query_scalar::<_, Uuid>(         r#"             INSERT INTO shard_move_operations (                 run_id, run_shard, source_database_alias,                 target_database_alias, starting_route_version             )             VALUES ($1, 3, 'primary', 'shard_001', 1)             RETURNING id             "#,     )     .bind(run_id)     .fetch_one(&pool)     .await     .unwrap();
     sqlx::query("INSERT INTO shard_move_captures (move_id, run_id, run_shard) VALUES ($1, $2, 3)")
@@ -187,6 +189,7 @@ async fn abort_fences_a_prepared_move_before_copying_starts(pool: PgPool) {
 async fn completed_route_retry_settles_ambiguous_cutover_state(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(             "INSERT INTO shard_placements (run_id, run_shard, database_alias, status, route_version) VALUES ($1, 3, 'shard_001', 'active', 5)",         )         .bind(run_id)         .execute(&pool)         .await         .unwrap();
     let move_id = sqlx::query_scalar::<_, Uuid>(         r#"             INSERT INTO shard_move_operations (                 run_id, run_shard, source_database_alias,                 target_database_alias, starting_route_version, phase             )             VALUES ($1, 3, 'primary', 'shard_001', 1, 'cutover')             RETURNING id             "#,     )     .bind(run_id)     .fetch_one(&pool)     .await     .unwrap();
     sqlx::query("INSERT INTO shard_move_captures (move_id, run_id, run_shard) VALUES ($1, $2, 3)")
@@ -218,6 +221,7 @@ async fn completed_route_retry_settles_ambiguous_cutover_state(pool: PgPool) {
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn move_to_current_database_is_not_treated_as_a_completed_retry(pool: PgPool) {
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(             "INSERT INTO shard_placements (run_id, run_shard, database_alias, status) VALUES ($1, 3, 'primary', 'active')",         )         .bind(run_id)         .execute(&pool)         .await         .unwrap();
     let database_router = database_router_with_isolated_control_pool(pool).await;
     let error = move_shard_placement(
@@ -244,6 +248,7 @@ async fn move_to_current_database_is_not_treated_as_a_completed_retry(pool: PgPo
 async fn move_activation_rejects_target_changed_outside_lifecycle_workflow(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(         r#"             INSERT INTO shard_placements (                 run_id,                 run_shard,                 database_alias,                 status,                 move_target_database_alias,                 route_version             )             VALUES ($1::uuid, 3, 'primary', 'moving', 'shard_001', 3)             "#,     )     .bind(run_id)     .execute(&pool)     .await     .unwrap();
     sqlx::query(         r#"             UPDATE database_placements             SET status = 'draining',                 updated_at = now()             WHERE alias = 'shard_001'             "#,     )     .execute(&pool)     .await     .unwrap();
     let error =
@@ -269,6 +274,7 @@ async fn move_activation_rejects_target_changed_outside_lifecycle_workflow(pool:
 async fn abort_draining_shard_move_restores_source_route_idempotently(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(         r#"             INSERT INTO shard_placements (                 run_id,                 run_shard,                 database_alias,                 status,                 move_target_database_alias,                 route_version             )             VALUES ($1::uuid, 3, 'primary', 'draining', 'shard_001', 2)             "#,     )     .bind(run_id)     .execute(&pool)     .await     .unwrap();
     let database_router = database_router_with_isolated_control_pool(pool).await;
     let first = abort_shard_move(
@@ -302,6 +308,7 @@ async fn abort_draining_shard_move_restores_source_route_idempotently(pool: PgPo
 async fn abort_moving_shard_move_restores_source_route(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(         r#"             INSERT INTO shard_placements (                 run_id,                 run_shard,                 database_alias,                 status,                 move_target_database_alias,                 route_version             )             VALUES ($1::uuid, 3, 'primary', 'moving', 'shard_001', 3)             "#,     )     .bind(run_id)     .execute(&pool)     .await     .unwrap();
     let database_router = database_router_with_isolated_control_pool(pool).await;
     let outcome = abort_shard_move(
@@ -324,6 +331,7 @@ async fn abort_moving_shard_move_restores_source_route(pool: PgPool) {
 async fn abort_rejects_route_that_completed_on_target(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(         r#"             INSERT INTO shard_placements (                 run_id,                 run_shard,                 database_alias,                 status,                 route_version             )             VALUES ($1::uuid, 3, 'shard_001', 'active', 4)             "#,     )     .bind(run_id)     .execute(&pool)     .await     .unwrap();
     let database_router = database_router_with_isolated_control_pool(pool).await;
     let error = abort_shard_move(
@@ -347,6 +355,7 @@ async fn abort_rejects_route_that_completed_on_target(pool: PgPool) {
 async fn stale_mover_cannot_restart_after_abort_advances_route_fence(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(         r#"             INSERT INTO shard_placements (                 run_id,                 run_shard,                 database_alias,                 status,                 move_target_database_alias,                 route_version             )             VALUES ($1::uuid, 3, 'primary', 'draining', 'shard_001', 2)             "#,     )     .bind(run_id)     .execute(&pool)     .await     .unwrap();
     let mut abort_tx = pool.begin().await.unwrap();
     crate::db::shard_write_fence::lock_exclusive(&mut abort_tx, run_id, 3)
@@ -401,6 +410,7 @@ async fn stale_mover_cannot_restart_after_abort_advances_route_fence(pool: PgPoo
 async fn stale_abort_cannot_cancel_newer_move_route_version(pool: PgPool) {
     sqlx::query(         r#"             INSERT INTO database_placements (alias, database_url_env, role, status)             VALUES ('shard_001', 'DATABASE_URL', 'shard', 'active')             "#,     )     .execute(&pool)     .await     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(         r#"             INSERT INTO shard_placements (                 run_id,                 run_shard,                 database_alias,                 status,                 move_target_database_alias,                 route_version             )             VALUES ($1::uuid, 3, 'primary', 'draining', 'shard_001', 2)             "#,     )     .bind(run_id)     .execute(&pool)     .await     .unwrap();
     let mut move_tx = pool.begin().await.unwrap();
     crate::db::shard_write_fence::lock_exclusive(&mut move_tx, run_id, 3)
@@ -598,6 +608,7 @@ async fn move_reclaim_increments_control_generation(pool: PgPool) {
     .await
     .unwrap();
     let run_id = Uuid::now_v7();
+    crate::db::test_support::seed_run_owner(&pool, run_id).await;
     sqlx::query(
         "INSERT INTO shard_placements (run_id, run_shard, database_alias, status) VALUES ($1, 3, 'primary', 'active')",
     )

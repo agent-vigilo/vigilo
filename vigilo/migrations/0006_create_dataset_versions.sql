@@ -1,9 +1,11 @@
 CREATE TABLE dataset_versions (
-    dataset_version_id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    dataset_version_id UUID NOT NULL,
     dataset_id UUID NOT NULL,
     dataset_version TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, dataset_version_id)
 );
 
 COMMENT ON TABLE dataset_versions IS

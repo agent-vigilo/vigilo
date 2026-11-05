@@ -1,4 +1,5 @@
 CREATE TABLE run_chunk_settlement_consumptions (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL,
     chunk_id UUID NOT NULL,
@@ -6,7 +7,8 @@ CREATE TABLE run_chunk_settlement_consumptions (
     consumed BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (run_id, run_shard, chunk_id),
     FOREIGN KEY (run_id, run_shard, chunk_id)
-        REFERENCES run_chunk_settlements(run_id, run_shard, chunk_id) ON DELETE CASCADE
+        REFERENCES run_chunk_settlements(run_id, run_shard, chunk_id) ON DELETE CASCADE,
+    CONSTRAINT fk_run_chunk_settlement_consumptions_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_pending_chunk_settlement_consumptions

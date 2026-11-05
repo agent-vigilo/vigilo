@@ -478,7 +478,7 @@ async fn activation_rechecks_published_shard_totals_before_installing_exact_rout
         .execute(&db)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO run_plan_shards SELECT run_id,127,database_alias,case_count,chunk_count,planned_chunk_hash,case_projection_hash FROM run_plan_shards WHERE run_id=$1 AND run_shard=0")
+    sqlx::query("INSERT INTO run_plan_shards(tenant_id,run_id,run_shard,database_alias,case_count,chunk_count,planned_chunk_hash,case_projection_hash) SELECT tenant_id,run_id,127,database_alias,case_count,chunk_count,planned_chunk_hash,case_projection_hash FROM run_plan_shards WHERE run_id=$1 AND run_shard=0")
         .bind(plan.run_id).execute(&db).await.unwrap();
     let error = admission::activate(&db, lease, &expected)
         .await

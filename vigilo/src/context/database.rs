@@ -333,7 +333,7 @@ impl DatabaseRouter {
                     self.acquire_timeout,
                     self.operation_timeout_config,
                 )
-                .connect(&self.uri)
+                .connect_with(standalone_connect_options(&self.uri)?)
                 .await
                 .map_err(|error| {
                     let message = format!("database connection failed: {error}");
@@ -1274,7 +1274,7 @@ impl PlacementPool {
                     acquire_timeout,
                     operation_timeout_config,
                 )
-                .connect(database_url)
+                .connect_with(standalone_connect_options(database_url)?)
                 .await
                 .map_err(|error| {
                     let message = format!("database placement {alias} connection failed: {error}");
@@ -1283,6 +1283,17 @@ impl PlacementPool {
             })
             .await
     }
+}
+
+/// Establish the standalone identity in PostgreSQL's startup packet, without
+/// adding a SQL exchange. Restricted request pools must not use this constructor.
+fn standalone_connect_options(uri: &str) -> Result<sqlx::postgres::PgConnectOptions, sqlx::Error> {
+    use std::str::FromStr;
+    Ok(sqlx::postgres::PgConnectOptions::from_str(uri)?.options([
+        ("vigilo.tenant_id", "00000000-0000-0000-0000-000000000000"),
+        ("vigilo.actor_id", ""),
+        ("vigilo.run_id", ""),
+    ]))
 }
 
 fn runtime_pool_options(
@@ -2499,6 +2510,7 @@ mod tests {
         database_alias: &str,
         status: &str,
     ) {
+        crate::db::test_support::seed_run_owner(db, run_id).await;
         sqlx::query(
             r#"
             INSERT INTO shard_placements (run_id, run_shard, database_alias, status)

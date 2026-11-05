@@ -1,4 +1,5 @@
 CREATE TABLE shard_placements (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     database_alias TEXT NOT NULL REFERENCES database_placements(alias),
@@ -17,7 +18,8 @@ CREATE TABLE shard_placements (
             AND move_target_database_alias IS NOT NULL
             AND move_target_database_alias <> database_alias
         )
-    )
+    ),
+    CONSTRAINT fk_shard_placements_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_shard_placements_database_alias_status

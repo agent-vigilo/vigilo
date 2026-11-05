@@ -357,6 +357,7 @@ mod tests {
         .unwrap();
 
         let run_id = Uuid::now_v7();
+        crate::db::test_support::seed_run_owner(&pool, run_id).await;
         sqlx::query(
             r#"
             INSERT INTO shard_placements (
@@ -434,6 +435,7 @@ mod tests {
         .await
         .unwrap();
         let run_id = Uuid::now_v7();
+        crate::db::test_support::seed_run_owner(&pool, run_id).await;
         sqlx::query(
             r#"
             INSERT INTO shard_placements (run_id, run_shard, database_alias, status)

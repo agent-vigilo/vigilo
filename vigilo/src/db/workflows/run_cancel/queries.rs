@@ -565,7 +565,7 @@ pub(super) async fn enqueue_cancelled_event(
                     'attempts_cancelled', $9::bigint
                 )
             )
-            ON CONFLICT (dedupe_key) DO NOTHING
+            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING 1
         )
         SELECT COUNT(*)::bigint

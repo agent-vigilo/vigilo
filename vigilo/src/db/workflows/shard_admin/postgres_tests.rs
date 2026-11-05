@@ -150,6 +150,7 @@ async fn seed_rebalance_operation(pool: &PgPool, item_count: usize) -> (Uuid, Ve
     let mut items = Vec::with_capacity(item_count);
     for sequence_no in 0..item_count {
         let run_id = Uuid::now_v7();
+        crate::db::test_support::seed_run_owner(pool, run_id).await;
         let run_shard = sequence_no as i16;
         sqlx::query(
             r#"

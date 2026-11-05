@@ -1,4 +1,5 @@
 CREATE TABLE run_shard_summaries (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     expected_execution_count INTEGER NOT NULL CHECK (expected_execution_count >= 0),
@@ -38,7 +39,8 @@ CREATE TABLE run_shard_summaries (
     CONSTRAINT fk_run_shard_summaries_snapshot
         FOREIGN KEY (run_id, run_shard)
         REFERENCES run_snapshots(run_id, run_shard)
-        ON DELETE CASCADE
+        ON DELETE CASCADE,
+    CONSTRAINT fk_run_shard_summaries_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_run_shard_summaries_run_status

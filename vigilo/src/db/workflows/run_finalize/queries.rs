@@ -287,7 +287,7 @@ pub(super) async fn finalize_claimed_run(
                     'errored_execution_count', f.errored_execution_count
                 )
             FROM finalized f
-            ON CONFLICT (dedupe_key) DO NOTHING
+            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING id
         )
         SELECT

@@ -1,7 +1,8 @@
 CREATE TABLE execution_attempts (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     id UUID NOT NULL DEFAULT gen_random_uuid(),
     execution_id UUID NOT NULL,
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
 
     attempt_no INTEGER NOT NULL CHECK (attempt_no > 0),
@@ -55,7 +56,8 @@ CREATE TABLE execution_attempts (
         FOREIGN KEY (run_id, run_shard, execution_id)
         REFERENCES executions(run_id, run_shard, id)
         ON DELETE CASCADE,
-    CONSTRAINT uq_execution_attempt_no UNIQUE (run_id, run_shard, execution_id, attempt_no)
+    CONSTRAINT uq_execution_attempt_no UNIQUE (run_id, run_shard, execution_id, attempt_no),
+    CONSTRAINT fk_execution_attempts_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 ) PARTITION BY LIST (run_shard);
 
 DO $$

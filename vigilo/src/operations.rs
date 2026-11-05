@@ -1,9 +1,11 @@
-//! Typed application operations for trusted standalone hosts.
+//! Typed application operations for trusted hosts.
 //!
 //! A client owns shared, lazy database pools. Operations reuse the same workflows
 //! as the CLI and return values rather than formatting output or installing process
-//! state. Construction does not connect to services. This surface assumes an
-//! authorized operator; it does not authenticate users or provide hosted isolation.
+//! state. Construction does not connect to services. The standalone client assumes
+//! an authorized operator. Restricted reads use explicit trusted caller context
+//! and fixed-role pools; authentication and database policy installation belong to
+//! the embedding host.
 
 pub(crate) mod status;
 use std::time::Duration;
@@ -151,3 +153,10 @@ mod tests {
         assert!(!error.to_string().contains("secret-not-a-url"));
     }
 }
+
+mod user;
+pub use user::{
+    UserClient,
+    UserConfig,
+    UserContext,
+};

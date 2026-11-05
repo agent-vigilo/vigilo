@@ -35,7 +35,7 @@ vigilo --help
 ```
 
 This crate installs the `vigilo` command, including coordinator and worker modes.
-It is an application, not a Rust library dependency.
+It also exposes typed operations for Rust hosts.
 
 ## Run Your First Evaluation
 

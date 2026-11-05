@@ -1,4 +1,5 @@
 CREATE TABLE evaluator_diagnostics (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     id UUID NOT NULL DEFAULT gen_random_uuid(),
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
@@ -16,7 +17,8 @@ CREATE TABLE evaluator_diagnostics (
         FOREIGN KEY (run_id, run_shard, evaluator_result_id)
         REFERENCES evaluator_results(run_id, run_shard, id) ON DELETE CASCADE,
     CONSTRAINT uq_evaluator_diagnostic_index
-        UNIQUE (run_id, run_shard, evaluator_result_id, diagnostic_index)
+        UNIQUE (run_id, run_shard, evaluator_result_id, diagnostic_index),
+    CONSTRAINT fk_evaluator_diagnostics_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 ) PARTITION BY LIST (run_shard);
 
 DO $$

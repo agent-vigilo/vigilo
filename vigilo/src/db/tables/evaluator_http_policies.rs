@@ -16,7 +16,7 @@ pub(crate) async fn load(db: &PgPool, ids: &[Uuid]) -> anyhow::Result<BTreeMap<U
         return Ok(BTreeMap::new());
     }
     let rows = sqlx::query_as::<_, (Uuid, String, String, String, Vec<String>)>(
-        "SELECT evaluator_id, uri, method, action::text, networks FROM evaluator_http_policies WHERE evaluator_id = ANY($1) ORDER BY evaluator_id, id LIMIT 4097"
+        "SELECT evaluator_id, uri, method, action::text, networks FROM evaluator_http_policies WHERE tenant_id = NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid AND evaluator_id = ANY($1) ORDER BY evaluator_id, id LIMIT 4097"
     ).bind(ids).fetch_all(db).await?;
     anyhow::ensure!(rows.len() <= 4096, "HTTP policy batch exceeds 4096 rules");
     let mut result = BTreeMap::<_, Vec<_>>::new();

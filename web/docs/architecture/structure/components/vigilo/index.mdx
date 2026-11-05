@@ -59,6 +59,12 @@ under the run creation lease. See
 
 ## Status read flow
 
+Restricted database reads use fixed credential bindings and transaction-local
+caller context. Connections are checked before serving reads; committing,
+rolling back, or dropping the transaction clears its context. Routing groups
+summary reads by database and never falls back to another credential binding.
+The embedding host supplies trusted identity and installs database access policy.
+
 <Mermaid value={statusFlow} />
 
 ## Related

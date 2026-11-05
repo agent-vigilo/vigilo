@@ -1,4 +1,5 @@
 CREATE TABLE evaluator_http_policies (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     evaluator_id UUID NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
     uri TEXT NOT NULL,
@@ -9,14 +10,14 @@ CREATE TABLE evaluator_http_policies (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT uq_evaluator_http_policies_evaluator_uri_action
-        UNIQUE (evaluator_id, uri, method, action)
+        UNIQUE (tenant_id, evaluator_id, uri, method, action)
 );
 
 CREATE INDEX idx_evaluator_http_policies_evaluator
-    ON evaluator_http_policies(evaluator_id);
+    ON evaluator_http_policies(tenant_id, evaluator_id);
 
 CREATE INDEX idx_evaluator_http_policies_action
-    ON evaluator_http_policies(action);
+    ON evaluator_http_policies(tenant_id, action);
 
 COMMENT ON TABLE evaluator_http_policies IS
     'Per-evaluator outbound HTTP URI policy rules used by the host runtime to allow or deny requests.';

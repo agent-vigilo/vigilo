@@ -129,7 +129,9 @@ cargo test -p vigilo --locked --features evaluator-http-services --test evaluato
 
 CI includes these transport tests in the end-to-end coverage report.
 
-After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:
+Use the database connection settings from `.github/workflows/build.yaml` for
+`DATABASE_URL`; direct fixture SQL needs the same explicit connection defaults as
+the runtime. Run every PostgreSQL-backed SQLx test with:
 
 ```bash
 cargo test -p vigilo --locked --lib -- --ignored --nocapture --test-threads=4
