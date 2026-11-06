@@ -73,3 +73,15 @@ The function has a fixed search path, schema-bound references, and no PUBLIC exe
 grant. Administrative deployments assign a non-login owner with schema usage and
 SELECT/UPDATE on control deliveries (and appropriate row-policy access), then grant
 execution explicitly. Claim permission does not grant direct caller table access.
+
+
+The control-delivery migration also defines `vigilo_claim_revocation_settlements(uuid)`.
+A supplied run ID narrows selection; NULL selects eligible runs. It claims at most
+16 revoked runs whose current revision is not settled and whose recorded delivery
+destinations all have matching revisions and quiescence acknowledgments. Live
+settlement leases are excluded. Claims use fresh tokens, 60-second leases and
+`SKIP LOCKED`; cleanup and its revision/token-fenced acknowledgment are separate.
+The function has schema-bound references, a fixed search path and no PUBLIC execute
+grant. Its administrative non-login owner needs schema usage, SELECT/UPDATE on runs,
+and SELECT on control deliveries, plus appropriate row-policy access. Callers need
+only an explicit execute grant for claiming, not direct table access.

@@ -202,23 +202,15 @@ async fn settle_revocations(
     run_id: Option<Uuid>,
 ) -> anyhow::Result<Vec<super::run_cancel::CancelRunOutcome>> {
     let pool = router.control().await?;
-    let runs: Vec<(Uuid,i64,Uuid)> = sqlx::query_as(r#"
-        WITH candidates AS (
-            SELECT r.id FROM runs r
-            WHERE ($1::uuid IS NULL OR r.id=$1) AND r.execution_control='revoked'
-              AND r.control_settled_revision<r.control_revision
-              AND (r.control_settlement_until IS NULL OR r.control_settlement_until<clock_timestamp())
-              AND NOT EXISTS(SELECT 1 FROM run_control_deliveries d WHERE d.tenant_id=r.tenant_id AND d.run_id=r.id AND (d.revision<>r.control_revision OR d.quiescent_at IS NULL))
-            ORDER BY r.updated_at,r.id LIMIT 16 FOR UPDATE SKIP LOCKED
-        ) UPDATE runs r SET control_settlement_token=gen_random_uuid(),control_settlement_until=clock_timestamp()+interval '60 seconds'
-        FROM candidates c WHERE r.id=c.id
-        RETURNING r.id,r.control_revision,r.control_settlement_token
-    "#).bind(run_id).fetch_all(pool).await?;
+    let runs: Vec<(Uuid, i64, Uuid)> =
+        sqlx::query_as("SELECT * FROM vigilo_claim_revocation_settlements($1)")
+            .bind(run_id)
+            .fetch_all(pool)
+            .await?;
     let outcomes = stream::iter(runs).map(|(run,revision,token)| async move {
         match super::run_cancel::cancel_run_routed(router,run).await {
             Ok(Some(outcome)) => {
-                sqlx::query("UPDATE runs SET control_settled_revision=$2,control_settlement_token=NULL,control_settlement_until=NULL WHERE id=$1 AND control_revision=$2 AND execution_control='revoked' AND control_settlement_token=$3")
-                    .bind(run).bind(revision).bind(token).execute(pool).await?;
+                acknowledge_settlement(pool, run, revision, token).await?;
                 Ok(Some(outcome))
             }
             outcome => {
@@ -237,6 +229,18 @@ async fn settle_revocations(
     }
 
     Ok(settled)
+}
+
+/// A stale cleanup owner cannot acknowledge a replacement claim or revision.
+async fn acknowledge_settlement(
+    pool: &PgPool,
+    run: Uuid,
+    revision: i64,
+    token: Uuid,
+) -> anyhow::Result<bool> {
+    let result = sqlx::query("UPDATE runs SET control_settled_revision=$2,control_settlement_token=NULL,control_settlement_until=NULL WHERE id=$1 AND control_revision=$2 AND execution_control='revoked' AND control_settlement_token=$3")
+        .bind(run).bind(revision).bind(token).execute(pool).await?;
+    Ok(result.rows_affected() == 1)
 }
 
 #[cfg(test)]

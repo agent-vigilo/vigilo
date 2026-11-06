@@ -55,3 +55,37 @@ $definition$, installation_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_claim_control_deliveries(UUID) FROM PUBLIC', installation_schema);
 END;
 $install$;
+
+-- Settlement eligibility depends on all delivery destinations, so install this
+-- shared run/control function only after the delivery table exists.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_claim_revocation_settlements(requested_run UUID)
+RETURNS TABLE(run_id UUID, revision BIGINT, claim_token UUID)
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+    WITH candidates AS (
+        SELECT r.id FROM %1$I.runs r
+        WHERE (requested_run IS NULL OR r.id=requested_run)
+          AND r.execution_control='revoked'
+          AND r.control_settled_revision<r.control_revision
+          AND (r.control_settlement_until IS NULL OR r.control_settlement_until<clock_timestamp())
+          AND NOT EXISTS (
+              SELECT 1 FROM %1$I.run_control_deliveries d
+              WHERE d.tenant_id=r.tenant_id AND d.run_id=r.id
+                AND (d.revision<>r.control_revision OR d.quiescent_at IS NULL)
+          )
+        ORDER BY r.updated_at,r.id LIMIT 16 FOR UPDATE SKIP LOCKED
+    )
+    UPDATE %1$I.runs r
+    SET control_settlement_token=gen_random_uuid(),control_settlement_until=clock_timestamp()+interval '60 seconds'
+    FROM candidates c WHERE r.id=c.id
+    RETURNING r.id,r.control_revision,r.control_settlement_token;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_claim_revocation_settlements(UUID) FROM PUBLIC', installation_schema);
+END;
+$install$;

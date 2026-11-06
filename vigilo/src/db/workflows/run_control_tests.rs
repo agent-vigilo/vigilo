@@ -375,3 +375,174 @@ async fn delivery_claim_batches_retry_timing_and_query_count_are_preserved(pool:
         .unwrap();
     assert_eq!(done, 0);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_settlement_claim_requires_grants_quiescence_and_rollback(pool: PgPool) {
+    let (run, _) = seed(&pool).await;
+    request(&pool, run, ExecutionControl::Revoked)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO database_placements(alias,role,status,database_url_env) VALUES('settlement-second','shard','active','DATABASE_URL')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO run_control_deliveries(tenant_id,run_id,database_alias,revision,execution_control) SELECT tenant_id,run_id,'settlement-second',revision,execution_control FROM run_control_deliveries WHERE run_id=$1")
+        .bind(run).execute(&pool).await.unwrap();
+    let caller = format!("settlement_caller_{}", Uuid::new_v4().simple());
+    let owner = format!("settlement_owner_{}", Uuid::new_v4().simple());
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!("CREATE ROLE {caller} NOLOGIN; GRANT USAGE ON SCHEMA public TO {caller}; SET LOCAL ROLE {caller};"))
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_revocation_settlements(NULL); RAISE EXCEPTION 'unexpected permission'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {owner} NOLOGIN; GRANT USAGE ON SCHEMA public TO {owner}; GRANT SELECT,UPDATE ON public.runs TO {owner}; GRANT SELECT ON public.run_control_deliveries TO {owner}; ALTER FUNCTION public.vigilo_claim_revocation_settlements(uuid) OWNER TO {owner}; GRANT EXECUTE ON FUNCTION public.vigilo_claim_revocation_settlements(uuid) TO {caller}; SET LOCAL ROLE {caller};"))
+        .execute(&mut *tx).await.unwrap();
+    let access:bool=sqlx::query_scalar("SELECT has_table_privilege(current_user,'runs','SELECT') OR has_table_privilege(current_user,'runs','UPDATE') OR has_table_privilege(current_user,'run_control_deliveries','SELECT')")
+        .fetch_one(&mut *tx).await.unwrap();
+    assert!(!access);
+    let blocked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_revocation_settlements($1)")
+            .bind(run)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(blocked, 0);
+    sqlx::query("UPDATE run_control_deliveries SET quiescent_at=clock_timestamp() WHERE run_id=$1 AND database_alias='primary'")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let partial: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_revocation_settlements($1)")
+            .bind(run)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(partial, 0, "every destination must be quiescent");
+    sqlx::query("UPDATE run_control_deliveries SET quiescent_at=clock_timestamp() WHERE run_id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let first: (Uuid, i64, Uuid) =
+        sqlx::query_as("SELECT * FROM vigilo_claim_revocation_settlements($1)")
+            .bind(run)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!((first.0, first.1), (run, 1));
+    let competing: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_revocation_settlements($1)")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(competing, 0);
+    tx.rollback().await.unwrap();
+    let retry: (Uuid, i64, Uuid) =
+        sqlx::query_as("SELECT * FROM vigilo_claim_revocation_settlements($1)")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_ne!(first.2, retry.2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn settlement_claim_preserves_batch_revision_lease_and_query_budgets(pool: PgPool) {
+    let mut ids = Vec::new();
+    for _ in 0..18 {
+        let (run, _) = seed(&pool).await;
+        request(&pool, run, ExecutionControl::Revoked)
+            .await
+            .unwrap();
+        ids.push(run);
+    }
+    let blocked: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_revocation_settlements(NULL)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(blocked, 0);
+    sqlx::query("UPDATE run_control_deliveries SET quiescent_at=clock_timestamp(),revision=2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let stale: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_revocation_settlements(NULL)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stale, 0);
+    sqlx::query("UPDATE run_control_deliveries SET revision=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let wrong: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_revocation_settlements($1)")
+            .bind(Uuid::now_v7())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(wrong, 0);
+    let (first, queries) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        sqlx::query_as::<_, (Uuid, i64, Uuid)>(
+            "SELECT * FROM vigilo_claim_revocation_settlements(NULL)",
+        )
+        .fetch_all(&pool),
+    )
+    .await;
+    let first = first.unwrap();
+    assert_eq!(queries.len(), 1, "{queries:#?}");
+    assert_eq!(first.len(), 16);
+    let second: Vec<(Uuid, i64, Uuid)> =
+        sqlx::query_as("SELECT * FROM vigilo_claim_revocation_settlements(NULL)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(second.len(), 2);
+    let actual = first
+        .iter()
+        .chain(&second)
+        .map(|r| r.0)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, ids.into_iter().collect());
+    let live: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_revocation_settlements(NULL)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(live, 0);
+    let old = first[0];
+    sqlx::query("UPDATE runs SET control_settlement_until=clock_timestamp()-interval '1 second' WHERE id=$1")
+        .bind(old.0).execute(&pool).await.unwrap();
+    let retry: (Uuid, i64, Uuid) =
+        sqlx::query_as("SELECT * FROM vigilo_claim_revocation_settlements($1)")
+            .bind(old.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_ne!(old.2, retry.2);
+    assert!(
+        !acknowledge_settlement(&pool, old.0, old.1, old.2)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !acknowledge_settlement(&pool, retry.0, retry.1 + 1, retry.2)
+            .await
+            .unwrap()
+    );
+    assert!(
+        acknowledge_settlement(&pool, retry.0, retry.1, retry.2)
+            .await
+            .unwrap()
+    );
+    let settled: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_revocation_settlements($1)")
+            .bind(retry.0)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(settled, 0);
+}
