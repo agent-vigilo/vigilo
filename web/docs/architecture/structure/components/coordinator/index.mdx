@@ -136,6 +136,14 @@ also use restricted functions, returning aliases or aggregate counts rather than
 work rows. Each read uses one database call. Exact backlog counts retain their
 existing scan cost and filters.
 
+Dispatch binds transaction-local work identity from the restricted cursor claim's
+result in the same SQL statement. It clears caller identity and keeps the original
+cursor lock through snapshot preparation and cursor advancement. Follow-up SQL
+remains in Rust workflows; scoped table grants and row policies support these
+writes on the fixed scheduler connection. Commit, rollback and cancellation end
+the transaction-local scope. Database policy semantics belong to the trusted host;
+context values alone do not establish permission to select arbitrary work.
+
 ## Related
 
 - [Structure overview](../..)

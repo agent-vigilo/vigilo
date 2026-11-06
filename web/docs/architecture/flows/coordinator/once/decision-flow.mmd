@@ -22,7 +22,7 @@ flowchart TD
     Recover[Restricted expired-lease discovery and movement locks; recheck ownership and recover]
     RecoveryIsolated[Classify failure, count it, and skip alias]
     DispatchClaim{Restricted cursor claim returned a route?}
-    DispatchRun[Start run if needed and enqueue shard chunk window]
+    DispatchRun[Bind claimed scope; retain cursor lock through follow-up writes]
     DispatchIsolated[Leave cursor open and exclude alias for this pass]
     FinalizeCandidate{Restricted discovery finds candidate within budget?}
     ReadSummaries[Read candidate summaries in one batch per database]

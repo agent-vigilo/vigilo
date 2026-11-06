@@ -24,14 +24,27 @@ pub(crate) async fn select_next_dispatch_route(
 }
 
 /// Claims the next control cursor and keeps its transaction open through the
-/// routed execution write.
+/// routed execution write. The same statement installs transaction-local identity
+/// from the claimed row and clears caller identity before follow-up control SQL.
 pub(crate) async fn claim_next_dispatch_route(
     db: &PgPool,
     excluded_database_aliases: &[String],
 ) -> anyhow::Result<Option<ClaimedDispatchRoute>> {
     let mut control_tx = db.begin().await?;
     let route =
-        sqlx::query_as::<_, DispatchRoute>("SELECT * FROM vigilo_claim_dispatch($1::text[])")
+        sqlx::query_as::<_, DispatchRoute>(
+            // Bind only the authoritative claim result, after the SECURITY DEFINER
+            // function returns. Keep context and the cursor lock on this transaction;
+            // no role switch or separate context-setting round trip is needed.
+            r#"WITH claimed AS MATERIALIZED (
+                SELECT * FROM vigilo_claim_dispatch($1::text[])
+            )
+            SELECT claimed.*,
+                   set_config('vigilo.tenant_id',tenant_id::text,true) IS NOT NULL AS tenant_scope_bound,
+                   set_config('vigilo.run_id',run_id::text,true) IS NOT NULL AS run_scope_bound,
+                   set_config('vigilo.actor_id','',true) IS NOT NULL AS actor_scope_cleared
+            FROM claimed"#,
+        )
             .bind(excluded_database_aliases)
             .fetch_optional(&mut *control_tx)
             .await?;

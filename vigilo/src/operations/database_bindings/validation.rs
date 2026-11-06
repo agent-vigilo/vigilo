@@ -3,6 +3,8 @@
 //! Catalog reads are batched per connection, not performed per work item. The
 //! deployment owns policy semantics; these guards reject bypass roles, unsafe
 //! function definitions/grants and accessible work relations without row policies.
+//! Scheduler follow-up work may use protected tables on its claimed transaction;
+//! discovery still uses the restricted functions. Policy semantics belong to the host.
 
 use std::time::Duration;
 
@@ -119,7 +121,8 @@ SELECT
          OR (($5 AND c.relname<>'database_placements' OR EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='tenant_id' AND NOT a.attisdropped))
              AND (has_any_column_privilege(c.oid,'SELECT') OR has_any_column_privilege(c.oid,'INSERT')
                   OR has_any_column_privilege(c.oid,'UPDATE') OR has_table_privilege(c.oid,'DELETE'))
-             AND ($5 OR NOT c.relrowsecurity OR NOT EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid)))))
+             AND (($5 AND NOT EXISTS(SELECT 1 FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attname='tenant_id' AND NOT a.attisdropped))
+                  OR NOT c.relrowsecurity OR NOT EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid)))))
     AND NOT EXISTS(
        SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
        WHERE n.nspname=$2 AND c.relkind IN ('v','m','f')

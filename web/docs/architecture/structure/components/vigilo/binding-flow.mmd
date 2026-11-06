@@ -3,7 +3,7 @@ flowchart TD
     Config -->|No| Reject[Reject binding]
     Config -->|Yes| Pools[Shared lazy pools: scheduler, execution, user]
     Pools --> Connect[Open physical connection]
-    Connect --> Guard{Login, grants, protections and installed functions valid?}
+    Connect --> Guard{Fixed login, scoped table grants, row protections and functions valid?}
     Guard -->|No| Close[Discard connection]
     Guard -->|Yes| Ready[Connection available to its authority]
     Pools --> Client[UserClient shares user pools]
