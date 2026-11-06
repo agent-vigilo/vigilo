@@ -25,7 +25,7 @@ flowchart TD
     RecoveryIsolated[Count placement failure and continue aliases]
     Dispatch[Claim cursor through restricted function and dispatch its window]
     DispatchIsolated[Leave cursor open and exclude failed alias]
-    Finalize[Read summaries by database and finalize exact valid seals]
+    Finalize[Restricted candidate discovery and lease claim; finalize exact valid seals]
     FinalizeIsolated[Defer candidate; inspect next run]
     Aggregate[Discover ready shards with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}

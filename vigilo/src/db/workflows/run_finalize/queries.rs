@@ -15,31 +15,7 @@ pub(crate) async fn select_next_finalization_candidate(
     excluded_run_ids: &[Uuid],
 ) -> anyhow::Result<Option<ClaimedRunForFinalization>> {
     let candidate = sqlx::query_as::<_, ClaimedRunForFinalization>(
-        r#"
-        SELECT r.id, r.run_key, r.aggregation_policy_hash
-        FROM runs r
-        WHERE r.status IN ('running'::run_status, 'finalizing'::run_status)
-          AND r.execution_control = 'enabled'
-          AND (
-              r.status <> 'finalizing'::run_status
-              OR r.coordinator_leased_until IS NULL
-              OR r.coordinator_leased_until < now()
-          )
-          AND EXISTS (
-              SELECT 1
-              FROM run_shard_dispatch_cursors c
-              WHERE c.run_id = r.id
-          )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM run_shard_dispatch_cursors c
-              WHERE c.run_id = r.id
-                AND c.status = 'open'
-          )
-          AND NOT (r.id = ANY($1::uuid[]))
-        ORDER BY COALESCE(r.coordinator_heartbeat_at, r.updated_at) ASC, r.id ASC
-        LIMIT 1
-        "#,
+        "SELECT id, run_key, aggregation_policy_hash FROM vigilo_next_finalization_candidate($1)",
     )
     .bind(excluded_run_ids)
     .fetch_optional(db)
@@ -130,30 +106,7 @@ pub(crate) async fn claim_finalization_candidate(
     lease_seconds: i32,
 ) -> anyhow::Result<Option<ClaimedRunForFinalization>> {
     let claimed = sqlx::query_as::<_, ClaimedRunForFinalization>(
-        r#"
-        WITH candidate AS (
-            SELECT r.id
-            FROM runs r
-            WHERE r.id = $1::uuid
-              AND r.status IN ('running'::run_status, 'finalizing'::run_status)
-              AND r.execution_control = 'enabled'
-              AND (
-                  r.status <> 'finalizing'::run_status
-                  OR r.coordinator_leased_until IS NULL
-                  OR r.coordinator_leased_until < now()
-              )
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE runs r
-        SET status = 'finalizing'::run_status,
-            coordinator_id = $2,
-            coordinator_leased_until = now() + ($3::int * interval '1 second'),
-            coordinator_heartbeat_at = now(),
-            updated_at = now()
-        FROM candidate
-        WHERE r.id = candidate.id
-        RETURNING r.id, r.run_key, r.aggregation_policy_hash
-        "#,
+        "SELECT id, run_key, aggregation_policy_hash FROM vigilo_claim_finalization($1,$2,$3)",
     )
     .bind(run_id)
     .bind(coordinator_id)

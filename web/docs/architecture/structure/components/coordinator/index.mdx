@@ -111,6 +111,13 @@ Preparation-only runs remain held; interrupted dataset ingestion and unpublished
 plan preparation are resumed by their callers. See
 [Run Preparation](/docs/architecture/case-storage/run-preparation).
 
+Finalization candidate discovery and lease claiming use restricted database
+functions. Discovery preserves drained-cursor eligibility, heartbeat ordering and
+per-cycle exclusions. After routed summaries are checked, claiming rechecks run
+state, execution control and lease expiry, skipping locked runs. Each operation
+uses one database call; score calculation and fenced final result writes remain
+separate.
+
 ## Related
 
 - [Structure overview](../..)

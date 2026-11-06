@@ -204,3 +204,48 @@ COMMENT ON COLUMN runs.completed_at IS
 
 COMMENT ON COLUMN runs.updated_at IS
     'Timestamp of the last update to the run record.';
+
+-- Restricted scheduler entry point; relations bind to the installation schema.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_claim_finalization(p_run_id uuid, p_coordinator_id uuid, p_lease_seconds integer)
+RETURNS TABLE(id uuid, run_key text, aggregation_policy_hash text)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+    IF p_run_id IS NULL OR p_coordinator_id IS NULL OR p_lease_seconds IS NULL
+       OR p_lease_seconds < 1 OR p_lease_seconds > 86400 THEN
+        RAISE EXCEPTION 'invalid finalization claim parameters' USING ERRCODE = '22023';
+    END IF;
+    RETURN QUERY
+WITH candidate AS (
+            SELECT r.id
+            FROM %1$I.runs r
+            WHERE r.id = p_run_id::uuid
+              AND r.status IN ('running'::%1$I.run_status, 'finalizing'::%1$I.run_status)
+              AND r.execution_control = 'enabled'
+              AND (
+                  r.status <> 'finalizing'::%1$I.run_status
+                  OR r.coordinator_leased_until IS NULL
+                  OR r.coordinator_leased_until < now()
+              )
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE %1$I.runs r
+        SET status = 'finalizing'::%1$I.run_status,
+            coordinator_id = p_coordinator_id,
+            coordinator_leased_until = now() + (p_lease_seconds::int * interval '1 second'),
+            coordinator_heartbeat_at = now(),
+            updated_at = now()
+        FROM candidate
+        WHERE r.id = candidate.id
+        RETURNING r.id, r.run_key, r.aggregation_policy_hash;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_claim_finalization(uuid,uuid,integer) FROM PUBLIC', installation_schema);
+END;
+$install$;

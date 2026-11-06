@@ -94,3 +94,14 @@ The function binds its table to the installation schema, fixes its search path,
 and denies public execution. An explicitly granted caller needs no table access
 for discovery; a limited non-login owner needs SELECT on `run_chunks`.
 Recovery writes and terminal settlement require their own authority.
+
+Finalization uses two restricted scheduler functions:
+`vigilo_next_finalization_candidate(uuid[])` in the dispatch-cursor migration
+selects one eligible run, preserving heartbeat ordering and cycle exclusions;
+`vigilo_claim_finalization(uuid,uuid,integer)` in the run migration acquires its
+coordinator lease with `SKIP LOCKED`. Each uses one client statement.
+Both bind relations to the installation schema, fix their search path, validate
+bounded inputs, and deny public execution. The non-login discovery owner needs
+SELECT on runs and dispatch cursors; the claim owner needs SELECT and UPDATE on
+runs. Explicit execute grants do not give callers table access. Summary reads,
+fairness updates, backlog metrics and final result writes retain separate authority.

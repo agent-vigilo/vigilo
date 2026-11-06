@@ -552,3 +552,194 @@ async fn finalization_requires_exact_control_membership_and_frozen_plan(pool: Pg
     );
     assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.completed'").bind(run).fetch_one(&pool).await.unwrap(),1);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_finalization_claims_preserve_permissions_and_locks(pool: PgPool) {
+    let run = Uuid::now_v7();
+    let coordinator = Uuid::now_v7();
+    seed_run(&pool, run, Uuid::now_v7(), Uuid::now_v7(), "running").await;
+    seed_dispatch_cursor(&pool, run, 0, "drained").await;
+    let role = format!("finalization_caller_{}", Uuid::new_v4().simple());
+    let owner = format!("finalization_owner_{}", Uuid::new_v4().simple());
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DO $$ BEGIN
+        BEGIN PERFORM * FROM public.vigilo_next_finalization_candidate(ARRAY[]::uuid[]); RAISE EXCEPTION 'unexpected discovery access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+        BEGIN PERFORM * FROM public.vigilo_claim_finalization(gen_random_uuid(),gen_random_uuid(),60); RAISE EXCEPTION 'unexpected claim access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END;
+        END $$;").execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {owner} NOLOGIN;
+        GRANT USAGE ON SCHEMA public TO {owner};
+        GRANT SELECT ON public.runs, public.run_shard_dispatch_cursors TO {owner};
+        GRANT UPDATE ON public.runs TO {owner};
+        ALTER FUNCTION public.vigilo_next_finalization_candidate(uuid[]) OWNER TO {owner};
+        ALTER FUNCTION public.vigilo_claim_finalization(uuid,uuid,integer) OWNER TO {owner};
+        GRANT EXECUTE ON FUNCTION public.vigilo_next_finalization_candidate(uuid[]), public.vigilo_claim_finalization(uuid,uuid,integer) TO {role};
+        SET LOCAL ROLE {role};")).execute(&mut *tx).await.unwrap();
+    let access: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.runs','SELECT') OR has_table_privilege(current_user,'public.runs','UPDATE') OR has_table_privilege(current_user,'public.run_shard_dispatch_cursors','SELECT')")
+        .fetch_one(&mut *tx).await.unwrap();
+    assert!(!access);
+    let (selected, calls) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM public.vigilo_next_finalization_candidate(ARRAY[]::uuid[])",
+        )
+        .fetch_one(&mut *tx),
+    )
+    .await;
+    assert_eq!(selected.unwrap(), run);
+    assert_eq!(calls.len(), 1);
+    let (claimed, calls) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM public.vigilo_claim_finalization($1,$2,60)")
+            .bind(run)
+            .bind(coordinator)
+            .fetch_one(&mut *tx),
+    )
+    .await;
+    assert_eq!(claimed.unwrap(), run);
+    assert_eq!(calls.len(), 1);
+    assert!(
+        claim_finalization_candidate(&pool, run, Uuid::now_v7(), 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tx.rollback().await.unwrap();
+    // Rollback removes the lease as well as the role/grant fixture.
+    assert!(
+        claim_finalization_candidate(&pool, run, coordinator, 60)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        claim_finalization_candidate(&pool, run, Uuid::now_v7(), 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        select_next_finalization_candidate(&pool, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    set_finalization_lease(&pool, run, coordinator, "-1 second").await;
+    assert_eq!(
+        select_next_finalization_candidate(&pool, &[])
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        run
+    );
+    let replacement = Uuid::now_v7();
+    assert!(
+        claim_finalization_candidate(&pool, run, replacement, 60)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let actual: Uuid = sqlx::query_scalar("SELECT coordinator_id FROM runs WHERE id=$1")
+        .bind(run)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(actual, replacement);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn finalization_functions_recheck_control_and_reject_invalid_arguments(pool: PgPool) {
+    let run = Uuid::now_v7();
+    seed_run(&pool, run, Uuid::now_v7(), Uuid::now_v7(), "running").await;
+    assert!(
+        select_next_finalization_candidate(&pool, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    seed_dispatch_cursor(&pool, run, 0, "open").await;
+    assert!(
+        select_next_finalization_candidate(&pool, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sqlx::query("UPDATE run_shard_dispatch_cursors SET status='drained' WHERE run_id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        select_next_finalization_candidate(&pool, &[run])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        select_next_finalization_candidate(&pool, &[])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for control in ["paused", "revoked"] {
+        sqlx::query("UPDATE runs SET execution_control=$2::execution_control WHERE id=$1")
+            .bind(run)
+            .bind(control)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            select_next_finalization_candidate(&pool, &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            claim_finalization_candidate(&pool, run, Uuid::now_v7(), 60)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    sqlx::query("UPDATE runs SET execution_control='enabled' WHERE id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Dispatch's lifecycle share lock must not stall another coordinator.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM runs WHERE id=$1 FOR SHARE")
+        .bind(run)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    assert!(
+        claim_finalization_candidate(&pool, run, Uuid::now_v7(), 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tx.rollback().await.unwrap();
+    for sql in [
+        "SELECT * FROM vigilo_next_finalization_candidate(NULL)",
+        "SELECT * FROM vigilo_next_finalization_candidate(ARRAY[NULL]::uuid[])",
+        "SELECT * FROM vigilo_next_finalization_candidate(array_fill(gen_random_uuid(),ARRAY[100001]))",
+        "SELECT * FROM vigilo_claim_finalization(NULL,gen_random_uuid(),60)",
+        "SELECT * FROM vigilo_claim_finalization(gen_random_uuid(),NULL,60)",
+        "SELECT * FROM vigilo_claim_finalization(gen_random_uuid(),gen_random_uuid(),NULL)",
+        "SELECT * FROM vigilo_claim_finalization(gen_random_uuid(),gen_random_uuid(),0)",
+        "SELECT * FROM vigilo_claim_finalization(gen_random_uuid(),gen_random_uuid(),86401)",
+    ] {
+        let error = sqlx::query(sql).execute(&pool).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("22023")
+        );
+    }
+}

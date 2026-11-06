@@ -24,10 +24,10 @@ flowchart TD
     DispatchClaim{Restricted cursor claim returned a route?}
     DispatchRun[Start run if needed and enqueue shard chunk window]
     DispatchIsolated[Leave cursor open and exclude alias for this pass]
-    FinalizeCandidate{Next finalization candidate within budget?}
+    FinalizeCandidate{Restricted discovery finds candidate within budget?}
     ReadSummaries[Read candidate summaries in one batch per database]
     FinalizeClaim{Candidate has exact valid seals?}
-    FinalizeRun[Roll up counts, set gate, and enqueue completion event]
+    FinalizeRun[Restricted lease claim; roll up counts, set gate, and enqueue completion event]
     FinalizeIsolated[Defer run and retain healthy summary reads]
     Aggregate[Discover ready shards with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}

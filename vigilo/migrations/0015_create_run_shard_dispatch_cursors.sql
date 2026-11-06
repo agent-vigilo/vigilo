@@ -99,3 +99,49 @@ $definition$, installation_schema);
         'Claims at most one eligible dispatch cursor until the caller transaction ends. Explicit execute grant required; does not grant table access.');
 END;
 $install$;
+
+-- Restricted scheduler entry point; relations bind to the installation schema.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_next_finalization_candidate(p_excluded uuid[])
+RETURNS TABLE(id uuid, run_key text, aggregation_policy_hash text)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+    IF p_excluded IS NULL OR cardinality(p_excluded) > 100000
+       OR array_ndims(p_excluded) > 1 OR array_position(p_excluded, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'invalid excluded run list' USING ERRCODE = '22023';
+    END IF;
+    RETURN QUERY
+SELECT r.id, r.run_key, r.aggregation_policy_hash
+        FROM %1$I.runs r
+        WHERE r.status IN ('running'::%1$I.run_status, 'finalizing'::%1$I.run_status)
+          AND r.execution_control = 'enabled'
+          AND (
+              r.status <> 'finalizing'::%1$I.run_status
+              OR r.coordinator_leased_until IS NULL
+              OR r.coordinator_leased_until < now()
+          )
+          AND EXISTS (
+              SELECT 1
+              FROM %1$I.run_shard_dispatch_cursors c
+              WHERE c.run_id = r.id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM %1$I.run_shard_dispatch_cursors c
+              WHERE c.run_id = r.id
+                AND c.status = 'open'
+          )
+          AND NOT (r.id = ANY(p_excluded::uuid[]))
+        ORDER BY COALESCE(r.coordinator_heartbeat_at, r.updated_at) ASC, r.id ASC
+        LIMIT 1;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_next_finalization_candidate(uuid[]) FROM PUBLIC', installation_schema);
+END;
+$install$;
