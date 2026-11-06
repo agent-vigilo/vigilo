@@ -31,14 +31,15 @@ sequenceDiagram
         Creator-->>Caller: Creating, plan ready, execution held
     else Execution requested
         Creator->>Control: Accept exact verified manifest under run lock
-        Creator->>Control: Claim creation authority for admission
+        Creator->>Control: Claim creation authority and retain returned work identity
+        Note over Creator,Local: Bind claimed identity in each database transaction; clear caller identity
         Creator->>Objects: Recovery reads roots and gate counts under its lease
         Note over Creator,Objects: Foreground creation reuses already verified roots
         loop Bounded chunk pages
             Creator->>Objects: Read verified ordered chunk page
             loop Bounded placement operations
                 Creator->>Control: Resolve current placement serviceability
-                Creator->>Local: Lock shard fences in order, batch snapshots and chunks
+                Creator->>Local: Bind identity, lock shard fences in order, batch snapshots and chunks
                 Local-->>Creator: Commit exact replayable metadata
             end
             Creator->>Control: Acknowledge contiguous admission progress
@@ -49,7 +50,7 @@ sequenceDiagram
             Creator->>Creator: Fold and compare each shard identity independently
         end
         Creator->>Control: Read shard totals, hashes and aliases together
-        Creator->>Control: Fenced activation, publish routes and cursors and release lease atomically
+        Creator->>Control: Restricted placement lock; fenced activation, publish routes and cursors and release lease atomically
         Creator->>Control: Read current status, error and progress in one snapshot
         Creator-->>Caller: Current status and progress
     end

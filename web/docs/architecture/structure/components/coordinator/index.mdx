@@ -105,11 +105,17 @@ bounds describe work admission, not guaranteed throughput or a completion deadli
 database capacity, contention, payload size, and other cycle work still matter.
 
 Creation recovery claims accepted ready plans with execution enabled before reading
-immutable roots and gate counts through the storage adapter. It resumes compact
+protected plan details, immutable roots and gate counts through the storage adapter.
+The claimed work identity scopes each admission transaction on the control and
+execution databases without changing connection roles. It resumes compact
 execution metadata admission and activates only after exact placement verification.
 Preparation-only runs remain held; interrupted dataset ingestion and unpublished
 plan preparation are resumed by their callers. See
 [Run Preparation](/docs/architecture/case-storage/run-preparation).
+
+Placement activation locks each target catalog row through a restricted database
+function. The lock lasts through activation, while the caller retains no catalog
+update privilege. Role/status validation and route writes remain in Rust.
 
 Finalization candidate discovery and lease claiming use restricted database
 functions. Discovery preserves drained-cursor eligibility, heartbeat ordering and

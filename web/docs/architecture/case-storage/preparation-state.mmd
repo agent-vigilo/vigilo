@@ -4,9 +4,9 @@ stateDiagram-v2
     Preparing --> Ready: Verified manifest published and lease released
     Ready --> Ready: Preparation-only run held
     Ready --> Accepted: Exact verified manifest accepted
-    Accepted --> Admitting: Creation lease claimed
+    Accepted --> Admitting: Creation lease and work identity claimed
     Admitting --> Accepted: Deferred work or errors yield lease
-    Admitting --> Admitting: Replay bounded placement commits and acknowledge pages
+    Admitting --> Admitting: Scoped bounded placement commits and fenced checkpoints
     Admitting --> Failed: Immutable seed conflict
     Failed --> [*]: No dispatch
     Admitting --> Pending: Exact local coverage, fenced activation and lease release

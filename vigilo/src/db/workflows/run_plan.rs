@@ -51,9 +51,23 @@ pub(crate) struct Plan {
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Lease {
+    pub tenant_id: Uuid,
     pub run_id: Uuid,
     pub owner: Uuid,
     pub generation: i64,
+}
+impl Lease {
+    /// Bind claimed ownership before the lock statement starts. The following
+    /// generation/expiry check remains separate so it observes post-wait time.
+    async fn lock(self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+        let sql = format!(
+            "{}SELECT id FROM runs WHERE id='{}'::uuid FOR UPDATE",
+            crate::db::scope::system_settings(self.tenant_id, self.run_id),
+            self.run_id
+        );
+        sqlx::Executor::fetch_one(&mut **tx, sql.as_str()).await?;
+        Ok(())
+    }
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Shard {
@@ -193,11 +207,12 @@ pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
     bounded(async {
         let owner = Uuid::now_v7();
         let mut tx = db.begin().await?;
-        let live: Option<Uuid> = sqlx::query_scalar(queries::LOCK_RUN)
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        ensure!(live.is_some(), "run not found");
+        let tenant_id: Option<Uuid> =
+            sqlx::query_scalar("SELECT tenant_id FROM runs WHERE id=$1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let tenant_id = tenant_id.context("run not found")?;
         let claimed = sqlx::query(queries::CLAIM_RUN)
             .bind(id)
             .bind(owner)
@@ -211,6 +226,7 @@ pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
             .await?;
         tx.commit().await?;
         Ok(Lease {
+            tenant_id,
             run_id: id,
             owner,
             generation,
@@ -219,10 +235,7 @@ pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
     .await
 }
 async fn guard(tx: &mut Transaction<'_, Postgres>, lease: Lease) -> Result<()> {
-    sqlx::query(queries::LOCK_RUN)
-        .bind(lease.run_id)
-        .fetch_one(&mut **tx)
-        .await?;
+    lease.lock(tx).await?;
     let n = sqlx::query(queries::RENEW_RUN)
         .bind(lease.run_id)
         .bind(lease.owner)
@@ -248,13 +261,20 @@ pub(crate) async fn renew(db: &PgPool, lease: Lease) -> Result<()> {
 pub(crate) async fn release(db: &PgPool, lease: Lease, error: Option<&str>) -> Result<()> {
     let error = error.map(|message| message.chars().take(4096).collect::<String>());
     bounded(async {
+        let mut tx = db.begin().await?;
+        sqlx::Executor::execute(
+            &mut *tx,
+            crate::db::scope::system_settings(lease.tenant_id, lease.run_id).as_str(),
+        )
+        .await?;
         sqlx::query(queries::RELEASE_RUN)
             .bind(lease.run_id)
             .bind(lease.owner)
             .bind(lease.generation)
             .bind(error)
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     })
     .await

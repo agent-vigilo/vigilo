@@ -16,8 +16,8 @@ flowchart TD
     Controls[Claim deliveries through restricted function; apply and observe quiescence]
     SettleControls[Claim quiescent revocations through restricted function and retry cleanup]
     RecoverCreation[Discover accepted ready plans and acquire fenced admission lease]
-    ReadPlan[Verify immutable roots, configuration and gate counts]
-    AdmitPlan[Replay compact admission and verify coverage]
+    ReadPlan[Bind claimed identity; load protected plan and verify immutable inputs]
+    AdmitPlan[Scope placement transactions; verify coverage and lock catalog for activation]
     CreationDeferred[Release ownership and continue bounded candidates]
     Circuit{Alias circuit admits operation?}
     CircuitSkip[Leave durable work pending and continue]

@@ -216,6 +216,7 @@ LEFT JOIN pg_language l ON l.oid=p.prolang
         let mut tables = vec!["outbox_delivery_queue"];
         if self.purpose != DatabasePurpose::Execution {
             tables.extend([
+                "database_placements",
                 "runs",
                 "run_plans",
                 "run_control_deliveries",

@@ -32,3 +32,25 @@ COMMENT ON COLUMN database_placements.status IS
 
 COMMENT ON INDEX uq_database_placements_single_active_control IS
     'Ensures there is at most one active placement with control-plane authority. Multiple active shard-only placements are allowed.';
+
+-- Runtime placement validation retains a row lock without granting callers
+-- permission to change the global catalog.
+DO $install$
+DECLARE
+    installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_lock_database_placement(requested_alias TEXT)
+RETURNS TABLE(role TEXT, status TEXT)
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+    SELECT p.role,p.status
+    FROM %1$I.database_placements p
+    WHERE p.alias=requested_alias
+    FOR SHARE;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_lock_database_placement(TEXT) FROM PUBLIC', installation_schema);
+END;
+$install$;

@@ -1136,3 +1136,6 @@ async fn restricted_admission_claim_requires_grant_and_rolls_back_ownership(db: 
     assert!(admission::renew(&db, retry).await.is_err());
     release(&db, winner, None).await.unwrap();
 }
+
+#[path = "postgres_tests/admission_scope.rs"]
+mod admission_scope;

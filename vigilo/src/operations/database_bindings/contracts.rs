@@ -24,6 +24,12 @@ macro_rules! contract {
 
 pub(super) const CONTRACTS: &[Contract] = &[
     contract!(
+        "vigilo_lock_database_placement(text)",
+        "0003_create_database_placements.sql",
+        true,
+        false
+    ),
+    contract!(
         "vigilo_claim_dispatch(text[])",
         "0015_create_run_shard_dispatch_cursors.sql",
         true,
@@ -208,6 +214,6 @@ mod tests {
             assert!(!definition.result.is_empty());
             assert!(matches!(definition.language.as_str(), "sql" | "plpgsql"));
         }
-        assert_eq!(signatures.len(), 15);
+        assert_eq!(signatures.len(), 16);
     }
 }

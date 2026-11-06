@@ -67,7 +67,7 @@ and arbitrary startup options. Standalone `Client` configuration is separate.
 Construction validates configuration without opening connections. Call `validate()`
 before serving requests. Each new physical connection independently checks its
 login, role memberships, table protections, function definitions and grants.
-Scheduler logins have explicit access to the installed discovery and claim functions.
+Scheduler logins have explicit access to installed discovery, claim and placement-lock functions.
 Narrow table grants support scoped follow-up work on the transaction retaining its
 claim. Scheduler, user and execution work-table access requires row policies.
 Deployment metadata is read-only. The host installs and tests policy semantics;

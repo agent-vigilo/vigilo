@@ -290,10 +290,7 @@ async fn validate_active_shard_capable_placement(
 ) -> anyhow::Result<()> {
     let placement = sqlx::query_as::<_, (String, String)>(
         r#"
-        SELECT role, status
-        FROM database_placements
-        WHERE alias = $1
-        FOR SHARE
+        SELECT role, status FROM vigilo_lock_database_placement($1)
         "#,
     )
     .bind(database_alias)

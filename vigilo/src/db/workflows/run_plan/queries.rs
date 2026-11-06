@@ -44,13 +44,6 @@ pub(super) const ACCEPT_PLAN: &str = r#"
       AND (p.accepted_manifest IS NULL OR p.accepted_manifest=$2)
 "#;
 
-pub(super) const LOCK_RUN: &str = r#"
-    SELECT id
-    FROM runs
-    WHERE id=$1
-    FOR UPDATE
-"#;
-
 pub(super) const CLAIM_RUN: &str = r#"
     UPDATE runs
     SET coordinator_id=$2,coordinator_leased_until=clock_timestamp()+interval '300 seconds',coordinator_heartbeat_at=clock_timestamp(),updated_at=clock_timestamp()

@@ -46,6 +46,17 @@ pub(crate) async fn begin(
     Ok(tx)
 }
 
+/// Fixed transaction-local system identity. Only canonical typed UUIDs enter
+/// this SQL; never append caller-supplied SQL or interpolate workload values.
+/// Call inside an already-open SQLx transaction so cancellation rolls it back.
+/// These commands can share a submission with a following fixed statement,
+/// whose row policies must see the settings before that statement starts.
+pub(crate) fn system_settings(tenant_id: Uuid, run_id: Uuid) -> String {
+    format!(
+        "SET LOCAL vigilo.tenant_id = '{tenant_id}'; SET LOCAL vigilo.run_id = '{run_id}'; SET LOCAL vigilo.actor_id = ''; "
+    )
+}
+
 /// Connection-time guard for a dedicated restricted credential domain. Policy
 /// contents belong to the deployment; this rejects obvious bypasses and any
 /// directly accessible unprotected table carrying ownership metadata.

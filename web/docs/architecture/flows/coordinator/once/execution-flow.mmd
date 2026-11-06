@@ -29,11 +29,12 @@ sequenceDiagram
 
     loop Bounded ready-plan recovery candidates with accepted identity and execution enabled
         Vigilo->>ControlDB: Call restricted admission claim; atomically assign lease and generation
-        ControlDB-->>Vigilo: Compact plan references and admission progress, or no work
+        ControlDB-->>Vigilo: Claimed work identity, lease and generation, or no work
+        Vigilo->>ControlDB: Bind claimed identity and read protected plan details
         Vigilo->>Objects: Verify roots, configuration, gate counts and bounded chunk pages
-        Vigilo->>ExecutionDB: Replay compact admission and independently verify exact coverage
+        Vigilo->>ExecutionDB: Scope each transaction; replay admission and independently verify coverage
         ExecutionDB-->>Vigilo: Verified placement coverage or candidate failure
-        Vigilo->>ControlDB: Checkpoint progress or atomically publish routes and activate
+        Vigilo->>ControlDB: Checkpoint progress; lock placements through restricted function and activate
         Note over Vigilo,ControlDB: Returned failures release ownership and defer the candidate
     end
 

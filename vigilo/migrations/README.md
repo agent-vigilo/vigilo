@@ -36,6 +36,14 @@ Runtime ownership and routing are documented in
 [Scale-out and shard migration](https://agentvigilo.com/docs/architecture/scaling).
 
 
+The database-placement migration defines `vigilo_lock_database_placement(text)`.
+It returns one alias's role/status and retains a shared row lock until the caller
+transaction ends. Activation uses this restricted read because PostgreSQL row
+locking requires UPDATE privilege; runtime callers cannot edit the catalog.
+The function uses schema-qualified references, a fixed search path, and no PUBLIC
+execute grant. Its dedicated non-login owner needs schema usage and SELECT/UPDATE
+on database placements; the scheduler receives only an explicit execute grant.
+
 The dispatch-cursor migration also defines `vigilo_claim_dispatch(text[])` in the installation schema.
 Its table references are bound to that schema at installation. It selects and locks at most one eligible cursor in the caller transaction using
 `SKIP LOCKED`; commit or rollback releases that lock. It accepts at most 128

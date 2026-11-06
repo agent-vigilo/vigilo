@@ -121,7 +121,7 @@ Frozen evaluator artifacts and placements are reused even when registry state or
 default placement policy changes. Changed source identity, profile, limits, or
 physical storage binding is rejected.
 
-Recovery claims the run before opening its storage adapter or reading roots,
+Recovery claims the run before loading protected plan details, opening its storage adapter or reading roots,
 configuration, and gate files. Competing coordinators cannot duplicate those
 reads for the same live lease. Adapter initialization and root reads share a
 120-second deadline minted before the claim; the complete gate traversal has
@@ -134,6 +134,19 @@ generation fence; an old caller cannot release a replacement owner's lease.
 Each coordinator processes recovery candidates sequentially. A failed candidate
 is deferred and the next candidate can proceed, but slow reads delay later
 candidates until the bounded read finishes or fails.
+Admission retains the ownership identity returned by its claim. Each control or
+execution-local transaction binds that identity before accessing protected rows,
+clears caller identity, and keeps the connection's fixed database role. Checkpoints,
+renewals, activation, failure, and release retain their owner/generation fences.
+Scope settings end on commit, rollback, or cancellation; no transaction spans blob
+I/O. Context setup shares the existing lock or timeout submission where possible.
+Scoped reads and release use explicit transactions; placement verification adds
+one context submission per bounded page, never per case.
+
+Placement activation locks each target catalog row through a restricted database
+function. The lock lasts through activation, while the caller retains no catalog
+update privilege. Role/status validation and route writes remain in Rust.
+
 The foreground creator reuses its already verified roots and claims authority
 before gate reads and local admission. Preparation-only runs remain held.
 

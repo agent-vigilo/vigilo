@@ -57,7 +57,7 @@ async fn fixed_roles_validate_and_reject_unsafe_deployments(pool: PgPool) {
         .await
         .unwrap();
     }
-    sqlx::raw_sql(&format!("GRANT SELECT ON runs,run_plans,run_control_deliveries,run_shard_dispatch_cursors,shard_placements,database_placements,run_chunks,run_shard_summaries,local_shard_admissions,run_chunk_settlement_consumptions,outbox_delivery_queue,outbox_events TO {}; GRANT UPDATE ON runs,run_plans,run_control_deliveries,run_shard_dispatch_cursors,outbox_delivery_queue TO {};",roles[3],roles[3])).execute(&pool).await.unwrap();
+    sqlx::raw_sql(&format!("GRANT SELECT ON runs,run_plans,run_control_deliveries,run_shard_dispatch_cursors,shard_placements,database_placements,run_chunks,run_shard_summaries,local_shard_admissions,run_chunk_settlement_consumptions,outbox_delivery_queue,outbox_events TO {}; GRANT UPDATE ON database_placements,runs,run_plans,run_control_deliveries,run_shard_dispatch_cursors,outbox_delivery_queue TO {};",roles[3],roles[3])).execute(&pool).await.unwrap();
     let pools = DatabasePools::new(config.clone()).unwrap();
     let result=std::panic::AssertUnwindSafe(async {
         for bound in [&pools.0.placements["primary"].scheduler,&pools.0.placements["primary"].execution,&pools.0.placements["primary"].user] {

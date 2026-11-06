@@ -34,10 +34,11 @@ sequenceDiagram
             Vigilo->>ControlDB: Record completed settlement
             Note over Vigilo,ExecutionDB: Controls use direct database calls; unavailable placements remain pending
 
-            Vigilo->>ControlDB: Discover accepted candidates; call restricted admission claim for each
+            Vigilo->>ControlDB: Discover accepted candidates; claim identity, lease and generation
+            Vigilo->>ControlDB: Bind claimed identity and read protected plan details
             Vigilo->>Objects: Verify roots, configuration, gate counts and bounded chunk pages
-            Vigilo->>ExecutionDB: Replay compact admission and verify exact local coverage
-            Vigilo->>ControlDB: Checkpoint progress or publish routes and activate
+            Vigilo->>ExecutionDB: Scope each transaction; replay admission and verify exact local coverage
+            Vigilo->>ControlDB: Checkpoint progress; lock placements through restricted function and activate
             Note over Vigilo,ControlDB: Failed candidates release ownership, preparation-only runs stay held
             Vigilo->>ControlDB: Discover routed execution aliases through restricted function
             loop Serviceable execution placements
