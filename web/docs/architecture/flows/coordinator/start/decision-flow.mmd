@@ -15,7 +15,7 @@ flowchart TD
     Database{Database context available?}
     Controls[Deliver bounded controls and observe quiescence]
     SettleControls[Retry cleanup for quiescent revoked runs]
-    RecoverCreation[Claim accepted ready plans with execution enabled]
+    RecoverCreation[Discover accepted ready plans and acquire fenced admission lease]
     ReadPlan[Verify immutable roots, configuration and gate counts]
     AdmitPlan[Replay compact admission and verify coverage]
     CreationDeferred[Release ownership and continue bounded candidates]

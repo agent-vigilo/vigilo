@@ -52,31 +52,19 @@ pub(crate) async fn accept(
 pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
     bounded(async {
         let mut tx = db.begin().await?;
-        sqlx::query(queries::LOCK_RUN)
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
         let owner = Uuid::now_v7();
-        let n = sqlx::query(&queries::CLAIM_RUN.replace(
-            "'preparing'",
-            "'ready' AND execution_requested AND accepted_manifest = manifest",
-        ))
-        .bind(id)
-        .bind(owner)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        ensure!(
-            n == 1,
-            "run admission is leased or terminal, or plan is not ready"
-        );
-        let generation = sqlx::query_scalar(queries::NEXT_GENERATION)
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
+        let (_, run_id, owner, generation): (Uuid, Uuid, Uuid, i64) =
+            sqlx::query_as("SELECT * FROM vigilo_claim_admission($1,$2)")
+                .bind(id)
+                .bind(owner)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("run admission is leased or terminal, or plan is not ready")
+                })?;
         tx.commit().await?;
         Ok(Lease {
-            run_id: id,
+            run_id,
             owner,
             generation,
         })

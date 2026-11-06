@@ -485,8 +485,10 @@ pub(crate) async fn recover(
         "creation budgets must be positive"
     );
     let db = context.dbr().await?.control().await?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT r.id FROM runs r JOIN run_plans p ON p.run_id=r.id WHERE r.status='creating' AND r.execution_control='enabled' AND p.status='ready' AND p.execution_requested AND p.accepted_manifest=p.manifest AND (r.coordinator_leased_until IS NULL OR r.coordinator_leased_until<=clock_timestamp()) ORDER BY r.updated_at,r.id LIMIT $1")
-        .bind(i64::try_from(limit.min(1024))?).fetch_all(db).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT run_id FROM vigilo_ready_admissions($1)")
+        .bind(i32::try_from(limit.min(1024))?)
+        .fetch_all(db)
+        .await?;
     let mut stats = crate::db::workflows::run_creation::RunCreationRecoveryStats::default();
     for id in ids {
         stats.claimed_runs += 1;

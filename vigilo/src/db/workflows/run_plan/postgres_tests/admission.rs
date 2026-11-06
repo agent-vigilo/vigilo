@@ -146,7 +146,7 @@ async fn snapshot_groups_cross_64_shards_without_per_shard_renewal(db: PgPool) {
     let lease = claim(&db, f.plan.run_id).await.unwrap();
     f.prepare(&db, lease).await.unwrap();
     let plan = load(&db, f.plan.run_id).await.unwrap().unwrap();
-    sqlx::raw_sql("CREATE TABLE snapshot_sizes(n bigint); CREATE FUNCTION observe_snapshots() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO snapshot_sizes SELECT count(*) FROM inserted; RETURN NULL; END $$; CREATE TRIGGER observe_snapshots AFTER INSERT ON run_snapshots REFERENCING NEW TABLE AS inserted FOR EACH STATEMENT EXECUTE FUNCTION observe_snapshots(); CREATE TABLE renewals(n integer); CREATE FUNCTION observe_renewal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO renewals VALUES(1); RETURN NEW; END $$; CREATE TRIGGER observe_renewal AFTER UPDATE ON runs FOR EACH ROW WHEN (NEW.coordinator_heartbeat_at IS DISTINCT FROM OLD.coordinator_heartbeat_at) EXECUTE FUNCTION observe_renewal();").execute(&db).await.unwrap();
+    sqlx::raw_sql("CREATE TABLE snapshot_sizes(n bigint); CREATE FUNCTION observe_snapshots() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO snapshot_sizes SELECT count(*) FROM inserted; RETURN NULL; END $$; CREATE TRIGGER observe_snapshots AFTER INSERT ON run_snapshots REFERENCING NEW TABLE AS inserted FOR EACH STATEMENT EXECUTE FUNCTION observe_snapshots(); CREATE TABLE renewals(n integer); CREATE FUNCTION observe_renewal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO public.renewals VALUES(1); RETURN NEW; END $$; CREATE TRIGGER observe_renewal AFTER UPDATE ON runs FOR EACH ROW WHEN (NEW.coordinator_heartbeat_at IS DISTINCT FROM OLD.coordinator_heartbeat_at) EXECUTE FUNCTION observe_renewal();").execute(&db).await.unwrap();
     assert!(
         crate::run_admission::resume(
             &runtime_context(&db),
@@ -514,7 +514,7 @@ async fn committed_activation_succeeds_when_subsequent_writes_fail(db: PgPool) {
     let (f, plan) = ready(&db).await;
     // Model a database write failure after activation committed. Reporting that
     // committed success must not depend on another cleanup write succeeding.
-    sqlx::raw_sql("CREATE FUNCTION reject_post_activation_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM runs WHERE status='pending') THEN RAISE EXCEPTION 'post-activation write unavailable'; END IF; RETURN NULL; END $$; CREATE TRIGGER reject_post_activation_write BEFORE UPDATE ON runs FOR EACH STATEMENT EXECUTE FUNCTION reject_post_activation_write();")
+    sqlx::raw_sql("CREATE FUNCTION reject_post_activation_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF EXISTS(SELECT 1 FROM public.runs WHERE status='pending') THEN RAISE EXCEPTION 'post-activation write unavailable'; END IF; RETURN NULL; END $$; CREATE TRIGGER reject_post_activation_write BEFORE UPDATE ON runs FOR EACH STATEMENT EXECUTE FUNCTION reject_post_activation_write();")
         .execute(&db).await.unwrap();
     let store: Arc<dyn crate::blob_storage::BlobStorage> = Arc::new(f.store);
     let result = crate::run_admission::resume(

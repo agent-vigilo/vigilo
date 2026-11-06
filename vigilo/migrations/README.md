@@ -47,3 +47,18 @@ needs schema usage, SELECT on runs, shard placements, database placements and
 dispatch cursors, and UPDATE on dispatch cursors for row locking. Deployments with
 row policies must also authorize the owner's bounded discovery. Granting function
 execution does not grant callers direct access to those tables.
+
+
+The run-plan migration defines `vigilo_ready_admissions(integer)` and
+`vigilo_claim_admission(uuid, uuid)` in the installation schema. Discovery returns
+at most 1024 eligible accepted-run IDs. Claiming locks the run, rechecks the exact
+accepted plan, execution control and lease expiry, and atomically returns ownership
+and the advanced fencing generation. A live lease, paused/revoked run, or unaccepted
+plan cannot be claimed. Caller rollback rolls back the claim and generation.
+Both functions have fixed search paths, schema-bound references, and no PUBLIC
+execute grant. An administrative deployment assigns a non-login owner with schema
+usage and SELECT/UPDATE on runs and run plans, plus appropriate row-policy access;
+callers receive only explicit execute grants. Discovery alone grants no lease.
+
+Triggers attached to these writes must qualify their relation references or set
+their own safe search path; they must not rely on an ambient application search path.

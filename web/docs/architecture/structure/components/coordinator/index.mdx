@@ -23,6 +23,9 @@ Describes the major internal responsibilities of the coordinator runtime.
 - Execution controls run first: bounded direct database deliveries apply revisions,
   observe worker quiescence, and retry cancellation cleanup. Unavailable placements
   remain pending; acknowledgments are fenced by revision and delivery claim.
+- Run-creation recovery uses restricted database discovery and lease-claim
+  functions. Claiming rechecks exact acceptance and advances the fencing generation
+  atomically; discovery alone grants no ownership.
 - Run-creation recovery then claims accepted `creating` runs with execution
   enabled and an available lease, replays compact metadata, and enables
   dispatch only after verifying exact local chunk coverage.
