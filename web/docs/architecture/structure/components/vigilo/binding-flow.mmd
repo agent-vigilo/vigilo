@@ -1,0 +1,13 @@
+flowchart TD
+    Host[Trusted host: explicit placement credentials] --> Config{Configuration valid?}
+    Config -->|No| Reject[Reject binding]
+    Config -->|Yes| Pools[Shared lazy pools: scheduler, execution, user]
+    Pools --> Connect[Open physical connection]
+    Connect --> Guard{Login, grants, protections and installed functions valid?}
+    Guard -->|No| Close[Discard connection]
+    Guard -->|Yes| Ready[Connection available to its authority]
+    Pools --> Client[UserClient shares user pools]
+    Client --> Status[Typed status operation]
+    Status --> User[User-role transaction and row policies]
+    Host --> Revalidate[Explicit deployment revalidation]
+    Revalidate --> Guard

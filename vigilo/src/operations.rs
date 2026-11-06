@@ -236,3 +236,12 @@ pub use user::{
     UserConfig,
     UserContext,
 };
+
+mod database_bindings;
+pub use database_bindings::{
+    DatabaseBinding,
+    DatabaseBindings,
+    DatabaseCredential,
+    DatabasePools,
+    DatabasePurpose,
+};

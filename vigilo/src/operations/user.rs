@@ -53,6 +53,18 @@ pub struct UserClient {
     execution: Arc<BTreeMap<String, PgPool>>,
 }
 impl UserClient {
+    pub(super) fn from_fixed_pools(
+        control: PgPool,
+        control_alias: String,
+        execution: BTreeMap<String, PgPool>,
+    ) -> Self {
+        Self {
+            control,
+            control_alias,
+            execution: Arc::new(execution),
+        }
+    }
+
     /// Creates lazy fixed-role pools inside the host's Tokio runtime. Deployment
     /// validation occurs before the first protected query on each connection.
     pub fn new(config: UserConfig) -> Result<Self, Error> {
