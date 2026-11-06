@@ -341,7 +341,7 @@ where
 }
 
 pub(crate) async fn list_shard_placements_for_run(
-    db: &PgPool,
+    db: impl Executor<'_, Database = Postgres>,
     run_id: Uuid,
 ) -> anyhow::Result<Vec<ShardPlacement>> {
     let placements = sqlx::query_as::<_, ShardPlacement>(

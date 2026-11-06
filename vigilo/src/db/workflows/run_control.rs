@@ -213,21 +213,20 @@ async fn settle_revocations(
     run_id: Option<Uuid>,
 ) -> anyhow::Result<Vec<super::run_cancel::CancelRunOutcome>> {
     let pool = router.control().await?;
-    let runs: Vec<(Uuid, i64, Uuid)> =
+    let runs: Vec<Settlement> =
         sqlx::query_as("SELECT * FROM vigilo_claim_revocation_settlements($1)")
             .bind(run_id)
             .fetch_all(pool)
             .await?;
-    let outcomes = stream::iter(runs).map(|(run,revision,token)| async move {
-        match super::run_cancel::cancel_run_routed(router,run).await {
+    let outcomes = stream::iter(runs).map(|claim| async move {
+        match super::run_cancel::cancel_claimed_run_routed(router,claim.tenant_id,claim.run_id).await {
             Ok(Some(outcome)) => {
-                acknowledge_settlement(pool, run, revision, token).await?;
+                acknowledge_settlement(pool,claim.tenant_id,claim.run_id,claim.revision,claim.claim_token).await?;
                 Ok(Some(outcome))
             }
             outcome => {
-                tracing::warn!(run_id=%run,error=?outcome,"revocation settlement deferred");
-                sqlx::query("UPDATE runs SET updated_at=clock_timestamp(),control_settlement_until=clock_timestamp()+interval '10 seconds' WHERE id=$1 AND control_revision=$2 AND control_settlement_token=$3")
-                    .bind(run).bind(revision).bind(token).execute(pool).await?;
+                tracing::warn!(run_id=%claim.run_id,error=?outcome,"revocation settlement deferred");
+                defer_settlement(pool,&claim).await?;
                 Ok::<_,anyhow::Error>(None)
             }
         }
@@ -245,12 +244,16 @@ async fn settle_revocations(
 /// A stale cleanup owner cannot acknowledge a replacement claim or revision.
 async fn acknowledge_settlement(
     pool: &PgPool,
+    tenant: Uuid,
     run: Uuid,
     revision: i64,
     token: Uuid,
 ) -> anyhow::Result<bool> {
+    let mut tx = pool.begin().await?;
+    crate::db::scope::set_system(&mut tx, tenant, run).await?;
     let result = sqlx::query("UPDATE runs SET control_settled_revision=$2,control_settlement_token=NULL,control_settlement_until=NULL WHERE id=$1 AND control_revision=$2 AND execution_control='revoked' AND control_settlement_token=$3")
-        .bind(run).bind(revision).bind(token).execute(pool).await?;
+        .bind(run).bind(revision).bind(token).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 
@@ -360,6 +363,25 @@ async fn defer(pool: &PgPool, delivery: &Delivery) -> anyhow::Result<bool> {
     let mut tx = delivery.begin(pool).await?;
     let result=sqlx::query("UPDATE run_control_deliveries SET claim_token=NULL,claimed_until=NULL,available_at=clock_timestamp()+least(attempts,30)*interval '1 second',last_error='placement control delivery unavailable' WHERE tenant_id=$1 AND run_id=$2 AND database_alias=$3 AND revision=$4 AND claim_token=$5")
         .bind(delivery.tenant_id).bind(delivery.run_id).bind(&delivery.database_alias).bind(delivery.revision).bind(delivery.claim_token).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Identity and replay fence returned by the bounded settlement claim.
+#[derive(sqlx::FromRow)]
+struct Settlement {
+    tenant_id: Uuid,
+    run_id: Uuid,
+    revision: i64,
+    claim_token: Uuid,
+}
+
+/// Retain retry timing only for the same settlement revision and owner.
+async fn defer_settlement(pool: &PgPool, claim: &Settlement) -> anyhow::Result<bool> {
+    let mut tx = pool.begin().await?;
+    crate::db::scope::set_system(&mut tx, claim.tenant_id, claim.run_id).await?;
+    let result=sqlx::query("UPDATE runs SET updated_at=clock_timestamp(),control_settlement_until=clock_timestamp()+interval '10 seconds' WHERE id=$1 AND control_revision=$2 AND control_settlement_token=$3")
+        .bind(claim.run_id).bind(claim.revision).bind(claim.claim_token).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }

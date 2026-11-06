@@ -176,12 +176,16 @@ pub(super) async fn drain_control_dispatch_cursors(
 pub(super) async fn mark_control_cancellation_requested(
     db: &PgPool,
     run_id: Uuid,
+    tenant_id: Option<Uuid>,
 ) -> anyhow::Result<Option<ControlCancellationState>> {
     let mut tx = db.begin().await?;
 
-    let Some(status) = sqlx::query_scalar::<_, String>(
+    if let Some(tenant) = tenant_id {
+        crate::db::scope::set_system(&mut tx, tenant, run_id).await?;
+    }
+    let Some((tenant_id, status)) = sqlx::query_as::<_, (Uuid, String)>(
         r#"
-        SELECT status::text
+        SELECT tenant_id,status::text
         FROM runs
         WHERE id = $1::uuid
         FOR UPDATE
@@ -210,6 +214,7 @@ pub(super) async fn mark_control_cancellation_requested(
             .ok_or_else(|| anyhow::anyhow!("run '{}' disappeared during cancellation", run_id))?;
         tx.commit().await?;
         return Ok(Some(ControlCancellationState {
+            tenant_id,
             run,
             cancelled: false,
             already_cancelled: true,
@@ -236,6 +241,7 @@ pub(super) async fn mark_control_cancellation_requested(
     tx.commit().await?;
 
     Ok(Some(ControlCancellationState {
+        tenant_id,
         run,
         cancelled: true,
         already_cancelled: false,

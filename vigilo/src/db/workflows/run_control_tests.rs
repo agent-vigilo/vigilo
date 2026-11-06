@@ -524,17 +524,17 @@ async fn settlement_claim_preserves_batch_revision_lease_and_query_budgets(pool:
             .unwrap();
     assert_ne!(old.2, retry.2);
     assert!(
-        !acknowledge_settlement(&pool, old.0, old.1, old.2)
+        !acknowledge_settlement(&pool, Uuid::nil(), old.0, old.1, old.2)
             .await
             .unwrap()
     );
     assert!(
-        !acknowledge_settlement(&pool, retry.0, retry.1 + 1, retry.2)
+        !acknowledge_settlement(&pool, Uuid::nil(), retry.0, retry.1 + 1, retry.2)
             .await
             .unwrap()
     );
     assert!(
-        acknowledge_settlement(&pool, retry.0, retry.1, retry.2)
+        acknowledge_settlement(&pool, Uuid::nil(), retry.0, retry.1, retry.2)
             .await
             .unwrap()
     );
@@ -549,3 +549,6 @@ async fn settlement_claim_preserves_batch_revision_lease_and_query_budgets(pool:
 
 #[path = "run_control_scope_tests.rs"]
 mod scope_tests;
+
+#[path = "revocation_scope_tests.rs"]
+mod revocation_scope_tests;

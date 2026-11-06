@@ -63,7 +63,7 @@ DECLARE installation_schema TEXT := current_schema();
 BEGIN
     EXECUTE format($definition$
 CREATE FUNCTION %1$I.vigilo_claim_revocation_settlements(requested_run UUID)
-RETURNS TABLE(run_id UUID, revision BIGINT, claim_token UUID)
+RETURNS TABLE(run_id UUID, revision BIGINT, claim_token UUID, tenant_id UUID)
 LANGUAGE sql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
@@ -83,7 +83,7 @@ AS $function$
     UPDATE %1$I.runs r
     SET control_settlement_token=gen_random_uuid(),control_settlement_until=clock_timestamp()+interval '60 seconds'
     FROM candidates c WHERE r.id=c.id
-    RETURNING r.id,r.control_revision,r.control_settlement_token;
+    RETURNING r.id,r.control_revision,r.control_settlement_token,r.tenant_id;
 $function$;
 $definition$, installation_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_claim_revocation_settlements(UUID) FROM PUBLIC', installation_schema);

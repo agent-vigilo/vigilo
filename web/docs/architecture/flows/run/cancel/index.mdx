@@ -59,6 +59,14 @@ Quiescence reads, acknowledgments and retry updates use the same identity in the
 own transactions. Control connections are released before remote I/O; revisions
 and claim tokens fence delayed acknowledgments and retries.
 
+After every destination is quiescent, a settlement claim carries the run identity
+through control-state changes, route discovery, local cleanup and final summary
+publication. Each phase uses its own scoped transaction. Partial admission closes
+local admission before cleanup so an interrupted creator cannot restore work.
+Completed executions and their evidence remain intact; retries reuse existing
+receipts and the cancellation event. Acknowledgement and retry updates require
+the matching settlement revision and token.
+
 ## Related
 
 - [Run watch flow](/docs/architecture/flows/run/watch/)

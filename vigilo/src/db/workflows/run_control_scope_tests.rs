@@ -229,3 +229,48 @@ async fn delivery_followups_use_claimed_identity(pool: PgPool) {
         std::panic::resume_unwind(panic);
     }
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn settlement_acknowledgement_uses_claimed_identity(pool: PgPool) {
+    let (run, _) = seed(&pool).await;
+    request(&pool, run, ExecutionControl::Revoked)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE run_control_deliveries SET applied_at=now(),quiescent_at=now() WHERE run_id=$1",
+    )
+    .bind(run)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let claim: (Uuid, i64, Uuid) =
+        sqlx::query_as("SELECT * FROM vigilo_claim_revocation_settlements($1)")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let role = format!("settlement_scope_{}", Uuid::now_v7().simple());
+    sqlx::raw_sql(&format!("CREATE ROLE {role} LOGIN PASSWORD 'fixture'; GRANT USAGE ON SCHEMA public TO {role}; GRANT SELECT,UPDATE ON runs TO {role}; ALTER TABLE runs ENABLE ROW LEVEL SECURITY; CREATE POLICY settlement_scope ON runs TO {role} USING(tenant_id=NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid AND id=NULLIF(current_setting('vigilo.run_id',true),'')::uuid AND current_setting('vigilo.actor_id',true)='');")).execute(&pool).await.unwrap();
+    let restricted = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .username(&role)
+                .password("fixture"),
+        )
+        .await
+        .unwrap();
+    let result = acknowledge_settlement(&restricted, Uuid::nil(), claim.0, claim.1, claim.2).await;
+    restricted.close().await;
+    sqlx::raw_sql(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        result.unwrap(),
+        "current settlement acknowledgement must not be hidden by missing scope"
+    );
+}

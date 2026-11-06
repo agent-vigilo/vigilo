@@ -17,6 +17,6 @@ flowchart TD
     Applied -- Yes --> Quiet{Every destination quiescent?}
     Quiet -- No --> Finish[Workers stop new work and preserve safe results]
     Finish --> Pending
-    Quiet -- Yes --> Settle[Cancel unfinished work and commit receipts]
-    Settle --> Event[Persist cancellation summary and event]
+    Quiet -- Yes --> Settle[Scope claimed cleanup; cancel unfinished work and commit receipts]
+    Settle --> Event[Scope summary and event; acknowledge settlement claim]
     Event --> Done([Terminal cancellation])

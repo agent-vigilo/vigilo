@@ -29,7 +29,9 @@ Describes the major internal responsibilities of the coordinator runtime.
   claimed work identity in a transaction. No control connection is held across
   remote delivery; rollback and cancelled calls clear transaction-local context.
   A separate restricted function claims at most 16 quiescent revoked runs for
-  cleanup, with 60-second leases and fresh settlement tokens.
+  cleanup, with 60-second leases and fresh settlement tokens. Its returned identity
+  scopes control-state changes, route reads, execution cleanup, finalization and
+  acknowledgement. Control transactions end before remote cleanup begins.
 - Run-creation recovery uses restricted database discovery and lease-claim
   functions. Claiming rechecks exact acceptance and advances the fencing generation
   atomically; discovery alone grants no ownership.

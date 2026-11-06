@@ -88,7 +88,9 @@ A supplied run ID narrows selection; NULL selects eligible runs. It claims at mo
 16 revoked runs whose current revision is not settled and whose recorded delivery
 destinations all have matching revisions and quiescence acknowledgments. Live
 settlement leases are excluded. Claims use fresh tokens, 60-second leases and
-`SKIP LOCKED`; cleanup and its revision/token-fenced acknowledgment are separate.
+`SKIP LOCKED`. Each claim returns the run ownership identity with its revision and
+token so cleanup does not need an ownership lookup. Cleanup and its
+revision/token-fenced acknowledgment use separate scoped transactions.
 The function has schema-bound references, a fixed search path and no PUBLIC execute
 grant. Its administrative non-login owner needs schema usage, SELECT/UPDATE on runs,
 and SELECT on control deliveries, plus appropriate row-policy access. Callers need

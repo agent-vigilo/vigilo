@@ -86,6 +86,17 @@ pub(crate) async fn validate_connection(
     Ok(())
 }
 
+/// Install trusted system identity inside an already-owned transaction. Call once
+/// before protected work; rollback-on-drop covers setup failure and cancellation.
+pub(crate) async fn set_system(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    run_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::Executor::execute(&mut **tx, system_settings(tenant_id, run_id).as_str()).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

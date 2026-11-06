@@ -6,6 +6,8 @@
 //! placements own chunks, attempts, and executions, so routed cancellation first
 //! marks the control run cancelled and drains dispatch cursors, then fans out
 //! idempotent execution-local cancellation to each routed placement.
+//! Claimed cleanup binds ownership before control reads; the locked root supplies
+//! identity for every subsequent route, execution and finalization transaction.
 
 use std::collections::BTreeMap;
 
@@ -124,6 +126,7 @@ impl ExecutionProgressCounts {
 
 #[derive(Debug)]
 struct ControlCancellationState {
+    tenant_id: Uuid,
     run: Run,
     cancelled: bool,
     already_cancelled: bool,
@@ -162,6 +165,7 @@ fn is_uncancelable_terminal_status(status: &str) -> bool {
 
 async fn cancel_execution_target(
     database_router: &database::DatabaseRouter,
+    tenant_id: Uuid,
     run_id: Uuid,
     target: ExecutionCancellationTarget,
 ) -> anyhow::Result<ExecutionCancellationOutcome> {
@@ -171,7 +175,7 @@ async fn cancel_execution_target(
         .map(|route| route.placement.run_shard)
         .collect();
     let tx = database_router
-        .begin_execution_cleanup_admission(&target.routes)
+        .begin_execution_cleanup_admission(&target.routes, tenant_id)
         .await?;
     cancel_execution_target_with_transaction(run_id, run_shards, tx).await
 }
@@ -227,11 +231,12 @@ fn group_execution_routes(routes: Vec<ExecutionRoute>) -> Vec<ExecutionCancellat
 
 async fn cancel_execution_targets(
     database_router: &database::DatabaseRouter,
+    tenant_id: Uuid,
     run_id: Uuid,
     targets: Vec<ExecutionCancellationTarget>,
 ) -> anyhow::Result<ExecutionCancellationOutcome> {
     let mut stream = stream::iter(targets.into_iter().map(|target| async move {
-        cancel_execution_target(database_router, run_id, target).await
+        cancel_execution_target(database_router, tenant_id, run_id, target).await
     }))
     .buffer_unordered(ROUTED_CANCEL_PARALLELISM);
 
@@ -276,6 +281,7 @@ async fn finalize_control_cancellation(
     let shard_summary_count = execution_outcome.summaries.len();
 
     let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, state.tenant_id, state.run.id).await?;
     let run = update_run_cancelled(
         &mut tx,
         state.run.id,
@@ -305,11 +311,15 @@ async fn finalize_control_cancellation(
 /// after cancellation. Exclusive shard fences serialize those local writes.
 async fn cancel_unadmitted_plan(
     router: &database::DatabaseRouter,
+    tenant_id: Uuid,
     run_id: Uuid,
 ) -> anyhow::Result<ExecutionCancellationOutcome> {
     let db = router.control().await?;
+    let mut control_tx = db.begin().await?;
+    crate::db::scope::set_system(&mut control_tx, tenant_id, run_id).await?;
     let rows:Vec<(i16,String)>=sqlx::query_as("SELECT run_shard,database_alias FROM run_plan_shards WHERE run_id=$1 ORDER BY database_alias,run_shard")
-        .bind(run_id).fetch_all(db).await?;
+        .bind(run_id).fetch_all(&mut *control_tx).await?;
+    control_tx.commit().await?;
     let mut placements = BTreeMap::<String, Vec<i16>>::new();
     for (shard, alias) in rows {
         placements.entry(alias).or_default().push(shard);
@@ -318,9 +328,15 @@ async fn cancel_unadmitted_plan(
     for (alias, shards) in placements {
         let local = router.execution_database(&alias).await?;
         let mut tx = local.begin().await?;
-        sqlx::query("SET LOCAL statement_timeout='30s'")
-            .execute(&mut *tx)
-            .await?;
+        sqlx::Executor::execute(
+            &mut *tx,
+            format!(
+                "{}SET LOCAL statement_timeout='30s'",
+                crate::db::scope::system_settings(tenant_id, run_id)
+            )
+            .as_str(),
+        )
+        .await?;
         for shard in &shards {
             crate::db::shard_write_fence::lock_exclusive(&mut tx, run_id, *shard).await?;
             sqlx::query("INSERT INTO local_shard_admissions(run_id,run_shard,database_alias,write_epoch,state) VALUES($1,$2,$3,1,'closed') ON CONFLICT(run_id,run_shard) DO UPDATE SET state='closed',updated_at=now() WHERE local_shard_admissions.write_epoch=1")
@@ -358,20 +374,38 @@ pub(crate) async fn cancel_run_routed(
     database_router: &database::DatabaseRouter,
     run_id: Uuid,
 ) -> anyhow::Result<Option<CancelRunOutcome>> {
+    cancel_run_routed_with_context(database_router, run_id, None).await
+}
+
+/// Settle a revoked run using identity from the bounded database claim.
+pub(crate) async fn cancel_claimed_run_routed(
+    database_router: &database::DatabaseRouter,
+    tenant_id: Uuid,
+    run_id: Uuid,
+) -> anyhow::Result<Option<CancelRunOutcome>> {
+    cancel_run_routed_with_context(database_router, run_id, Some(tenant_id)).await
+}
+
+async fn cancel_run_routed_with_context(
+    database_router: &database::DatabaseRouter,
+    run_id: Uuid,
+    tenant_id: Option<Uuid>,
+) -> anyhow::Result<Option<CancelRunOutcome>> {
     let control_db = database_router.control().await?;
-    let Some(state) = mark_control_cancellation_requested(control_db, run_id).await? else {
+    let Some(state) = mark_control_cancellation_requested(control_db, run_id, tenant_id).await?
+    else {
         return Ok(None);
     };
 
     let routes = database_router
-        .execution_read_routes_with_fences_for_run(run_id)
+        .execution_read_routes_with_context(run_id, Some(state.tenant_id))
         .await?;
     let execution_route_count = routes.len();
     let targets = group_execution_routes(routes);
     let execution_outcome = if execution_route_count == 0 {
-        cancel_unadmitted_plan(database_router, run_id).await?
+        cancel_unadmitted_plan(database_router, state.tenant_id, run_id).await?
     } else {
-        cancel_execution_targets(database_router, run_id, targets).await?
+        cancel_execution_targets(database_router, state.tenant_id, run_id, targets).await?
     };
 
     finalize_control_cancellation(control_db, state, execution_outcome, execution_route_count)
@@ -385,12 +419,13 @@ pub(crate) async fn cancel_run(
     db: &PgPool,
     run_id: Uuid,
 ) -> anyhow::Result<Option<CancelRunOutcome>> {
-    let Some(state) = mark_control_cancellation_requested(db, run_id).await? else {
+    let Some(state) = mark_control_cancellation_requested(db, run_id, None).await? else {
         return Ok(None);
     };
 
     let run_shards = select_run_shards(db, run_id).await?;
-    let tx = db.begin().await?;
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, state.tenant_id, run_id).await?;
     let execution_outcome =
         cancel_execution_target_with_transaction(run_id, run_shards, tx).await?;
 

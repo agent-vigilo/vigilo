@@ -29,9 +29,9 @@ sequenceDiagram
             Vigilo->>ControlDB: Call restricted function to claim bounded pending controls
             Vigilo->>ExecutionDB: Scope claimed work; apply revision or observe worker quiescence
             Vigilo->>ControlDB: Scope acknowledgement or retry; match revision and claim
-            Vigilo->>ControlDB: Restricted function claims up to 16 quiescent revocations
-            Vigilo->>ExecutionDB: Settle quiescent revoked runs with bounded concurrency
-            Vigilo->>ControlDB: Record completed settlement
+            Vigilo->>ControlDB: Restricted function claims up to 16 quiescent revocations with work identity
+            Vigilo->>ExecutionDB: Scope cleanup transactions; settle quiescent revoked runs
+            Vigilo->>ControlDB: Scope settlement acknowledgement; match revision and token
             Note over Vigilo,ExecutionDB: Controls use direct database calls; unavailable placements remain pending
 
             Vigilo->>ControlDB: Discover accepted candidates; claim identity, lease and generation

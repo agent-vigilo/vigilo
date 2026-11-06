@@ -919,6 +919,7 @@ impl DatabaseRouter {
     pub(crate) async fn begin_execution_cleanup_admission(
         &self,
         routes: &[ExecutionRoute],
+        tenant_id: Uuid,
     ) -> anyhow::Result<Transaction<'static, Postgres>> {
         let Some(first) = routes.first() else {
             anyhow::bail!("execution cleanup admission requires at least one route");
@@ -933,6 +934,7 @@ impl DatabaseRouter {
         let mut ordered = routes.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|route| route.placement.run_shard);
         let mut tx = first.pool.begin().await?;
+        crate::db::scope::set_system(&mut tx, tenant_id, first.placement.run_id).await?;
         for route in &ordered {
             crate::db::shard_write_fence::lock_shared(
                 &mut tx,
@@ -1082,8 +1084,26 @@ impl DatabaseRouter {
         &self,
         run_id: Uuid,
     ) -> anyhow::Result<Vec<ExecutionRoute>> {
+        self.execution_read_routes_with_context(run_id, None).await
+    }
+
+    /// Resolve exact route fences under a trusted cleanup claim. Release the
+    /// control transaction before opening remote pools or performing cleanup.
+    pub(crate) async fn execution_read_routes_with_context(
+        &self,
+        run_id: Uuid,
+        tenant_id: Option<Uuid>,
+    ) -> anyhow::Result<Vec<ExecutionRoute>> {
         let db = self.control().await?;
-        let placements = shard_placements::list_shard_placements_for_run(db, run_id).await?;
+        let placements = if let Some(tenant) = tenant_id {
+            let mut tx = db.begin().await?;
+            crate::db::scope::set_system(&mut tx, tenant, run_id).await?;
+            let rows = shard_placements::list_shard_placements_for_run(&mut *tx, run_id).await?;
+            tx.commit().await?;
+            rows
+        } else {
+            shard_placements::list_shard_placements_for_run(db, run_id).await?
+        };
         let mut routed = Vec::with_capacity(placements.len());
 
         for placement in placements {
@@ -2188,7 +2208,7 @@ mod tests {
             .await
             .unwrap();
         database_router
-            .begin_execution_cleanup_admission(&draining_routes)
+            .begin_execution_cleanup_admission(&draining_routes, Uuid::nil())
             .await
             .unwrap()
             .rollback()
@@ -2201,7 +2221,7 @@ mod tests {
             .await
             .unwrap();
         let error = database_router
-            .begin_execution_cleanup_admission(&moving_routes)
+            .begin_execution_cleanup_admission(&moving_routes, Uuid::nil())
             .await
             .unwrap_err();
 
