@@ -90,7 +90,7 @@ sequenceDiagram
             Vigilo->>Vigilo: Load messaging context
             Vigilo->>ControlDB: List serviceable outbox placements
             loop Serviceable outbox placements
-                Vigilo->>ExecutionDB: Count and claim publishable rows for alias
+                Vigilo->>ExecutionDB: Count backlog; claim payload batch through restricted function
                 alt Placement succeeds
                     ExecutionDB-->>Vigilo: Joined event payload batch
                     Vigilo->>Vigilo: Acquire messaging circuit admission per publish

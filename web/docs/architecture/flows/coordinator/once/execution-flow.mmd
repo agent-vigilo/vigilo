@@ -97,7 +97,7 @@ sequenceDiagram
     Vigilo->>ControlDB: List serviceable outbox placements
     ControlDB-->>Vigilo: Database aliases
     loop Serviceable outbox placements
-        Vigilo->>ExecutionDB: Count and claim publishable rows for alias
+        Vigilo->>ExecutionDB: Count backlog; claim payload batch through restricted function
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Joined event payload batch
             loop Bounded outbox publish concurrency

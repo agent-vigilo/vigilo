@@ -105,3 +105,12 @@ bounded inputs, and deny public execution. The non-login discovery owner needs
 SELECT on runs and dispatch cursors; the claim owner needs SELECT and UPDATE on
 runs. Explicit execute grants do not give callers table access. Summary reads,
 fairness updates, backlog metrics and final result writes retain separate authority.
+
+The delivery-queue migration defines `vigilo_claim_outbox(bigint,integer)`.
+It claims a bounded available batch with `SKIP LOCKED`, assigns fresh tokens,
+increments attempt counts and returns the event payloads in one client statement.
+The function binds its tables to the installation schema, fixes its search path
+and denies public execution. A limited non-login owner needs SELECT on the ledger
+and queue, and UPDATE on the queue. Explicit caller grants permit claims without
+table access. Publication acknowledgments, rescheduling and backlog metrics retain
+their separate authority.

@@ -118,6 +118,12 @@ state, execution control and lease expiry, skipping locked runs. Each operation
 uses one database call; score calculation and fenced final result writes remain
 separate.
 
+Outbox publication claims use a restricted database function that returns a
+bounded batch of event payloads with fresh lease tokens. Competing publishers
+skip locked delivery rows. Publication acknowledgments and retries must present
+the current token; expired claims can be reclaimed without changing the durable
+event. Claiming uses one database call.
+
 ## Related
 
 - [Structure overview](../..)

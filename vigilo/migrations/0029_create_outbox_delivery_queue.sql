@@ -93,3 +93,80 @@ COMMENT ON COLUMN outbox_delivery_queue.publish_attempt_count IS
 
 COMMENT ON COLUMN outbox_delivery_queue.error_message IS
     'Error message from the most recent failed publication attempt, if any.';
+
+-- Restricted publisher claim; table references bind to the installation schema.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_claim_outbox(p_limit bigint, p_lease_seconds integer)
+RETURNS TABLE(
+    id uuid, event_type text, aggregate_type text, aggregate_id uuid,
+    dedupe_key text, payload jsonb, status text, claim_shard smallint,
+    available_at timestamptz, claim_token uuid, claimed_until timestamptz,
+    publish_attempt_count integer, published_at timestamptz, error_message text,
+    created_at timestamptz, updated_at timestamptz
+)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 1000000
+       OR p_lease_seconds IS NULL OR p_lease_seconds < 1 OR p_lease_seconds > 86400 THEN
+        RAISE EXCEPTION 'invalid outbox claim limits' USING ERRCODE = '22023';
+    END IF;
+    RETURN QUERY
+WITH claim AS (
+            SELECT q.claim_shard, q.event_id
+            FROM %1$I.outbox_delivery_queue q
+            WHERE q.available_at <= now()
+            ORDER BY q.available_at ASC, q.event_id ASC
+            FOR UPDATE SKIP LOCKED
+            LIMIT p_limit
+        ),
+        leased AS (
+            UPDATE %1$I.outbox_delivery_queue q
+            SET claim_token = gen_random_uuid(),
+                claimed_until = now() + (p_lease_seconds::int * interval '1 second'),
+                available_at = now() + (p_lease_seconds::int * interval '1 second'),
+                publish_attempt_count = q.publish_attempt_count + 1,
+                updated_at = now()
+            FROM claim
+            WHERE q.claim_shard = claim.claim_shard
+              AND q.event_id = claim.event_id
+            RETURNING
+                q.claim_shard,
+                q.event_id,
+                q.available_at,
+                q.claim_token,
+                q.claimed_until,
+                q.publish_attempt_count,
+                q.error_message
+        )
+        SELECT
+            e.id,
+            e.event_type,
+            e.aggregate_type,
+            e.aggregate_id,
+            e.dedupe_key,
+            e.payload,
+            e.status::text as status,
+            leased.claim_shard,
+            leased.available_at,
+            leased.claim_token,
+            leased.claimed_until,
+            leased.publish_attempt_count,
+            e.published_at,
+            COALESCE(leased.error_message, e.error_message) AS error_message,
+            e.created_at,
+            e.updated_at
+        FROM leased
+        JOIN %1$I.outbox_events e
+          ON e.id = leased.event_id
+        ORDER BY leased.available_at ASC, e.id ASC;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_claim_outbox(bigint,integer) FROM PUBLIC', installation_schema);
+END;
+$install$;

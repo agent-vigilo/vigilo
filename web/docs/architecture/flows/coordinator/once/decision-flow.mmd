@@ -37,7 +37,7 @@ flowchart TD
     Messaging{Messaging context available?}
     OutboxCatalog{Outbox placement catalog available?}
     OutboxPlacement{Database placements remain?}
-    ClaimOutbox[Claim publishable delivery rows]
+    ClaimOutbox[Claim publishable delivery rows through restricted function]
     Events{Claimed delivery rows remain?}
     BrokerCircuit{Messaging circuit admits publish?}
     Publish[Publish event to queue with bounded concurrency]

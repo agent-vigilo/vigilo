@@ -126,62 +126,11 @@ pub(crate) async fn claim_publishable_outbox_events(
     limit: i64,
     lease_seconds: i32,
 ) -> anyhow::Result<Vec<OutboxEvent>> {
-    let events = sqlx::query_as::<_, OutboxEvent>(
-        r#"
-        WITH claim AS (
-            SELECT claim_shard, event_id
-            FROM outbox_delivery_queue
-            WHERE available_at <= now()
-            ORDER BY available_at ASC, event_id ASC
-            FOR UPDATE SKIP LOCKED
-            LIMIT $1
-        ),
-        leased AS (
-            UPDATE outbox_delivery_queue q
-            SET claim_token = gen_random_uuid(),
-                claimed_until = now() + ($2::int * interval '1 second'),
-                available_at = now() + ($2::int * interval '1 second'),
-                publish_attempt_count = q.publish_attempt_count + 1,
-                updated_at = now()
-            FROM claim
-            WHERE q.claim_shard = claim.claim_shard
-              AND q.event_id = claim.event_id
-            RETURNING
-                q.claim_shard,
-                q.event_id,
-                q.available_at,
-                q.claim_token,
-                q.claimed_until,
-                q.publish_attempt_count,
-                q.error_message
-        )
-        SELECT
-            e.id,
-            e.event_type,
-            e.aggregate_type,
-            e.aggregate_id,
-            e.dedupe_key,
-            e.payload,
-            e.status::text as status,
-            leased.claim_shard,
-            leased.available_at,
-            leased.claim_token,
-            leased.claimed_until,
-            leased.publish_attempt_count,
-            e.published_at,
-            COALESCE(leased.error_message, e.error_message) AS error_message,
-            e.created_at,
-            e.updated_at
-        FROM leased
-        JOIN outbox_events e
-          ON e.id = leased.event_id
-        ORDER BY leased.available_at ASC, e.id ASC
-        "#,
-    )
-    .bind(limit)
-    .bind(lease_seconds)
-    .fetch_all(db)
-    .await?;
+    let events = sqlx::query_as::<_, OutboxEvent>("SELECT * FROM vigilo_claim_outbox($1,$2)")
+        .bind(limit)
+        .bind(lease_seconds)
+        .fetch_all(db)
+        .await?;
 
     Ok(events)
 }
@@ -351,6 +300,186 @@ mod tests {
 
         assert_eq!(claimed.len(), 1);
         assert_eq!(count_publishable_outbox_backlog(&pool).await.unwrap(), 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn restricted_outbox_claim_preserves_locks_payloads_and_rollback(pool: PgPool) {
+        let event = insert_outbox_event(&pool, &draft("restricted"))
+            .await
+            .unwrap();
+        let payload = serde_json::json!({"run_id":"opaque","nested":{"value":42}});
+        sqlx::query("UPDATE outbox_events SET payload=$2 WHERE id=$1")
+            .bind(event.id)
+            .bind(&payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let role = format!("outbox_caller_{}", Uuid::new_v4().simple());
+        let owner = format!("outbox_owner_{}", Uuid::new_v4().simple());
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql(&format!("CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"))
+            .execute(&mut *tx).await.unwrap();
+        sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_outbox(1,60); RAISE EXCEPTION 'unexpected access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+            .execute(&mut *tx).await.unwrap();
+        sqlx::raw_sql(&format!(
+            "RESET ROLE; CREATE ROLE {owner} NOLOGIN;
+            GRANT USAGE ON SCHEMA public TO {owner};
+            GRANT SELECT ON public.outbox_events, public.outbox_delivery_queue TO {owner};
+            GRANT UPDATE ON public.outbox_delivery_queue TO {owner};
+            ALTER FUNCTION public.vigilo_claim_outbox(bigint,integer) OWNER TO {owner};
+            GRANT EXECUTE ON FUNCTION public.vigilo_claim_outbox(bigint,integer) TO {role};
+            SET LOCAL ROLE {role};"
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+        let access: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.outbox_events','SELECT') OR has_table_privilege(current_user,'public.outbox_delivery_queue','SELECT') OR has_table_privilege(current_user,'public.outbox_delivery_queue','UPDATE')")
+            .fetch_one(&mut *tx).await.unwrap();
+        assert!(!access);
+        let (rows, calls) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+            sqlx::query_as::<_, OutboxEvent>("SELECT * FROM public.vigilo_claim_outbox(1,60)")
+                .fetch_all(&mut *tx),
+        )
+        .await;
+        let rows = rows.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, event.id);
+        assert_eq!(rows[0].payload, payload);
+        assert_eq!(rows[0].event_type, event.event_type);
+        assert_eq!(rows[0].dedupe_key, event.dedupe_key);
+        assert_eq!(rows[0].publish_attempt_count, Some(1));
+        assert_eq!(rows[0].claimed_until, rows[0].available_at);
+        assert!(rows[0].claim_token.is_some());
+        // A competing publisher skips the row lock instead of waiting.
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                claim_publishable_outbox_events(&pool, 1, 60)
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .is_empty()
+        );
+        tx.rollback().await.unwrap();
+        let retry = claim_publishable_outbox_events(&pool, 1, 60).await.unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].publish_attempt_count, Some(1));
+        assert_ne!(retry[0].claim_token, rows[0].claim_token);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn outbox_claim_bounds_order_retries_and_stale_tokens(pool: PgPool) {
+        let first = insert_outbox_event(&pool, &draft("oldest")).await.unwrap();
+        let second = insert_outbox_event(&pool, &draft("next")).await.unwrap();
+        let delayed = insert_outbox_event(&pool, &draft("delayed")).await.unwrap();
+        sqlx::query("UPDATE outbox_delivery_queue SET available_at=CASE event_id WHEN $1 THEN now()-interval '2 minutes' WHEN $2 THEN now()-interval '1 minute' ELSE now()+interval '1 hour' END")
+            .bind(first.id).bind(second.id).execute(&pool).await.unwrap();
+        let claimed = claim_publishable_outbox_events(&pool, 1, 60).await.unwrap();
+        assert_eq!(claimed[0].id, first.id);
+        let old_token = claimed[0].claim_token.unwrap();
+        let next = claim_publishable_outbox_events(&pool, 10, 60)
+            .await
+            .unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].id, second.id);
+        assert!(
+            claim_publishable_outbox_events(&pool, 10, 60)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        sqlx::query("UPDATE outbox_delivery_queue SET available_at=now()-interval '1 second', claimed_until=now()-interval '1 second' WHERE event_id=$1")
+            .bind(first.id).execute(&pool).await.unwrap();
+        let reclaimed = claim_publishable_outbox_events(&pool, 10, 60)
+            .await
+            .unwrap();
+        assert_eq!(reclaimed.len(), 1);
+        assert_eq!(reclaimed[0].id, first.id);
+        assert_eq!(reclaimed[0].publish_attempt_count, Some(2));
+        let current = reclaimed[0].claim_token.unwrap();
+        assert_ne!(old_token, current);
+        assert_eq!(
+            mark_outbox_event_published(&pool, first.id, old_token)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            reschedule_outbox_event(&pool, first.id, old_token, 60, "stale")
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            reschedule_outbox_event(&pool, first.id, current, 60, "retry")
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            claim_publishable_outbox_events(&pool, 10, 60)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        sqlx::query("UPDATE outbox_delivery_queue SET available_at=now()-interval '1 second' WHERE event_id=$1")
+            .bind(first.id).execute(&pool).await.unwrap();
+        let retry = claim_publishable_outbox_events(&pool, 10, 60)
+            .await
+            .unwrap();
+        assert_eq!(retry[0].error_message.as_deref(), Some("retry"));
+        assert_eq!(retry[0].publish_attempt_count, Some(3));
+        assert_eq!(
+            mark_outbox_event_published(&pool, first.id, retry[0].claim_token.unwrap())
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(
+            claim_publishable_outbox_events(&pool, 10, 60)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            select_outbox_event_by_id(&pool, first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "published"
+        );
+        assert_eq!(
+            select_outbox_event_by_id(&pool, delayed.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .publish_attempt_count,
+            Some(0)
+        );
+        for (limit, lease) in [
+            (None, Some(60)),
+            (Some(0_i64), Some(60)),
+            (Some(1000001), Some(60)),
+            (Some(1), None),
+            (Some(1), Some(0)),
+            (Some(1), Some(86401)),
+        ] {
+            let error = sqlx::query("SELECT * FROM vigilo_claim_outbox($1::bigint,$2::integer)")
+                .bind(limit)
+                .bind(lease)
+                .execute(&pool)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.as_database_error().unwrap().code().as_deref(),
+                Some("22023")
+            );
+        }
     }
 
     fn draft(label: &str) -> OutboxEventDraft {
