@@ -114,3 +114,12 @@ and denies public execution. A limited non-login owner needs SELECT on the ledge
 and queue, and UPDATE on the queue. Explicit caller grants permit claims without
 table access. Publication acknowledgments, rescheduling and backlog metrics retain
 their separate authority.
+
+The shard-summary migration defines `vigilo_pending_aggregation(bigint)`.
+It returns a bounded, ordered list of run/shard identities and current write
+epochs needing receipt aggregation or final verification. Discovery is one
+client statement and does not claim pages or mutate progress. Its limited
+non-login owner needs SELECT on summaries, local admissions and settlement
+consumptions. The function binds relations to the installation schema, fixes its
+search path and denies public execution. Page claims, progress writes and
+candidate rotation retain their separate authority.

@@ -124,6 +124,12 @@ skip locked delivery rows. Publication acknowledgments and retries must present
 the current token; expired claims can be reclaimed without changing the durable
 event. Claiming uses one database call.
 
+Aggregation discovery uses a restricted database function to return bounded
+run/shard identities and current write epochs. It excludes sealed and idle shards
+and admissions outside open or draining state. Unconsumed receipts and shards
+ready for final verification remain eligible. Discovery uses one database call;
+page processing rechecks ownership and retains its existing transaction boundary.
+
 ## Related
 
 - [Structure overview](../..)

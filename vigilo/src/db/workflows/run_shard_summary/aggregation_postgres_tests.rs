@@ -535,7 +535,7 @@ async fn slow_discovery_does_not_exhaust_the_page_scheduling_window(pool: PgPool
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
                  WHERE datname=current_database() AND pid<>pg_backend_pid()
                  AND wait_event_type='Lock'
-                 AND query LIKE '%SELECT s.run_id,s.run_shard,a.write_epoch%')",
+                 AND query LIKE '%FROM vigilo_pending_aggregation(%')",
             )
             .fetch_one(&pool)
             .await
@@ -650,4 +650,134 @@ async fn aggregation_drains_receipts_across_byte_limited_pages(pool: PgPool) {
             .unwrap(),
         0
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_aggregation_discovery_requires_grants_without_mutation(pool: PgPool) {
+    let (run, _) = initialized_chunk(&pool, "failed").await;
+    let role = format!("aggregation_caller_{}", Uuid::new_v4().simple());
+    let owner = format!("aggregation_owner_{}", Uuid::new_v4().simple());
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_pending_aggregation(1); RAISE EXCEPTION 'unexpected access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {owner} NOLOGIN;
+        GRANT USAGE ON SCHEMA public TO {owner};
+        GRANT SELECT ON public.run_shard_summaries,public.local_shard_admissions,public.run_chunk_settlement_consumptions TO {owner};
+        ALTER FUNCTION public.vigilo_pending_aggregation(bigint) OWNER TO {owner};
+        GRANT EXECUTE ON FUNCTION public.vigilo_pending_aggregation(bigint) TO {role};
+        SET LOCAL ROLE {role};")).execute(&mut *tx).await.unwrap();
+    let access: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.run_shard_summaries','SELECT') OR has_table_privilege(current_user,'public.local_shard_admissions','SELECT') OR has_table_privilege(current_user,'public.run_chunk_settlement_consumptions','SELECT')")
+        .fetch_one(&mut *tx).await.unwrap();
+    assert!(!access);
+    let (rows, calls) = record_queries(
+        sqlx::query_as::<_, (Uuid, i16, i64)>("SELECT * FROM public.vigilo_pending_aggregation(1)")
+            .fetch_all(&mut *tx),
+    )
+    .await;
+    assert_eq!(rows.unwrap(), vec![(run, 4, 1)]);
+    assert_eq!(calls.len(), 1);
+    tx.rollback().await.unwrap();
+    // Discovery does not consume receipts, rotate candidates or acquire ownership.
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM run_shard_summaries s WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for _ in 0..2 {
+        let rows: Vec<(Uuid, i16, i64)> =
+            sqlx::query_as("SELECT * FROM vigilo_pending_aggregation(1)")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(run, 4, 1)]);
+    }
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM run_shard_summaries s WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        advance_pending_summaries(&pool, &scheduling(2))
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn aggregation_discovery_preserves_eligibility_order_and_epochs(pool: PgPool) {
+    let (idle, _) = initialized_chunk(&pool, "pending").await;
+    let (first, _) = initialized_chunk(&pool, "failed").await;
+    let (second, _) = initialized_chunk(&pool, "failed").await;
+    sqlx::query("UPDATE run_shard_summaries SET updated_at=CASE run_id WHEN $1 THEN '2000-01-01'::timestamptz WHEN $2 THEN '2000-01-02'::timestamptz ELSE '2000-01-03'::timestamptz END")
+        .bind(idle).bind(first).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE local_shard_admissions SET state='draining',write_epoch=7 WHERE run_id=$1")
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rows: Vec<(Uuid, i16, i64)> = sqlx::query_as("SELECT * FROM vigilo_pending_aggregation(1)")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![(first, 4, 1)]);
+    let rows: Vec<(Uuid, i16, i64)> =
+        sqlx::query_as("SELECT * FROM vigilo_pending_aggregation(10)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![(first, 4, 1), (second, 4, 7)]);
+    sqlx::query("UPDATE local_shard_admissions SET state='closed' WHERE run_id=$1")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE local_shard_admissions SET state='prepared',move_id=gen_random_uuid(),move_claim_generation=1,move_claim_token=gen_random_uuid() WHERE run_id=$1")
+        .bind(second).execute(&pool).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM vigilo_pending_aggregation(10)")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("UPDATE local_shard_admissions SET state='open',write_epoch=8 WHERE run_id=$1")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(advance_shard_summary(&pool, first, 4, 8).await.unwrap());
+    // Receipt consumption does not hide a shard that still needs final sealing.
+    let rows: Vec<(Uuid, i16, i64)> =
+        sqlx::query_as("SELECT * FROM vigilo_pending_aggregation(10)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![(first, 4, 8)]);
+    assert!(advance_shard_summary(&pool, first, 4, 8).await.unwrap());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM vigilo_pending_aggregation(10)")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    for limit in [None, Some(0_i64), Some(-1), Some(100001)] {
+        let error = sqlx::query("SELECT * FROM vigilo_pending_aggregation($1::bigint)")
+            .bind(limit)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("22023")
+        );
+    }
 }

@@ -68,7 +68,7 @@ sequenceDiagram
                 end
             end
             loop Serviceable databases with bounded concurrency
-                Vigilo->>ExecutionDB: Discover bounded ready candidates
+                Vigilo->>ExecutionDB: Discover bounded ready candidates through restricted function
                 loop Fair page admission within database page and time budgets
                     Note over Vigilo,ExecutionDB: Bounded shard concurrency with one in-flight page per shard
                     Vigilo->>ExecutionDB: Try page claim, fence ownership, and commit progress or canonical checkpoint

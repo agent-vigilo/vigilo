@@ -521,18 +521,7 @@ pub(crate) async fn advance_pending_summaries(
 ) -> anyhow::Result<usize> {
     let limit = config.candidate_limit()?;
     let candidates = sqlx::query_as::<_, (Uuid, i16, i64)>(
-        r#"
-        SELECT s.run_id,s.run_shard,a.write_epoch
-        FROM run_shard_summaries s
-        JOIN local_shard_admissions a USING (run_id,run_shard)
-        WHERE NOT s.sealed
-        AND a.state IN ('open','draining')
-        AND ((s.planned_chunk_count > 0 AND s.settled_chunk_count >= s.planned_chunk_count)
-             OR EXISTS (SELECT 1 FROM run_chunk_settlement_consumptions p
-                        WHERE p.run_id=s.run_id AND p.run_shard=s.run_shard AND NOT p.consumed))
-        ORDER BY s.updated_at,s.run_id,s.run_shard
-        LIMIT $1
-        "#,
+        "SELECT run_id, run_shard, write_epoch FROM vigilo_pending_aggregation($1)",
     )
     .bind(limit)
     .fetch_all(db)

@@ -27,7 +27,7 @@ flowchart TD
     DispatchIsolated[Leave cursor open and exclude failed alias]
     Finalize[Restricted candidate discovery and lease claim; finalize exact valid seals]
     FinalizeIsolated[Defer candidate; inspect next run]
-    Aggregate[Discover ready shards with bounded database and shard concurrency]
+    Aggregate[Restricted ready-shard discovery with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}
     AggregationPage[Try claim and atomically commit one bounded receipt or canonical page]
     AggregationNext[Visit unchecked candidates before revisiting shards with ready work]

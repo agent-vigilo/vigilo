@@ -29,7 +29,7 @@ flowchart TD
     FinalizeClaim{Candidate has exact valid seals?}
     FinalizeRun[Restricted lease claim; roll up counts, set gate, and enqueue completion event]
     FinalizeIsolated[Defer run and retain healthy summary reads]
-    Aggregate[Discover ready shards with bounded database and shard concurrency]
+    Aggregate[Restricted ready-shard discovery with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}
     AggregationPage[Try claim and atomically commit one bounded receipt or canonical page]
     AggregationNext[Visit unchecked candidates before revisiting shards with ready work]
