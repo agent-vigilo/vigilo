@@ -129,16 +129,11 @@ pub(crate) async fn deliver(
     run_id: Option<Uuid>,
 ) -> anyhow::Result<Vec<super::run_cancel::CancelRunOutcome>> {
     let pool = router.control().await?;
-    let deliveries:Vec<Delivery> = sqlx::query_as(r#"
-        WITH candidates AS (
-            SELECT tenant_id,run_id,database_alias FROM run_control_deliveries
-            WHERE ($1::uuid IS NULL OR run_id=$1) AND available_at<=clock_timestamp() AND (claimed_until IS NULL OR claimed_until<clock_timestamp())
-              AND (applied_at IS NULL OR (execution_control<>'enabled' AND quiescent_at IS NULL))
-            ORDER BY available_at,run_id,database_alias LIMIT 32 FOR UPDATE SKIP LOCKED
-        ) UPDATE run_control_deliveries d SET claim_token=gen_random_uuid(),claimed_until=clock_timestamp()+interval '60 seconds',attempts=attempts+1
-        FROM candidates c WHERE d.tenant_id=c.tenant_id AND d.run_id=c.run_id AND d.database_alias=c.database_alias
-        RETURNING d.tenant_id,d.run_id,d.database_alias,d.revision,d.execution_control,d.claim_token,d.applied_at IS NOT NULL AS applied
-    "#).bind(run_id).fetch_all(pool).await?;
+    let deliveries: Vec<Delivery> =
+        sqlx::query_as("SELECT * FROM vigilo_claim_control_deliveries($1)")
+            .bind(run_id)
+            .fetch_all(pool)
+            .await?;
     let outcomes = stream::iter(deliveries).map(|delivery| async move {
         let applied = router.run_database_operation(&delivery.database_alias,"run_control_delivery",async {
             let local = router.execution_database(&delivery.database_alias).await?;

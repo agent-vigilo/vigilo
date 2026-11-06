@@ -62,3 +62,14 @@ callers receive only explicit execute grants. Discovery alone grants no lease.
 
 Triggers attached to these writes must qualify their relation references or set
 their own safe search path; they must not rely on an ambient application search path.
+
+
+The control-delivery migration defines `vigilo_claim_control_deliveries(uuid)` in
+its installation schema. A supplied run ID narrows selection; NULL selects eligible
+work across runs. It atomically claims at most 32 available delivery rows with
+60-second leases and fresh tokens, skipping locked rows. Application and quiescence
+remain distinct; applied but nonquiescent paused/revoked work remains retryable.
+The function has a fixed search path, schema-bound references, and no PUBLIC execute
+grant. Administrative deployments assign a non-login owner with schema usage and
+SELECT/UPDATE on control deliveries (and appropriate row-policy access), then grant
+execution explicitly. Claim permission does not grant direct caller table access.

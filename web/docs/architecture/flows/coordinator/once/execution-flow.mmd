@@ -19,7 +19,7 @@ sequenceDiagram
     Vigilo->>Vigilo: Load throughput knobs and generate coordinator id
     Vigilo->>Vigilo: Load database context
 
-    Vigilo->>ControlDB: Claim bounded pending execution controls
+    Vigilo->>ControlDB: Call restricted function to claim bounded pending controls
     Vigilo->>ExecutionDB: Apply revision or observe worker quiescence
     Vigilo->>ControlDB: Acknowledge matching revision and claim; retry failures
     Vigilo->>ExecutionDB: Settle quiescent revoked runs with bounded concurrency

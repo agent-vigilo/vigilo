@@ -20,7 +20,9 @@ Describes the major internal responsibilities of the coordinator runtime.
 
 ## Notes
 
-- Execution controls run first: bounded direct database deliveries apply revisions,
+- Execution controls run first: a restricted database function claims at most 32
+  eligible deliveries with fresh tokens and 60-second leases. Bounded direct
+  database deliveries apply revisions,
   observe worker quiescence, and retry cancellation cleanup. Unavailable placements
   remain pending; acknowledgments are fenced by revision and delivery claim.
 - Run-creation recovery uses restricted database discovery and lease-claim

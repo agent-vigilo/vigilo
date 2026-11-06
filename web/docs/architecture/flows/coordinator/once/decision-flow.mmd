@@ -11,7 +11,7 @@ flowchart TD
 
     CoordinatorId[Load throughput knobs and generate coordinator id]
     Database{Database context available?}
-    Controls[Deliver bounded controls and observe quiescence]
+    Controls[Claim deliveries through restricted function; apply and observe quiescence]
     SettleControls[Retry cleanup for quiescent revoked runs]
     RecoverCreation[Discover accepted ready plans and acquire fenced admission lease]
     ReadPlan[Verify immutable roots, configuration and gate counts]

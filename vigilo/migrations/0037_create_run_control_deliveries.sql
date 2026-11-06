@@ -20,3 +20,38 @@ CREATE INDEX idx_run_control_delivery_pending
     WHERE applied_at IS NULL OR (execution_control <> 'enabled' AND quiescent_at IS NULL);
 COMMENT ON TABLE run_control_deliveries IS
     'Revision-fenced direct database control delivery. Separate from broker publication; application and worker quiescence are distinct observations.';
+
+-- A scheduler can claim bounded work without direct access to delivery rows.
+-- Bind relations to the installation schema, not the caller's search path.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_claim_control_deliveries(requested_run UUID)
+RETURNS TABLE (
+    tenant_id UUID, run_id UUID, database_alias TEXT, revision BIGINT,
+    execution_control %1$I.execution_control, claim_token UUID, applied BOOLEAN
+)
+LANGUAGE sql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+    WITH candidates AS (
+        SELECT q.tenant_id,q.run_id,q.database_alias
+        FROM %1$I.run_control_deliveries q
+        WHERE (requested_run IS NULL OR q.run_id=requested_run)
+          AND q.available_at<=clock_timestamp()
+          AND (q.claimed_until IS NULL OR q.claimed_until<clock_timestamp())
+          AND (q.applied_at IS NULL OR (q.execution_control<>'enabled' AND q.quiescent_at IS NULL))
+        ORDER BY q.available_at,q.run_id,q.database_alias
+        LIMIT 32 FOR UPDATE SKIP LOCKED
+    )
+    UPDATE %1$I.run_control_deliveries d
+    SET claim_token=gen_random_uuid(),claimed_until=clock_timestamp()+interval '60 seconds',attempts=d.attempts+1
+    FROM candidates c
+    WHERE d.tenant_id=c.tenant_id AND d.run_id=c.run_id AND d.database_alias=c.database_alias
+    RETURNING d.tenant_id,d.run_id,d.database_alias,d.revision,d.execution_control,d.claim_token,d.applied_at IS NOT NULL;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_claim_control_deliveries(UUID) FROM PUBLIC', installation_schema);
+END;
+$install$;
