@@ -108,3 +108,51 @@ COMMENT ON COLUMN run_chunks.updated_at IS
 
 COMMENT ON INDEX idx_run_chunks_expired_leases IS
     'Hot index for coordinator recovery scans over expired leased chunks.';
+
+-- Discover bounded expired work and retain movement admission in the caller's
+-- transaction. Recovery writes use a subsequent statement/fresh snapshot.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_claim_chunk_recovery(p_max_recoveries integer, p_batch_size bigint)
+RETURNS TABLE(run_id uuid, run_shard smallint)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+DECLARE candidate record;
+BEGIN
+    IF p_max_recoveries IS NULL OR p_max_recoveries < 0 OR p_max_recoveries > 10000
+       OR p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 1000000 THEN
+        RAISE EXCEPTION 'invalid chunk recovery limits' USING ERRCODE = '22023';
+    END IF;
+    FOR candidate IN
+        SELECT DISTINCT c.run_id, c.run_shard FROM (
+            (SELECT rc.run_id, rc.run_shard FROM %1$I.run_chunks rc
+             WHERE rc.status = 'leased' AND rc.leased_until < now()
+               AND rc.recovery_count < p_max_recoveries
+             ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size)
+            UNION ALL
+            (SELECT rc.run_id, rc.run_shard FROM %1$I.run_chunks rc
+             WHERE rc.status = 'leased' AND rc.leased_until < now()
+               AND rc.recovery_count >= p_max_recoveries
+             ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size)
+        ) c ORDER BY c.run_id, c.run_shard
+    LOOP
+        IF pg_try_advisory_xact_lock_shared(
+            hashtextextended(candidate.run_id::text, candidate.run_shard::bigint)
+        ) THEN
+            run_id := candidate.run_id;
+            run_shard := candidate.run_shard;
+            RETURN NEXT;
+        END IF;
+    END LOOP;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.vigilo_claim_chunk_recovery(integer,bigint) FROM PUBLIC',
+        installation_schema
+    );
+END;
+$install$;

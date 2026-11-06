@@ -196,37 +196,13 @@ pub(crate) async fn recover_expired_chunk_leases(
     // takes a fresh snapshot and rechecks local state after these nonblocking
     // claims, so a completed move cannot leave recovery writing the old owner.
     let candidates = sqlx::query_as::<_, (Uuid, i16)>(
-        r#"
-        SELECT DISTINCT run_id,run_shard FROM (
-            (SELECT run_id,run_shard FROM run_chunks WHERE status = 'leased'
-                AND leased_until < now() AND recovery_count < $1
-                ORDER BY leased_until,run_id,id LIMIT $2)
-            UNION ALL
-            (SELECT run_id,run_shard FROM run_chunks WHERE status = 'leased'
-                AND leased_until < now() AND recovery_count >= $1
-                ORDER BY leased_until,run_id,id LIMIT $2)
-        ) candidates ORDER BY run_id,run_shard
-    "#,
+        "SELECT run_id, run_shard FROM vigilo_claim_chunk_recovery($1,$2)",
     )
     .bind(max_recoveries)
     .bind(batch_size)
     .fetch_all(&mut *tx)
     .await?;
-    let mut admitted_runs = Vec::new();
-    let mut admitted_shards = Vec::new();
-    for (run_id, shard) in candidates {
-        let admitted: bool = sqlx::query_scalar(
-            "SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1::uuid::text,$2::bigint))",
-        )
-        .bind(run_id)
-        .bind(i64::from(shard))
-        .fetch_one(&mut *tx)
-        .await?;
-        if admitted {
-            admitted_runs.push(run_id);
-            admitted_shards.push(shard);
-        }
-    }
+    let (admitted_runs, admitted_shards): (Vec<_>, Vec<_>) = candidates.into_iter().unzip();
     let (recovered, failed_rows) = recover_expired_chunks(
         &mut tx,
         max_recoveries,

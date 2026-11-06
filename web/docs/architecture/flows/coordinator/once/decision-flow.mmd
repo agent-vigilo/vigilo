@@ -19,7 +19,7 @@ flowchart TD
     CreationDeferred[Release ownership and continue bounded candidates]
     RecoveryCatalog{Execution placement catalog available?}
     RecoveryPlacement{Execution placements remain?}
-    Recover[Recover expired chunk leases]
+    Recover[Restricted expired-lease discovery and movement locks; recheck ownership and recover]
     RecoveryIsolated[Classify failure, count it, and skip alias]
     DispatchClaim{Restricted cursor claim returned a route?}
     DispatchRun[Start run if needed and enqueue shard chunk window]

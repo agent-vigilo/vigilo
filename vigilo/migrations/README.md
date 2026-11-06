@@ -85,3 +85,12 @@ The function has schema-bound references, a fixed search path and no PUBLIC exec
 grant. Its administrative non-login owner needs schema usage, SELECT/UPDATE on runs,
 and SELECT on control deliveries, plus appropriate row-policy access. Callers need
 only an explicit execute grant for claiming, not direct table access.
+
+The chunk migration defines `vigilo_claim_chunk_recovery(integer,bigint)`.
+It discovers bounded expired chunks in each retry class and acquires shared
+transaction-level movement locks before returning distinct run/shard identities.
+Recovery writes follow in a separate statement, rechecking current ownership.
+The function binds its table to the installation schema, fixes its search path,
+and denies public execution. An explicitly granted caller needs no table access
+for discovery; a limited non-login owner needs SELECT on `run_chunks`.
+Recovery writes and terminal settlement require their own authority.

@@ -21,7 +21,7 @@ flowchart TD
     CreationDeferred[Release ownership and continue bounded candidates]
     Circuit{Alias circuit admits operation?}
     CircuitSkip[Leave durable work pending and continue]
-    Recover[Recover expired chunk leases]
+    Recover[Restricted expired-lease discovery and movement locks; recheck ownership and recover]
     RecoveryIsolated[Count placement failure and continue aliases]
     Dispatch[Claim cursor through restricted function and dispatch its window]
     DispatchIsolated[Leave cursor open and exclude failed alias]

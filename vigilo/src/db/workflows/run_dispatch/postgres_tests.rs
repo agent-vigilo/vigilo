@@ -780,3 +780,115 @@ async fn restricted_dispatch_claim_preserves_locks_without_table_access(pool: Pg
     assert_eq!(recovered.route.run_id, run);
     recovered.control_tx.rollback().await.unwrap();
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_chunk_recovery_discovery_retains_movement_locks(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 2), (1, 1), (2, 1)]).await;
+    sqlx::query("UPDATE run_chunks SET status='leased', lease_token=gen_random_uuid(), leased_until=now()-interval '1 minute' WHERE run_id=$1")
+        .bind(run).execute(&pool).await.unwrap();
+    let mut moving = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text,1::bigint))")
+        .bind(run)
+        .execute(&mut *moving)
+        .await
+        .unwrap();
+    let role = format!("recovery_caller_{}", Uuid::new_v4().simple());
+    let owner = format!("recovery_owner_{}", Uuid::new_v4().simple());
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_chunk_recovery(3,100); RAISE EXCEPTION 'unexpected access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {owner} NOLOGIN; GRANT USAGE ON SCHEMA public TO {owner}; GRANT SELECT ON public.run_chunks TO {owner}; ALTER FUNCTION public.vigilo_claim_chunk_recovery(integer,bigint) OWNER TO {owner}; GRANT EXECUTE ON FUNCTION public.vigilo_claim_chunk_recovery(integer,bigint) TO {role}; SET LOCAL ROLE {role};"))
+        .execute(&mut *tx).await.unwrap();
+    let access: bool =
+        sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.run_chunks','SELECT')")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert!(!access);
+    let (rows, queries) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        sqlx::query_as::<_, (Uuid, i16)>("SELECT * FROM public.vigilo_claim_chunk_recovery(3,100)")
+            .fetch_all(&mut *tx),
+    )
+    .await;
+    assert_eq!(rows.unwrap(), vec![(run, 0), (run, 2)]);
+    assert_eq!(queries.len(), 1);
+    // Shared claims allow competing recovery transactions; chunk row locks in
+    // the subsequent recovery statements decide which coordinator writes.
+    let competing: Vec<(Uuid, i16)> =
+        sqlx::query_as("SELECT * FROM public.vigilo_claim_chunk_recovery(3,100)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(competing, vec![(run, 0), (run, 2)]);
+    let locked: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text,0::bigint))",
+    )
+    .bind(run)
+    .fetch_one(&mut *moving)
+    .await
+    .unwrap();
+    assert!(!locked);
+    tx.rollback().await.unwrap();
+    let released: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text,0::bigint))",
+    )
+    .bind(run)
+    .fetch_one(&mut *moving)
+    .await
+    .unwrap();
+    assert!(released);
+    moving.rollback().await.unwrap();
+    let available: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_chunk_recovery(3,100)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(available, 3);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn chunk_recovery_discovery_bounds_each_retry_class(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]).await;
+    sqlx::query("UPDATE run_chunks SET status='leased', lease_token=gen_random_uuid(), leased_until=now()-interval '1 minute'*(10-run_shard), recovery_count=CASE WHEN run_shard IN (2,3) THEN 3 ELSE 0 END WHERE run_id=$1 AND run_shard<5")
+        .bind(run).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE run_chunks SET leased_until=now()+interval '1 hour' WHERE run_id=$1 AND run_shard=4")
+        .bind(run).execute(&pool).await.unwrap();
+    let rows: Vec<(Uuid, i16)> = sqlx::query_as("SELECT * FROM vigilo_claim_chunk_recovery(3,1)")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![(run, 0), (run, 2)]);
+    let all: Vec<(Uuid, i16)> = sqlx::query_as("SELECT * FROM vigilo_claim_chunk_recovery(0,100)")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(all, vec![(run, 0), (run, 1), (run, 2), (run, 3)]);
+    for (limit, batch) in [
+        (None, Some(1_i64)),
+        (Some(-1), Some(1)),
+        (Some(10001), Some(1)),
+        (Some(3), None),
+        (Some(3), Some(0)),
+        (Some(3), Some(1000001)),
+    ] {
+        let error =
+            sqlx::query("SELECT * FROM vigilo_claim_chunk_recovery($1::integer,$2::bigint)")
+                .bind(limit)
+                .bind(batch)
+                .execute(&pool)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("22023")
+        );
+    }
+}
