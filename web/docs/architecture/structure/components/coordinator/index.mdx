@@ -41,6 +41,10 @@ Describes the major internal responsibilities of the coordinator runtime.
 - Cursor selection calls a restricted database function inside the dispatch
   transaction. Its row lock remains held through the routed write; commit or
   rollback releases it. The function requires an explicit execution grant.
+- Dispatch carries the claimed work identity into its execution transaction before
+  taking the shared movement fence and validating local admission. Snapshot, chunk,
+  summary and outbox writes share that context. Missing admission is repaired using
+  the held control transaction; commit, rollback and cancellation clear local context.
 - Already-running run dispatch is cursor-owned and takes only a compatible shared `runs` lock, allowing multiple coordinators to dispatch different shard cursors for the same run while cancellation and finalization retain exclusive lifecycle guards.
 - Finalization is coordinator-owned and lease guarded. Each cycle inspects a
   bounded candidate set, rotates blocked runs behind unchecked work, and can

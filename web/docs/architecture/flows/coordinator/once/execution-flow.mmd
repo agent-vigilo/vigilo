@@ -56,6 +56,7 @@ sequenceDiagram
         Vigilo->>ControlDB: Claim cursor and bind returned work identity in one statement
         ControlDB-->>Vigilo: Dispatch route or no work; retain cursor lock
         Vigilo->>ControlDB: Prepare run snapshot on the same scoped transaction
+        Vigilo->>ExecutionDB: Bind claimed identity, fence movement and validate admission
         Vigilo->>ExecutionDB: Upsert run snapshot and insert one chunk-ready outbox record per selected chunk
         alt Execution placement write succeeds
             ExecutionDB-->>Vigilo: Dispatch shard window result

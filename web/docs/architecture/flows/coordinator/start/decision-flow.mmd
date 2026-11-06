@@ -23,7 +23,7 @@ flowchart TD
     CircuitSkip[Leave durable work pending and continue]
     Recover[Restricted expired-lease discovery and movement locks; recheck ownership and recover]
     RecoveryIsolated[Count placement failure and continue aliases]
-    Dispatch[Claim cursor and bind scope; retain transaction through dispatch]
+    Dispatch[Claim cursor; scope both databases and fence execution admission]
     DispatchIsolated[Leave cursor open and exclude failed alias]
     Finalize[Restricted candidate discovery and lease claim; finalize exact valid seals]
     FinalizeIsolated[Defer candidate; inspect next run]

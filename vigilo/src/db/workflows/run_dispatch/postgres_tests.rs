@@ -892,3 +892,6 @@ async fn chunk_recovery_discovery_bounds_each_retry_class(pool: PgPool) {
         );
     }
 }
+
+#[path = "execution_scope_tests.rs"]
+mod execution_scope_tests;

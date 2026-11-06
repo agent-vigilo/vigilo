@@ -82,7 +82,7 @@ flowchart TD
 
     CycleOrchestrator -->|"Then dispatches with"| DispatchPass
     DispatchPass -->|"Claims one dispatchable chunk window with"| DispatchWorkflow
-    DispatchWorkflow -->|"Claims one control cursor, then updates execution-local chunks, snapshots, outbox records, and delivery rows in <br> <small>[SQL/TCP]</small>"| Database
+    DispatchWorkflow -->|"Claims one control cursor, scopes fenced execution writes, then updates execution-local chunks, snapshots, outbox records, and delivery rows in <br> <small>[SQL/TCP]</small>"| Database
 
     CycleOrchestrator -->|"Then aggregates receipts with"| ReceiptAggregation
     ReceiptAggregation -->|"Per-page claims, ownership fences, and resumable seals in"| Database

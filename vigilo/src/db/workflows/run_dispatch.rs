@@ -294,14 +294,31 @@ async fn dispatch_next_run_window(
 /// Claims and dispatches one exact run-shard through fenced write admission.
 pub(crate) async fn dispatch_admitted_run_window(
     database_router: &database::DatabaseRouter,
-    control_tx: Transaction<'static, Postgres>,
+    mut control_tx: Transaction<'static, Postgres>,
     execution_route: &ExecutionRoute,
     chunk_window_size: i64,
     route: &DispatchRoute,
     snapshot: &DispatchRunSnapshot,
 ) -> Result<Option<DispatchedRun>, RoutedDispatchError> {
+    validate_dispatch_snapshot_route(
+        route.run_id,
+        route.run_shard,
+        snapshot.run_id,
+        snapshot.run_shard,
+    )?;
+    if snapshot.tenant_id != route.tenant_id
+        || execution_route.placement.run_id != route.run_id
+        || execution_route.placement.run_shard != route.run_shard
+        || execution_route.placement.database_alias != route.database_alias
+        || execution_route.placement.write_epoch != route.write_epoch
+        || execution_route.placement.route_version != route.route_version
+    {
+        return Err(RoutedDispatchError::Invariant(anyhow::anyhow!(
+            "dispatch execution route or snapshot ownership mismatch"
+        )));
+    }
     let execution_tx = database_router
-        .begin_execution_admission(execution_route)
+        .begin_dispatch_admission(execution_route, route.tenant_id, &mut control_tx)
         .await
         .map_err(RoutedDispatchError::ExecutionWrite)?;
 

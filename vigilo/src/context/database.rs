@@ -35,6 +35,7 @@ pub(crate) use circuit_breaker::{
 };
 use moka::future::Cache;
 use sqlx::{
+    Executor,
     PgPool,
     Postgres,
     Transaction,
@@ -802,23 +803,51 @@ impl DatabaseRouter {
             .clone())
     }
 
-    /// Acquires write admission for a previously resolved route.
-    ///
-    /// Movement takes the exclusive form of the same advisory lock. Holding
-    /// the shared lock from local epoch validation through the write closes
-    /// the cutover gap after pool resolution.
+    /// Acquires write admission for a previously resolved worker route.
+    /// The shared movement fence remains held through the caller's transaction.
     pub(crate) async fn begin_execution_admission(
         &self,
         route: &ExecutionRoute,
     ) -> anyhow::Result<Transaction<'static, Postgres>> {
-        let mut tx = route.pool.begin().await?;
-        crate::db::shard_write_fence::lock_shared(
-            &mut tx,
-            route.placement.run_id,
-            route.placement.run_shard,
-        )
-        .await?;
+        self.begin_routed_admission(route, None).await
+    }
 
+    /// Acquires dispatch write admission using identity from the held control
+    /// claim. Missing local admission is repaired through that same transaction.
+    pub(crate) async fn begin_dispatch_admission(
+        &self,
+        route: &ExecutionRoute,
+        tenant_id: Uuid,
+        control: &mut sqlx::PgConnection,
+    ) -> anyhow::Result<Transaction<'static, Postgres>> {
+        self.begin_routed_admission(route, Some((tenant_id, control)))
+            .await
+    }
+
+    async fn begin_routed_admission(
+        &self,
+        route: &ExecutionRoute,
+        dispatch: Option<(Uuid, &mut sqlx::PgConnection)>,
+    ) -> anyhow::Result<Transaction<'static, Postgres>> {
+        let mut tx = route.pool.begin().await?;
+        if let Some((tenant_id, _)) = &dispatch {
+            // Only canonical UUIDs and a typed shard enter this fixed SQL. Scope
+            // precedes protected reads without adding a fence round trip.
+            let setup = format!(
+                "{} SELECT pg_advisory_xact_lock_shared(hashtextextended('{}'::uuid::text, {}::bigint))",
+                crate::db::scope::system_settings(*tenant_id, route.placement.run_id),
+                route.placement.run_id,
+                route.placement.run_shard,
+            );
+            (&mut *tx).execute(setup.as_str()).await?;
+        } else {
+            crate::db::shard_write_fence::lock_shared(
+                &mut tx,
+                route.placement.run_id,
+                route.placement.run_shard,
+            )
+            .await?;
+        }
         let hint = LocalShardRouteHint {
             run_id: route.placement.run_id,
             run_shard: route.placement.run_shard,
@@ -835,12 +864,20 @@ impl DatabaseRouter {
                 return Err(error);
             }
 
-            // Upgrade/new-placement repair path only. The shared local fence
-            // prevents movement from changing admission while control metadata
-            // is re-read and the missing row is created.
-            let current = self
-                .select_control_shard_placement(hint.run_id, hint.run_shard)
-                .await?;
+            // Repair a missing local admission under the shared movement fence.
+            // Reuse the claimed control transaction and its identity; a pool
+            // lookup would lose scope and could require a second credential.
+            let current = if let Some((_, control)) = dispatch {
+                shard_placements::select_shard_placement_with(control, hint.run_id, hint.run_shard)
+                    .await?
+                    .ok_or(ExecutionRouteError::MissingShardPlacement {
+                        run_id: hint.run_id,
+                        run_shard: hint.run_shard,
+                    })?
+            } else {
+                self.select_control_shard_placement(hint.run_id, hint.run_shard)
+                    .await?
+            };
             if !route.placement.same_route_fence(&current) || !current.is_dispatchable() {
                 return Err(error);
             }

@@ -60,6 +60,7 @@ sequenceDiagram
             loop Bounded dispatch windows
                 Vigilo->>ControlDB: Claim cursor and bind returned work identity in one statement
                 Vigilo->>ControlDB: Prepare run snapshot on the same scoped transaction
+                Vigilo->>ExecutionDB: Bind claimed identity, fence movement and validate admission
                 Vigilo->>ExecutionDB: Dispatch routed chunk window
                 alt Execution placement succeeds
                     ExecutionDB-->>Vigilo: Dispatch shard window result
