@@ -546,3 +546,6 @@ async fn settlement_claim_preserves_batch_revision_lease_and_query_budgets(pool:
             .unwrap();
     assert_eq!(settled, 0);
 }
+
+#[path = "run_control_scope_tests.rs"]
+mod scope_tests;

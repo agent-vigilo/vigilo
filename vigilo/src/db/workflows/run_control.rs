@@ -5,6 +5,8 @@
 //! remote I/O, and acknowledge only the claimed revision after the local commit.
 //! Worker quiescence is observed separately from application. Retries never undo a
 //! newer revision and a disconnected caller cannot discard committed intent.
+//! Each delivery follow-up binds its claimed identity on an owned transaction;
+//! no control transaction stays open across execution-database I/O.
 use anyhow::{
     Context,
     ensure,
@@ -149,9 +151,7 @@ pub(crate) async fn deliver(
             }
             Err(error) => {
                 tracing::warn!(run_id=%delivery.run_id,database_alias=%delivery.database_alias,error=%error,"execution control delivery deferred");
-                // Persist a bounded, non-secret reason. Full diagnostics stay in trusted logs.
-                sqlx::query("UPDATE run_control_deliveries SET claim_token=NULL,claimed_until=NULL,available_at=clock_timestamp()+least(attempts,30)*interval '1 second',last_error='placement control delivery unavailable' WHERE tenant_id=$1 AND run_id=$2 AND database_alias=$3 AND revision=$4 AND claim_token=$5")
-                    .bind(delivery.tenant_id).bind(delivery.run_id).bind(&delivery.database_alias).bind(delivery.revision).bind(delivery.claim_token).execute(pool).await?;
+                defer(pool, &delivery).await?;
             }
         }
         Ok::<_,anyhow::Error>(())
@@ -164,8 +164,19 @@ pub(crate) async fn deliver(
 
 async fn apply(pool: &PgPool, delivery: &Delivery) -> anyhow::Result<bool> {
     let mut tx = pool.begin().await?;
-    let local:Option<(i64,ExecutionControl)> = sqlx::query_as("SELECT control_revision,execution_control FROM runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE")
-        .bind(delivery.tenant_id).bind(delivery.run_id).fetch_optional(&mut *tx).await?;
+    // The fixed lock statement follows scope installation in the same submission.
+    // Only canonical UUIDs enter this SQL; arbitrary fields remain bound below.
+    let sql = format!(
+        "{}SELECT control_revision,execution_control FROM runs WHERE tenant_id='{}'::uuid AND id='{}'::uuid FOR UPDATE",
+        crate::db::scope::system_settings(delivery.tenant_id, delivery.run_id),
+        delivery.tenant_id,
+        delivery.run_id,
+    );
+    let row = sqlx::Executor::fetch_optional(&mut *tx, sql.as_str()).await?;
+    let local = row
+        .as_ref()
+        .map(<(i64, ExecutionControl) as sqlx::FromRow<_>>::from_row)
+        .transpose()?;
     // No local root means no admitted work. Canonical control fences admission;
     // no existing queue work can claim a nonexistent chunk.
     let Some((revision, state)) = local else {
@@ -306,14 +317,49 @@ pub(crate) async fn progress(pool: &PgPool, run_id: Uuid) -> anyhow::Result<Cont
 /// Already-applied destinations only need a lease observation, not another
 /// mass update. Lost application acknowledgments still replay the full apply.
 async fn observe_quiescence(pool: &PgPool, delivery: &Delivery) -> anyhow::Result<bool> {
-    Ok(sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM run_chunks WHERE tenant_id=$1 AND run_id=$2 AND status='leased' AND leased_until>=clock_timestamp())")
-        .bind(delivery.tenant_id).bind(delivery.run_id).fetch_one(pool).await?)
+    let mut tx = pool.begin().await?;
+    let sql = format!(
+        "{}SELECT NOT EXISTS(SELECT 1 FROM run_chunks WHERE tenant_id='{}'::uuid AND run_id='{}'::uuid AND status='leased' AND leased_until>=clock_timestamp())",
+        crate::db::scope::system_settings(delivery.tenant_id, delivery.run_id),
+        delivery.tenant_id,
+        delivery.run_id,
+    );
+    let row = sqlx::Executor::fetch_one(&mut *tx, sql.as_str()).await?;
+    let (quiet,) = <(bool,) as sqlx::FromRow<_>>::from_row(&row)?;
+    tx.commit().await?;
+    Ok(quiet)
 }
 
 /// Acknowledge only the revision and lease actually applied. Lost acknowledgments
 /// replay safely; a delayed sender cannot clear a replacement claim or revision.
 async fn acknowledge(pool: &PgPool, delivery: &Delivery, quiescent: bool) -> anyhow::Result<bool> {
+    let mut tx = delivery.begin(pool).await?;
     let result = sqlx::query("UPDATE run_control_deliveries SET applied_at=coalesce(applied_at,clock_timestamp()),quiescent_at=CASE WHEN $6 THEN clock_timestamp() ELSE NULL END,claim_token=NULL,claimed_until=NULL,available_at=clock_timestamp()+interval '2 seconds',last_error=NULL WHERE tenant_id=$1 AND run_id=$2 AND database_alias=$3 AND revision=$4 AND claim_token=$5")
-        .bind(delivery.tenant_id).bind(delivery.run_id).bind(&delivery.database_alias).bind(delivery.revision).bind(delivery.claim_token).bind(quiescent).execute(pool).await?;
+        .bind(delivery.tenant_id).bind(delivery.run_id).bind(&delivery.database_alias).bind(delivery.revision).bind(delivery.claim_token).bind(quiescent).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
+impl Delivery {
+    /// Scope one parameterized acknowledgement or retry mutation to its claim.
+    /// SQLx owns the transaction before setup, so cancellation rolls it back.
+    async fn begin(&self, pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        sqlx::Executor::execute(
+            &mut *tx,
+            crate::db::scope::system_settings(self.tenant_id, self.run_id).as_str(),
+        )
+        .await?;
+        Ok(tx)
+    }
+}
+
+/// Defer only this revision/token; a newer claim cannot be cleared by an old sender.
+/// Persist a bounded non-secret reason; full diagnostics stay in trusted logs.
+async fn defer(pool: &PgPool, delivery: &Delivery) -> anyhow::Result<bool> {
+    let mut tx = delivery.begin(pool).await?;
+    let result=sqlx::query("UPDATE run_control_deliveries SET claim_token=NULL,claimed_until=NULL,available_at=clock_timestamp()+least(attempts,30)*interval '1 second',last_error='placement control delivery unavailable' WHERE tenant_id=$1 AND run_id=$2 AND database_alias=$3 AND revision=$4 AND claim_token=$5")
+        .bind(delivery.tenant_id).bind(delivery.run_id).bind(&delivery.database_alias).bind(delivery.revision).bind(delivery.claim_token).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }

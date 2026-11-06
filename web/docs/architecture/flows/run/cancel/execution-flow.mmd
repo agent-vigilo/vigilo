@@ -20,12 +20,12 @@ sequenceDiagram
     API-->>Operator: Current outcome; terminal may be false
     loop Outstanding delivery only
         Coordinator->>Control: Claim bounded pending destinations
-        Coordinator->>Execution: Apply control revision
+        Coordinator->>Execution: Bind claimed identity; apply control revision
         Worker->>Execution: Existing heartbeat observes control
         Worker->>Worker: Stop new cases; cancel supported calls
         Worker->>Execution: Persist safe results; release chunk lease
         Execution-->>Coordinator: Applied / quiescent observations
-        Coordinator->>Control: Acknowledge claimed revision
+        Coordinator->>Control: Scope acknowledgement; match claimed revision and token
     end
     Coordinator->>Execution: Settle unfinished work and receipts
     Coordinator->>Control: Cancellation summary + event

@@ -27,8 +27,8 @@ sequenceDiagram
         else Tick elapsed
             Vigilo->>Vigilo: Run coordinator cycle
             Vigilo->>ControlDB: Call restricted function to claim bounded pending controls
-            Vigilo->>ExecutionDB: Apply revision or observe worker quiescence
-            Vigilo->>ControlDB: Acknowledge matching revision and claim; retry failures
+            Vigilo->>ExecutionDB: Scope claimed work; apply revision or observe worker quiescence
+            Vigilo->>ControlDB: Scope acknowledgement or retry; match revision and claim
             Vigilo->>ControlDB: Restricted function claims up to 16 quiescent revocations
             Vigilo->>ExecutionDB: Settle quiescent revoked runs with bounded concurrency
             Vigilo->>ControlDB: Record completed settlement

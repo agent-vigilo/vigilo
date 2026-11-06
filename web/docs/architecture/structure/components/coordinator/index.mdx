@@ -25,6 +25,9 @@ Describes the major internal responsibilities of the coordinator runtime.
   database deliveries apply revisions,
   observe worker quiescence, and retry cancellation cleanup. Unavailable placements
   remain pending; acknowledgments are fenced by revision and delivery claim.
+  Application, quiescence reads, acknowledgments and retry updates each bind the
+  claimed work identity in a transaction. No control connection is held across
+  remote delivery; rollback and cancelled calls clear transaction-local context.
   A separate restricted function claims at most 16 quiescent revoked runs for
   cleanup, with 60-second leases and fresh settlement tokens.
 - Run-creation recovery uses restricted database discovery and lease-claim

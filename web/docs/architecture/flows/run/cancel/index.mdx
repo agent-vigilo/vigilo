@@ -54,6 +54,11 @@ restore revoked work or restart a terminal run. Revisions prevent delayed delive
 from overwriting a newer decision. Newly seeded chunks inherit their run control;
 shard destinations reconcile control after copying and before opening admission.
 
+Each delivery applies its claimed work identity to the execution transaction.
+Quiescence reads, acknowledgments and retry updates use the same identity in their
+own transactions. Control connections are released before remote I/O; revisions
+and claim tokens fence delayed acknowledgments and retries.
+
 ## Related
 
 - [Run watch flow](/docs/architecture/flows/run/watch/)

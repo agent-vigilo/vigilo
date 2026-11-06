@@ -10,7 +10,7 @@ flowchart TD
     Start([Cancel run]) --> Valid{Accessible active run?}
     Valid -- No --> Error([Not found or terminal-state error])
     Valid -- Yes --> Commit[Atomically record revocation and destinations]
-    Commit --> Deliver[Bounded direct DB delivery]
+    Commit --> Deliver[Bounded direct DB delivery under claimed work identity]
     Deliver --> Applied{Every destination applied?}
     Applied -- No --> Pending[Return pending; coordinator retries outstanding work]
     Pending --> Deliver

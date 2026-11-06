@@ -13,7 +13,7 @@ flowchart TD
     Runner[Start coordinator service runner]
     Event{Next service event?}
     Database{Database context and restricted route validation succeed?}
-    Controls[Claim deliveries through restricted function; apply and observe quiescence]
+    Controls[Claim deliveries; scope apply, quiescence and acknowledgement transactions]
     SettleControls[Claim quiescent revocations through restricted function and retry cleanup]
     RecoverCreation[Discover accepted ready plans and acquire fenced admission lease]
     ReadPlan[Bind claimed identity; load protected plan and verify immutable inputs]
