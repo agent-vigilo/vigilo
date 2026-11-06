@@ -130,6 +130,12 @@ and admissions outside open or draining state. Unconsumed receipts and shards
 ready for final verification remain eligible. Discovery uses one database call;
 page processing rechecks ownership and retains its existing transaction boundary.
 
+Dispatch, finalization and outbox backlog gauges use restricted read-only
+database functions. Routed execution-alias discovery and startup route validation
+also use restricted functions, returning aliases or aggregate counts rather than
+work rows. Each read uses one database call. Exact backlog counts retain their
+existing scan cost and filters.
+
 ## Related
 
 - [Structure overview](../..)

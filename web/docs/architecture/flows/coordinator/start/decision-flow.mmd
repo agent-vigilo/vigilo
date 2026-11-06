@@ -12,7 +12,7 @@ flowchart TD
     CoordinatorId[Generate coordinator id]
     Runner[Start coordinator service runner]
     Event{Next service event?}
-    Database{Database context available?}
+    Database{Database context and restricted route validation succeed?}
     Controls[Claim deliveries through restricted function; apply and observe quiescence]
     SettleControls[Claim quiescent revocations through restricted function and retry cleanup]
     RecoverCreation[Discover accepted ready plans and acquire fenced admission lease]

@@ -39,7 +39,7 @@ sequenceDiagram
             Vigilo->>ExecutionDB: Replay compact admission and verify exact local coverage
             Vigilo->>ControlDB: Checkpoint progress or publish routes and activate
             Note over Vigilo,ControlDB: Failed candidates release ownership, preparation-only runs stay held
-            Vigilo->>ControlDB: List serviceable execution placements
+            Vigilo->>ControlDB: Discover routed execution aliases through restricted function
             loop Serviceable execution placements
                 Vigilo->>Vigilo: Acquire alias circuit permission
                 alt Circuit is open
@@ -55,7 +55,7 @@ sequenceDiagram
                     Vigilo->>Vigilo: Open alias circuit and continue aliases
                 end
             end
-            Vigilo->>ControlDB: Log dispatch cursor backlog
+            Vigilo->>ControlDB: Read dispatch backlog through restricted function
             loop Bounded dispatch windows
                 Vigilo->>ControlDB: Call restricted cursor claim function inside dispatch transaction
                 Vigilo->>ExecutionDB: Dispatch routed chunk window
@@ -78,7 +78,7 @@ sequenceDiagram
                 Vigilo->>Vigilo: Await admitted page operations under the database deadline
             end
 
-            Vigilo->>ControlDB: Log finalization candidate backlog
+            Vigilo->>ControlDB: Read finalization backlog through restricted function
             Vigilo->>ControlDB: Select candidate through restricted discovery function
             Vigilo->>ExecutionDB: Read routed shard summaries in one batch per database
             alt Summary reads succeed and all shard summaries are sealed and valid
@@ -90,7 +90,7 @@ sequenceDiagram
             Vigilo->>Vigilo: Load messaging context
             Vigilo->>ControlDB: List serviceable outbox placements
             loop Serviceable outbox placements
-                Vigilo->>ExecutionDB: Count backlog; claim payload batch through restricted function
+                Vigilo->>ExecutionDB: Read backlog and claim payload batch through restricted functions
                 alt Placement succeeds
                     ExecutionDB-->>Vigilo: Joined event payload batch
                     Vigilo->>Vigilo: Acquire messaging circuit admission per publish

@@ -123,3 +123,14 @@ non-login owner needs SELECT on summaries, local admissions and settlement
 consumptions. The function binds relations to the installation schema, fixes its
 search path and denies public execution. Page claims, progress writes and
 candidate rotation retain their separate authority.
+
+Scheduler-wide reads use restricted, read-only functions: the dispatch-cursor
+migration owns `vigilo_dispatch_backlog()` and `vigilo_finalization_backlog()`;
+the delivery-queue migration owns `vigilo_outbox_backlog()`; the shard-placement
+migration owns `vigilo_execution_aliases()` and `vigilo_unserviceable_routes()`.
+They return aggregate counts/lag or deployment aliases, preserve existing filters,
+and each replace one client statement. Exact counts still scan eligible rows;
+a small result is not a constant-time workload. All bind relations to their
+installation schema, fix the search path and deny public execution. Function
+owners require only SELECT on the referenced relations; callers require explicit
+EXECUTE grants, not work-table access.

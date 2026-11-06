@@ -61,3 +61,47 @@ COMMENT ON INDEX idx_shard_placements_database_alias_status IS
 
 COMMENT ON INDEX idx_shard_placements_inflight_move_target IS
     'Lookup index used to prevent draining or disabling a database placement while an in-flight shard move targets it.';
+
+-- Restricted scheduler read; aggregate/configuration output only.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_execution_aliases()
+RETURNS TABLE(alias text)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+SELECT DISTINCT dp.alias
+        FROM %1$I.database_placements dp
+        JOIN %1$I.shard_placements sp
+          ON sp.database_alias = dp.alias
+        WHERE dp.status IN ('active', 'draining')
+          AND dp.role IN ('shard', 'control_and_shard')
+        ORDER BY dp.alias
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_execution_aliases() FROM PUBLIC', installation_schema);
+END;
+$install$;
+
+-- Restricted scheduler read; aggregate/configuration output only.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_unserviceable_routes()
+RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+SELECT COUNT(*)::bigint
+        FROM %1$I.shard_placements sp
+        JOIN %1$I.database_placements dp
+          ON dp.alias = sp.database_alias
+        WHERE dp.status NOT IN ('active', 'draining')
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_unserviceable_routes() FROM PUBLIC', installation_schema);
+END;
+$install$;

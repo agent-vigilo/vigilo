@@ -57,35 +57,7 @@ pub(crate) async fn select_finalization_candidate_backlog(
     db: &PgPool,
 ) -> anyhow::Result<FinalizationCandidateBacklog> {
     let backlog = sqlx::query_as::<_, FinalizationCandidateBacklog>(
-        r#"
-        WITH candidates AS (
-            SELECT r.updated_at
-            FROM runs r
-            WHERE r.status IN ('running'::run_status, 'finalizing'::run_status)
-          AND r.execution_control = 'enabled'
-              AND (
-                  r.status <> 'finalizing'::run_status
-                  OR r.coordinator_leased_until IS NULL
-                  OR r.coordinator_leased_until < now()
-              )
-              AND EXISTS (
-                  SELECT 1
-                  FROM run_shard_dispatch_cursors c
-                  WHERE c.run_id = r.id
-              )
-              AND NOT EXISTS (
-                  SELECT 1
-                  FROM run_shard_dispatch_cursors c
-                  WHERE c.run_id = r.id
-                    AND c.status = 'open'
-              )
-        )
-        SELECT
-            COUNT(*)::bigint AS candidate_count,
-            FLOOR(EXTRACT(EPOCH FROM now() - MIN(updated_at)))::bigint
-                AS oldest_candidate_lag_seconds
-        FROM candidates
-        "#,
+        "SELECT * FROM vigilo_finalization_backlog()",
     )
     .fetch_one(db)
     .await?;

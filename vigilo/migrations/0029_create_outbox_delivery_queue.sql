@@ -170,3 +170,22 @@ $definition$, installation_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_claim_outbox(bigint,integer) FROM PUBLIC', installation_schema);
 END;
 $install$;
+
+-- Restricted scheduler read; aggregate/configuration output only.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_outbox_backlog()
+RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+SELECT COUNT(*)::bigint
+        FROM %1$I.outbox_delivery_queue
+        WHERE available_at <= now()
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_outbox_backlog() FROM PUBLIC', installation_schema);
+END;
+$install$;

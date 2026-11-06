@@ -10,14 +10,14 @@ flowchart TD
     Start([vigilo coordinator once])
 
     CoordinatorId[Load throughput knobs and generate coordinator id]
-    Database{Database context available?}
+    Database{Database context and restricted route validation succeed?}
     Controls[Claim deliveries through restricted function; apply and observe quiescence]
     SettleControls[Claim quiescent revocations through restricted function and retry cleanup]
     RecoverCreation[Discover accepted ready plans and acquire fenced admission lease]
     ReadPlan[Verify immutable roots, configuration and gate counts]
     AdmitPlan[Replay compact admission and verify coverage]
     CreationDeferred[Release ownership and continue bounded candidates]
-    RecoveryCatalog{Execution placement catalog available?}
+    RecoveryCatalog{Restricted execution-alias discovery succeeds?}
     RecoveryPlacement{Execution placements remain?}
     Recover[Restricted expired-lease discovery and movement locks; recheck ownership and recover]
     RecoveryIsolated[Classify failure, count it, and skip alias]

@@ -145,3 +145,86 @@ $definition$, installation_schema);
     EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_next_finalization_candidate(uuid[]) FROM PUBLIC', installation_schema);
 END;
 $install$;
+
+-- Restricted scheduler read; aggregate/configuration output only.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_dispatch_backlog()
+RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+SELECT COUNT(*)::bigint
+        FROM %1$I.run_shard_dispatch_cursors c
+        JOIN %1$I.runs r
+          ON r.id = c.run_id
+        JOIN %1$I.shard_placements sp
+          ON sp.run_id = c.run_id
+         AND sp.run_shard = c.run_shard
+        JOIN %1$I.database_placements dp
+          ON dp.alias = sp.database_alias
+        WHERE c.status = 'open'
+          AND r.execution_control = 'enabled'
+          AND sp.status = 'active'
+          AND dp.status IN ('active', 'draining')
+          AND dp.role IN ('shard', 'control_and_shard')
+          AND (
+              r.status = 'running'::%1$I.run_status
+              OR (
+                  r.status = 'pending'::%1$I.run_status
+                  AND (
+                      r.coordinator_leased_until IS NULL
+                      OR r.coordinator_leased_until < now()
+                  )
+              )
+          )
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_dispatch_backlog() FROM PUBLIC', installation_schema);
+END;
+$install$;
+
+-- Restricted scheduler read; aggregate/configuration output only.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_finalization_backlog()
+RETURNS TABLE(candidate_count bigint, oldest_candidate_lag_seconds bigint)
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+WITH candidates AS (
+            SELECT r.updated_at
+            FROM %1$I.runs r
+            WHERE r.status IN ('running'::%1$I.run_status, 'finalizing'::%1$I.run_status)
+          AND r.execution_control = 'enabled'
+              AND (
+                  r.status <> 'finalizing'::%1$I.run_status
+                  OR r.coordinator_leased_until IS NULL
+                  OR r.coordinator_leased_until < now()
+              )
+              AND EXISTS (
+                  SELECT 1
+                  FROM %1$I.run_shard_dispatch_cursors c
+                  WHERE c.run_id = r.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM %1$I.run_shard_dispatch_cursors c
+                  WHERE c.run_id = r.id
+                    AND c.status = 'open'
+              )
+        )
+        SELECT
+            COUNT(*)::bigint AS candidate_count,
+            FLOOR(EXTRACT(EPOCH FROM now() - MIN(updated_at)))::bigint
+                AS oldest_candidate_lag_seconds
+        FROM candidates
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_finalization_backlog() FROM PUBLIC', installation_schema);
+END;
+$install$;

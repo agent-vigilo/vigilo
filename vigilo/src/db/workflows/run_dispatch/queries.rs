@@ -50,36 +50,9 @@ pub(crate) async fn claim_next_dispatch_route(
 /// data. Coordinator structured logs use it as a backlog gauge for scale
 /// monitoring.
 pub(crate) async fn count_dispatch_cursor_backlog(db: &PgPool) -> anyhow::Result<i64> {
-    let count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM run_shard_dispatch_cursors c
-        JOIN runs r
-          ON r.id = c.run_id
-        JOIN shard_placements sp
-          ON sp.run_id = c.run_id
-         AND sp.run_shard = c.run_shard
-        JOIN database_placements dp
-          ON dp.alias = sp.database_alias
-        WHERE c.status = 'open'
-          AND r.execution_control = 'enabled'
-          AND sp.status = 'active'
-          AND dp.status IN ('active', 'draining')
-          AND dp.role IN ('shard', 'control_and_shard')
-          AND (
-              r.status = 'running'::run_status
-              OR (
-                  r.status = 'pending'::run_status
-                  AND (
-                      r.coordinator_leased_until IS NULL
-                      OR r.coordinator_leased_until < now()
-                  )
-              )
-          )
-        "#,
-    )
-    .fetch_one(db)
-    .await?;
+    let count = sqlx::query_scalar::<_, i64>("SELECT vigilo_dispatch_backlog()")
+        .fetch_one(db)
+        .await?;
 
     Ok(count)
 }

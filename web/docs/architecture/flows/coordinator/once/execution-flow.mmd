@@ -37,7 +37,7 @@ sequenceDiagram
         Note over Vigilo,ControlDB: Returned failures release ownership and defer the candidate
     end
 
-    Vigilo->>ControlDB: List serviceable execution placements
+    Vigilo->>ControlDB: Discover routed execution aliases through restricted function
     ControlDB-->>Vigilo: Execution database aliases
     loop Serviceable execution placements
         Vigilo->>ExecutionDB: Discover expired leases through restricted function; retain movement locks
@@ -51,7 +51,7 @@ sequenceDiagram
     end
 
     loop Dispatch bounded run-shard windows
-        Vigilo->>ControlDB: Count dispatchable cursor backlog
+        Vigilo->>ControlDB: Read dispatch backlog through restricted function
         Vigilo->>ControlDB: Call restricted cursor claim function inside dispatch transaction
         ControlDB-->>Vigilo: Dispatch route or no work
         Vigilo->>ExecutionDB: Upsert run snapshot and insert one chunk-ready outbox record per selected chunk
@@ -77,7 +77,7 @@ sequenceDiagram
     end
 
     loop Finalize bounded terminal runs
-        Vigilo->>ControlDB: Count finalization candidate backlog
+        Vigilo->>ControlDB: Read finalization backlog through restricted function
         Vigilo->>ControlDB: Select candidate through restricted discovery function
         ControlDB-->>Vigilo: Candidate or no work
         alt Candidate selected
@@ -97,7 +97,7 @@ sequenceDiagram
     Vigilo->>ControlDB: List serviceable outbox placements
     ControlDB-->>Vigilo: Database aliases
     loop Serviceable outbox placements
-        Vigilo->>ExecutionDB: Count backlog; claim payload batch through restricted function
+        Vigilo->>ExecutionDB: Read backlog and claim payload batch through restricted functions
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Joined event payload batch
             loop Bounded outbox publish concurrency

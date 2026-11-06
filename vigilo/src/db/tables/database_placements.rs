@@ -240,19 +240,9 @@ pub(crate) async fn list_active_shard_capable_database_aliases(
 pub(crate) async fn list_serviceable_shard_database_aliases(
     db: &PgPool,
 ) -> anyhow::Result<Vec<String>> {
-    let aliases = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT dp.alias
-        FROM database_placements dp
-        JOIN shard_placements sp
-          ON sp.database_alias = dp.alias
-        WHERE dp.status IN ('active', 'draining')
-          AND dp.role IN ('shard', 'control_and_shard')
-        ORDER BY dp.alias
-        "#,
-    )
-    .fetch_all(db)
-    .await?;
+    let aliases = sqlx::query_scalar::<_, String>("SELECT * FROM vigilo_execution_aliases()")
+        .fetch_all(db)
+        .await?;
 
     Ok(aliases)
 }
@@ -264,17 +254,9 @@ pub(crate) async fn list_serviceable_shard_database_aliases(
 pub(crate) async fn count_shard_placements_on_unserviceable_databases(
     db: &PgPool,
 ) -> anyhow::Result<i64> {
-    let count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM shard_placements sp
-        JOIN database_placements dp
-          ON dp.alias = sp.database_alias
-        WHERE dp.status NOT IN ('active', 'draining')
-        "#,
-    )
-    .fetch_one(db)
-    .await?;
+    let count = sqlx::query_scalar::<_, i64>("SELECT vigilo_unserviceable_routes()")
+        .fetch_one(db)
+        .await?;
 
     Ok(count)
 }

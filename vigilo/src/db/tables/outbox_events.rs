@@ -140,15 +140,9 @@ pub(crate) async fn claim_publishable_outbox_events(
 /// Coordinators log this as a per-placement outbox backlog gauge before
 /// claiming a bounded publish batch.
 pub(crate) async fn count_publishable_outbox_backlog(db: &PgPool) -> anyhow::Result<i64> {
-    let count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM outbox_delivery_queue
-        WHERE available_at <= now()
-        "#,
-    )
-    .fetch_one(db)
-    .await?;
+    let count = sqlx::query_scalar::<_, i64>("SELECT vigilo_outbox_backlog()")
+        .fetch_one(db)
+        .await?;
 
     Ok(count)
 }
