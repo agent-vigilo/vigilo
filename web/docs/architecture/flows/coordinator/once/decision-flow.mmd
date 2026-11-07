@@ -19,7 +19,7 @@ flowchart TD
     CreationDeferred[Release ownership and continue bounded candidates]
     RecoveryCatalog{Restricted execution-alias discovery succeeds?}
     RecoveryPlacement{Execution placements remain?}
-    Recover[Restricted expired-lease discovery and movement locks; recheck ownership and recover]
+    Recover[Restricted expired-lease discovery and movement locks; scope exact batch and recover atomically]
     RecoveryIsolated[Classify failure, count it, and skip alias]
     DispatchClaim{Restricted cursor claim returned a route?}
     DispatchRun[Bind claimed scope on both databases; fence admission and retain cursor lock]

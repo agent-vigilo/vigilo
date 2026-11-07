@@ -39,8 +39,10 @@ Describes the major internal responsibilities of the coordinator runtime.
   enabled and an available lease, replays compact metadata, and enables
   dispatch only after verifying exact local chunk coverage.
 - Chunk lease recovery discovers bounded candidates through a restricted database
-  function that retains shared movement locks in the recovery transaction. Writes
-  recheck local ownership in a subsequent statement.
+  function that retains shared movement locks in the recovery transaction. The
+  exact claimed work set scopes the batch; writes recheck local ownership in
+  subsequent statements. Receipts carry snapshot ownership explicitly, and a
+  failed write rolls back the whole batch. Empty discovery ends the pass.
 - Chunk lease recovery then runs before dispatch and finalization: expired worker chunk leases are either requeued with recovery-scoped chunk-ready outbox event records or marked failed after the recovery limit.
 - Dispatch claims an open `run_id + run_shard` cursor, selects one bounded chunk window from that shard, and inserts one `run.chunk.ready` outbox event record per selected chunk.
 - Cursor selection calls a restricted database function inside the dispatch

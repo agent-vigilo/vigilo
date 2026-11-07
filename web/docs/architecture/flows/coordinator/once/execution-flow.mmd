@@ -42,7 +42,7 @@ sequenceDiagram
     ControlDB-->>Vigilo: Execution database aliases
     loop Serviceable execution placements
         Vigilo->>ExecutionDB: Discover expired leases through restricted function; retain movement locks
-        Vigilo->>ExecutionDB: Recheck ownership; recover or fail chunks and settle in same transaction
+        Vigilo->>ExecutionDB: Bind exact claimed batch; recheck ownership, recover or fail chunks and settle atomically
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Recovered chunks and poison chunks failed
         else Placement operation fails

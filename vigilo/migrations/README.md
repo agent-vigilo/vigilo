@@ -98,12 +98,14 @@ only an explicit execute grant for claiming, not direct table access.
 
 The chunk migration defines `vigilo_claim_chunk_recovery(integer,bigint)`.
 It discovers bounded expired chunks in each retry class and acquires shared
-transaction-level movement locks before returning distinct run/shard identities.
+transaction-level movement locks before returning distinct run/shard identities with ownership.
 Recovery writes follow in a separate statement, rechecking current ownership.
 The function binds its table to the installation schema, fixes its search path,
 and denies public execution. An explicitly granted caller needs no table access
 for discovery; a limited non-login owner needs SELECT on `run_chunks`.
-Recovery writes and terminal settlement require their own authority.
+Recovery binds the exact claimed run/owner map in the retained transaction before
+its batched writes and terminal settlement. Receipt ownership comes from the local
+snapshot; empty discovery performs no follow-up queries.
 
 Finalization uses two restricted scheduler functions:
 `vigilo_next_finalization_candidate(uuid[])` in the dispatch-cursor migration

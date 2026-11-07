@@ -173,7 +173,10 @@ fn dispatch_cursor_status(has_remaining_chunks: bool) -> &'static str {
 ///
 /// Query behavior:
 /// - Runs in one transaction so recovery and poison-chunk failure see a
-///   consistent lease snapshot.
+///   consistent lease snapshot. The restricted claim supplies an exact run/owner
+///   map for batch-scoped follow-up statements; no ownership lookup is needed.
+/// - Empty discovery ends the transaction without follow-up SQL. Nonempty
+///   discovery installs batch context once, regardless of the number of runs.
 /// - First query locks a bounded oldest-expired set below `max_recoveries`,
 ///   resets those chunks to `pending`, increments recovery metadata, and emits
 ///   idempotent recovery-scoped chunk-ready outbox records.
@@ -195,14 +198,34 @@ pub(crate) async fn recover_expired_chunk_leases(
     // Acquire shared movement admission before chunk locks. The following SQL
     // takes a fresh snapshot and rechecks local state after these nonblocking
     // claims, so a completed move cannot leave recovery writing the old owner.
-    let candidates = sqlx::query_as::<_, (Uuid, i16)>(
-        "SELECT run_id, run_shard FROM vigilo_claim_chunk_recovery($1,$2)",
+    let candidates = sqlx::query_as::<_, (Uuid, i16, Uuid)>(
+        "SELECT run_id, run_shard, tenant_id FROM vigilo_claim_chunk_recovery($1,$2)",
     )
     .bind(max_recoveries)
     .bind(batch_size)
     .fetch_all(&mut *tx)
     .await?;
-    let (admitted_runs, admitted_shards): (Vec<_>, Vec<_>) = candidates.into_iter().unzip();
+    if candidates.is_empty() {
+        tx.commit().await?;
+        return Ok(ChunkLeaseRecoveryStats {
+            recovered_chunks: 0,
+            failed_chunks: 0,
+        });
+    }
+    let mut owners = std::collections::BTreeMap::new();
+    let mut admitted_runs = Vec::with_capacity(candidates.len());
+    let mut admitted_shards = Vec::with_capacity(candidates.len());
+    for (run, shard, tenant) in candidates {
+        if let Some(previous) = owners.insert(run, tenant) {
+            anyhow::ensure!(
+                previous == tenant,
+                "conflicting recovery ownership for run {run}"
+            );
+        }
+        admitted_runs.push(run);
+        admitted_shards.push(shard);
+    }
+    crate::db::scope::set_system_batch(&mut tx, &owners).await?;
     let (recovered, failed_rows) = recover_expired_chunks(
         &mut tx,
         max_recoveries,

@@ -47,7 +47,7 @@ sequenceDiagram
                     Note over Vigilo,ExecutionDB: Leave durable work pending
                 else Circuit is closed or half-open probe
                     Vigilo->>ExecutionDB: Discover expired leases through restricted function; retain movement locks
-                    Vigilo->>ExecutionDB: Recheck ownership; recover or fail chunks and settle in same transaction
+                    Vigilo->>ExecutionDB: Bind exact claimed batch; recheck ownership, recover or fail chunks and settle atomically
                 end
                 alt Placement succeeds or probe recovers
                     ExecutionDB-->>Vigilo: Recovered and failed chunk counts

@@ -40,7 +40,7 @@ pub(crate) async fn begin(
     run_id: Uuid,
 ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SELECT set_config('vigilo.tenant_id',$1,true), set_config('vigilo.actor_id',$2,true), set_config('vigilo.run_id',$3,true)")
+    sqlx::query("SELECT set_config('vigilo.tenant_id',$1,true), set_config('vigilo.actor_id',$2,true), set_config('vigilo.run_id',$3,true), set_config('vigilo.run_batch','',true)")
         .bind(context.tenant_id.to_string()).bind(context.actor_id.to_string()).bind(run_id.to_string())
         .execute(&mut *tx).await?;
     Ok(tx)
@@ -53,7 +53,7 @@ pub(crate) async fn begin(
 /// whose row policies must see the settings before that statement starts.
 pub(crate) fn system_settings(tenant_id: Uuid, run_id: Uuid) -> String {
     format!(
-        "SET LOCAL vigilo.tenant_id = '{tenant_id}'; SET LOCAL vigilo.run_id = '{run_id}'; SET LOCAL vigilo.actor_id = ''; "
+        "SET LOCAL vigilo.tenant_id = '{tenant_id}'; SET LOCAL vigilo.run_id = '{run_id}'; SET LOCAL vigilo.actor_id = ''; SET LOCAL vigilo.run_batch = ''; "
     )
 }
 
@@ -81,7 +81,7 @@ pub(crate) async fn validate_connection(
             "database role or row protection does not satisfy the operation boundary".into(),
         ));
     }
-    sqlx::query("SELECT set_config('vigilo.tenant_id','',false), set_config('vigilo.actor_id','',false), set_config('vigilo.run_id','',false)")
+    sqlx::query("SELECT set_config('vigilo.tenant_id','',false), set_config('vigilo.actor_id','',false), set_config('vigilo.run_id','',false), set_config('vigilo.run_batch','',false)")
         .execute(connection).await?;
     Ok(())
 }
@@ -94,6 +94,19 @@ pub(crate) async fn set_system(
     run_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::Executor::execute(&mut **tx, system_settings(tenant_id, run_id).as_str()).await?;
+    Ok(())
+}
+
+/// Bind an exact map of claimed run IDs to their owners for one recovery batch.
+/// The claim bounds the map to at most twice its batch size. Single-run and user
+/// authority is cleared; deployment policies must use exact map lookup, not sets
+/// of independent tenants and runs. The caller retains the claim transaction.
+pub(crate) async fn set_system_batch(
+    tx: &mut Transaction<'_, Postgres>,
+    runs: &std::collections::BTreeMap<Uuid, Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT set_config('vigilo.run_batch',$1::jsonb::text,true), set_config('vigilo.tenant_id','',true), set_config('vigilo.run_id','',true), set_config('vigilo.actor_id','',true)")
+        .bind(sqlx::types::Json(runs)).execute(&mut **tx).await?;
     Ok(())
 }
 

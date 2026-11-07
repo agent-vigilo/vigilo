@@ -79,7 +79,7 @@ impl Guard {
     }
 
     pub async fn initialize(&self, connection: &mut PgConnection) -> Result<(), sqlx::Error> {
-        sqlx::query("SELECT set_config('search_path',format('pg_catalog,%I,pg_temp',$1::text),false),set_config('row_security','on',false),set_config('vigilo.tenant_id','',false),set_config('vigilo.actor_id','',false),set_config('vigilo.run_id','',false),set_config('statement_timeout',$2,false),set_config('lock_timeout',$3,false)")
+        sqlx::query("SELECT set_config('search_path',format('pg_catalog,%I,pg_temp',$1::text),false),set_config('row_security','on',false),set_config('vigilo.tenant_id','',false),set_config('vigilo.actor_id','',false),set_config('vigilo.run_id','',false),set_config('vigilo.run_batch','',false),set_config('statement_timeout',$2,false),set_config('lock_timeout',$3,false)")
             .bind(&self.schema).bind(format!("{}ms",self.statement_ms)).bind(format!("{}ms",self.lock_ms))
             .execute(&mut *connection).await?;
         self.validate(connection).await

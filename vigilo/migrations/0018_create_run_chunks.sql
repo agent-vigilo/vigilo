@@ -116,7 +116,7 @@ DECLARE installation_schema TEXT := current_schema();
 BEGIN
     EXECUTE format($definition$
 CREATE FUNCTION %1$I.vigilo_claim_chunk_recovery(p_max_recoveries integer, p_batch_size bigint)
-RETURNS TABLE(run_id uuid, run_shard smallint)
+RETURNS TABLE(run_id uuid, run_shard smallint, tenant_id uuid)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
@@ -127,13 +127,13 @@ BEGIN
         RAISE EXCEPTION 'invalid chunk recovery limits' USING ERRCODE = '22023';
     END IF;
     FOR candidate IN
-        SELECT DISTINCT c.run_id, c.run_shard FROM (
-            (SELECT rc.run_id, rc.run_shard FROM %1$I.run_chunks rc
+        SELECT DISTINCT c.run_id, c.run_shard, c.tenant_id FROM (
+            (SELECT rc.run_id, rc.run_shard, rc.tenant_id FROM %1$I.run_chunks rc
              WHERE rc.status = 'leased' AND rc.leased_until < now()
                AND rc.recovery_count < p_max_recoveries
              ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size)
             UNION ALL
-            (SELECT rc.run_id, rc.run_shard FROM %1$I.run_chunks rc
+            (SELECT rc.run_id, rc.run_shard, rc.tenant_id FROM %1$I.run_chunks rc
              WHERE rc.status = 'leased' AND rc.leased_until < now()
                AND rc.recovery_count >= p_max_recoveries
              ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size)
@@ -144,6 +144,7 @@ BEGIN
         ) THEN
             run_id := candidate.run_id;
             run_shard := candidate.run_shard;
+            tenant_id := candidate.tenant_id;
             RETURN NEXT;
         END IF;
     END LOOP;

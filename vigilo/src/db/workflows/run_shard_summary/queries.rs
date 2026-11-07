@@ -92,8 +92,8 @@ pub(super) async fn ensure_snapshot_with(
     shard: i16,
 ) -> anyhow::Result<()> {
     sqlx::query(r#"
-        INSERT INTO run_snapshots (run_id, run_shard, run_key, dataset_id, dataset_version_id, dataset_version, evaluation_profile_id, evaluation_profile_version, profile_version_id, profile_hash, aggregation_policy_id, aggregation_policy_version, aggregation_policy_hash, agent_provider, agent_name, agent_version, prompt_config_id, prompt_config_version, config_snapshot, expected_execution_count)
-        SELECT r.id, $2, r.run_key, r.dataset_id, r.dataset_version_id, r.dataset_version, r.evaluation_profile_id, r.evaluation_profile_version, r.profile_version_id, r.profile_hash, r.aggregation_policy_id, r.aggregation_policy_version, r.aggregation_policy_hash, r.agent_provider, r.agent_name, r.agent_version, r.prompt_config_id, r.prompt_config_version, r.config_snapshot,
+        INSERT INTO run_snapshots (tenant_id, run_id, run_shard, run_key, dataset_id, dataset_version_id, dataset_version, evaluation_profile_id, evaluation_profile_version, profile_version_id, profile_hash, aggregation_policy_id, aggregation_policy_version, aggregation_policy_hash, agent_provider, agent_name, agent_version, prompt_config_id, prompt_config_version, config_snapshot, expected_execution_count)
+        SELECT r.tenant_id, r.id, $2, r.run_key, r.dataset_id, r.dataset_version_id, r.dataset_version, r.evaluation_profile_id, r.evaluation_profile_version, r.profile_version_id, r.profile_hash, r.aggregation_policy_id, r.aggregation_policy_version, r.aggregation_policy_hash, r.agent_provider, r.agent_name, r.agent_version, r.prompt_config_id, r.prompt_config_version, r.config_snapshot,
             (SELECT COALESCE(SUM(c.ordinal_end - c.ordinal_start), 0)::int
              FROM run_chunks c WHERE c.run_id = r.id AND c.run_shard = $2)
         FROM runs r WHERE r.id = $1

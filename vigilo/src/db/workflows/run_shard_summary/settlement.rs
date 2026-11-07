@@ -52,16 +52,21 @@ pub(crate) async fn settle_locked_chunk_with(
         matches!(disposition.as_str(), "completed" | "failed" | "cancelled"),
         "cannot settle open chunk {chunk_id}"
     );
-    let (snapshot, policy, receipt_matches, _plan_mode): (Value, String, Option<bool>, String) =
-        sqlx::query_as(
-            r#"
+    let (snapshot, policy, receipt_matches, _plan_mode, tenant_id): (
+        Value,
+        String,
+        Option<bool>,
+        String,
+        Uuid,
+    ) = sqlx::query_as(
+        r#"
         SELECT snapshot.config_snapshot, snapshot.aggregation_policy_hash,
             CASE WHEN receipt.chunk_id IS NOT NULL THEN
                 receipt.ordinal_start = $4 AND receipt.ordinal_end = $5
                 AND receipt.disposition = $6
                 AND receipt.aggregation_policy_hash = snapshot.aggregation_policy_hash
             END AS receipt_matches,
-            set_config('plan_cache_mode', 'force_custom_plan', true)
+            set_config('plan_cache_mode', 'force_custom_plan', true), snapshot.tenant_id
         FROM run_snapshots snapshot
         LEFT JOIN run_chunk_settlements receipt
             ON receipt.run_id = snapshot.run_id
@@ -69,19 +74,19 @@ pub(crate) async fn settle_locked_chunk_with(
             AND receipt.chunk_id = $3
         WHERE snapshot.run_id = $1 AND snapshot.run_shard = $2
         "#,
-        )
-        // Generic plans retain every partition lock, including PostgreSQL's internal
-        // foreign-key queries. Keep this read custom and force custom plans for the
-        // remaining transaction; set_config(..., true) resets at commit or rollback.
-        .persistent(false)
-        .bind(run_id)
-        .bind(shard)
-        .bind(chunk_id)
-        .bind(start)
-        .bind(end)
-        .bind(&disposition)
-        .fetch_one(&mut **tx)
-        .await?;
+    )
+    // Generic plans retain every partition lock, including PostgreSQL's internal
+    // foreign-key queries. Keep this read custom and force custom plans for the
+    // remaining transaction; set_config(..., true) resets at commit or rollback.
+    .persistent(false)
+    .bind(run_id)
+    .bind(shard)
+    .bind(chunk_id)
+    .bind(start)
+    .bind(end)
+    .bind(&disposition)
+    .fetch_one(&mut **tx)
+    .await?;
     if let Some(matches) = receipt_matches {
         anyhow::ensure!(matches, "conflicting chunk settlement {chunk_id}");
         return Ok(());
@@ -158,12 +163,12 @@ pub(crate) async fn settle_locked_chunk_with(
         "chunk {chunk_id} settlement exceeds the receipt byte limit"
     );
     sqlx::query(r#"
-        WITH receipt AS (INSERT INTO run_chunk_settlements (run_id, run_shard, chunk_id, ordinal_start, ordinal_end, aggregation_policy_hash, disposition, summary) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        RETURNING run_id,run_shard,chunk_id,ordinal_start) INSERT INTO run_chunk_settlement_consumptions (run_id,run_shard,chunk_id,ordinal_start) SELECT run_id,run_shard,chunk_id,ordinal_start
+        WITH receipt AS (INSERT INTO run_chunk_settlements (tenant_id, run_id, run_shard, chunk_id, ordinal_start, ordinal_end, aggregation_policy_hash, disposition, summary) VALUES ($9,$1,$2,$3,$4,$5,$6,$7,$8)
+        RETURNING tenant_id,run_id,run_shard,chunk_id,ordinal_start) INSERT INTO run_chunk_settlement_consumptions (tenant_id,run_id,run_shard,chunk_id,ordinal_start) SELECT tenant_id,run_id,run_shard,chunk_id,ordinal_start
         FROM receipt
         "#)
         .bind(run_id).bind(shard).bind(chunk_id).bind(start).bind(end)
-        .bind(policy).bind(disposition).bind(value).execute(&mut **tx).await?;
+        .bind(policy).bind(disposition).bind(value).bind(tenant_id).execute(&mut **tx).await?;
     Ok(())
 }
 

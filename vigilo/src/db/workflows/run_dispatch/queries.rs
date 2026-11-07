@@ -42,7 +42,8 @@ pub(crate) async fn claim_next_dispatch_route(
             SELECT claimed.*,
                    set_config('vigilo.tenant_id',tenant_id::text,true) IS NOT NULL AS tenant_scope_bound,
                    set_config('vigilo.run_id',run_id::text,true) IS NOT NULL AS run_scope_bound,
-                   set_config('vigilo.actor_id','',true) IS NOT NULL AS actor_scope_cleared
+                   set_config('vigilo.actor_id','',true) IS NOT NULL AS actor_scope_cleared,
+                   set_config('vigilo.run_batch','',true) IS NOT NULL AS batch_scope_cleared
             FROM claimed"#,
         )
             .bind(excluded_database_aliases)
