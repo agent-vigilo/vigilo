@@ -111,7 +111,11 @@ Finalization uses two restricted scheduler functions:
 `vigilo_next_finalization_candidate(uuid[])` in the dispatch-cursor migration
 selects one eligible run, preserving heartbeat ordering and cycle exclusions;
 `vigilo_claim_finalization(uuid,uuid,integer)` in the run migration acquires its
-coordinator lease with `SKIP LOCKED`. Each uses one client statement.
+coordinator lease with `SKIP LOCKED`. Each returns authoritative ownership in
+one client statement. Scoped route and summary reads release their transactions
+before remote work. Candidate heartbeat updates use their own scope; the terminal
+transaction binds the claimed identity and atomically writes the root, scorecard
+and completion event. Scorecard and event ownership come from the locked root.
 Both bind relations to the installation schema, fix their search path, validate
 bounded inputs, and deny public execution. The non-login discovery owner needs
 SELECT on runs and dispatch cursors; the claim owner needs SELECT and UPDATE on

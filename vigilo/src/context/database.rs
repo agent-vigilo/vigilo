@@ -1055,6 +1055,21 @@ impl DatabaseRouter {
         shard_placements::list_shard_placements_for_run(db, run_id).await
     }
 
+    /// Read placements under trusted discovered ownership, releasing the control
+    /// transaction before any remote database work starts.
+    pub(crate) async fn execution_placements_for_run_with_context(
+        &self,
+        run_id: Uuid,
+        tenant_id: Uuid,
+    ) -> anyhow::Result<Vec<ShardPlacement>> {
+        let db = self.control().await?;
+        let mut tx = db.begin().await?;
+        crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
+        let rows = shard_placements::list_shard_placements_for_run(&mut *tx, run_id).await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
     /// Returns all readable execution routes for a run.
     ///
     /// Read paths such as results/export can read from `moving` or `draining`
@@ -1096,11 +1111,8 @@ impl DatabaseRouter {
     ) -> anyhow::Result<Vec<ExecutionRoute>> {
         let db = self.control().await?;
         let placements = if let Some(tenant) = tenant_id {
-            let mut tx = db.begin().await?;
-            crate::db::scope::set_system(&mut tx, tenant, run_id).await?;
-            let rows = shard_placements::list_shard_placements_for_run(&mut *tx, run_id).await?;
-            tx.commit().await?;
-            rows
+            self.execution_placements_for_run_with_context(run_id, tenant)
+                .await?
         } else {
             shard_placements::list_shard_placements_for_run(db, run_id).await?
         };

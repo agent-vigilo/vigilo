@@ -211,7 +211,7 @@ DECLARE installation_schema TEXT := current_schema();
 BEGIN
     EXECUTE format($definition$
 CREATE FUNCTION %1$I.vigilo_claim_finalization(p_run_id uuid, p_coordinator_id uuid, p_lease_seconds integer)
-RETURNS TABLE(id uuid, run_key text, aggregation_policy_hash text)
+RETURNS TABLE(id uuid, run_key text, aggregation_policy_hash text, tenant_id uuid)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
@@ -242,7 +242,7 @@ WITH candidate AS (
             updated_at = now()
         FROM candidate
         WHERE r.id = candidate.id
-        RETURNING r.id, r.run_key, r.aggregation_policy_hash;
+        RETURNING r.id, r.run_key, r.aggregation_policy_hash, r.tenant_id;
 END;
 $function$;
 $definition$, installation_schema);

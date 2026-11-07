@@ -34,6 +34,7 @@ async fn finalization_rejects_missing_frozen_plan(pool: PgPool) {
     assert!(
         finalize_claimed_run_from_summaries(
             &pool,
+            Uuid::nil(),
             run,
             owner,
             "aggregation-hash",
@@ -76,6 +77,7 @@ async fn finalize_claimed_run_from_summaries_combines_terminal_shards(pool: PgPo
 
     let finalized = finalize_claimed_run_from_summaries(
         &pool,
+        Uuid::nil(),
         run_id,
         coordinator_id,
         "aggregation-hash",
@@ -180,6 +182,7 @@ async fn finalize_claimed_run_from_summaries_waits_for_running_summary(pool: PgP
 
     let finalized = finalize_claimed_run_from_summaries(
         &pool,
+        Uuid::nil(),
         run_id,
         coordinator_id,
         "aggregation-hash",
@@ -223,6 +226,7 @@ async fn stale_or_expired_finalization_owner_cannot_commit(pool: PgPool) {
 
     let finalized = finalize_claimed_run_from_summaries(
         &pool,
+        Uuid::nil(),
         run_id,
         stale_coordinator_id,
         "aggregation-hash",
@@ -235,6 +239,7 @@ async fn stale_or_expired_finalization_owner_cannot_commit(pool: PgPool) {
     set_finalization_lease(&pool, run_id, stale_coordinator_id, "-1 second").await;
     let expired = finalize_claimed_run_from_summaries(
         &pool,
+        Uuid::nil(),
         run_id,
         stale_coordinator_id,
         "aggregation-hash",
@@ -341,7 +346,7 @@ async fn checked_finalization_candidate_rotates_behind_unchecked_candidate(pool:
     assert_eq!(selected.id, older_run_id);
 
     assert!(
-        mark_finalization_candidate_checked(&pool, older_run_id)
+        mark_finalization_candidate_checked(&pool, Uuid::nil(), older_run_id)
             .await
             .unwrap()
     );
@@ -489,6 +494,7 @@ async fn finalization_requires_exact_control_membership_and_frozen_plan(pool: Pg
     assert!(
         finalize_claimed_run_from_summaries(
             &pool,
+            Uuid::nil(),
             run,
             owner,
             "aggregation-hash",
@@ -507,6 +513,7 @@ async fn finalization_requires_exact_control_membership_and_frozen_plan(pool: Pg
     assert!(
         finalize_claimed_run_from_summaries(
             &pool,
+            Uuid::nil(),
             run,
             owner,
             "aggregation-hash",
@@ -525,6 +532,7 @@ async fn finalization_requires_exact_control_membership_and_frozen_plan(pool: Pg
     assert!(
         finalize_claimed_run_from_summaries(
             &pool,
+            Uuid::nil(),
             run,
             owner,
             "aggregation-hash",
@@ -543,8 +551,22 @@ async fn finalization_requires_exact_control_membership_and_frozen_plan(pool: Pg
     let first = [summary.clone()];
     let second = [summary];
     let (a, b) = tokio::join!(
-        finalize_claimed_run_from_summaries(&pool, run, owner, "aggregation-hash", &first),
-        finalize_claimed_run_from_summaries(&pool, run, owner, "aggregation-hash", &second)
+        finalize_claimed_run_from_summaries(
+            &pool,
+            Uuid::nil(),
+            run,
+            owner,
+            "aggregation-hash",
+            &first
+        ),
+        finalize_claimed_run_from_summaries(
+            &pool,
+            Uuid::nil(),
+            run,
+            owner,
+            "aggregation-hash",
+            &second
+        )
     );
     assert_eq!(
         usize::from(a.unwrap().is_some()) + usize::from(b.unwrap().is_some()),

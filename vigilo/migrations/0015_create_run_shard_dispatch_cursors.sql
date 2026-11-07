@@ -106,7 +106,7 @@ DECLARE installation_schema TEXT := current_schema();
 BEGIN
     EXECUTE format($definition$
 CREATE FUNCTION %1$I.vigilo_next_finalization_candidate(p_excluded uuid[])
-RETURNS TABLE(id uuid, run_key text, aggregation_policy_hash text)
+RETURNS TABLE(id uuid, run_key text, aggregation_policy_hash text, tenant_id uuid)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
@@ -116,7 +116,7 @@ BEGIN
         RAISE EXCEPTION 'invalid excluded run list' USING ERRCODE = '22023';
     END IF;
     RETURN QUERY
-SELECT r.id, r.run_key, r.aggregation_policy_hash
+SELECT r.id, r.run_key, r.aggregation_policy_hash, r.tenant_id
         FROM %1$I.runs r
         WHERE r.status IN ('running'::%1$I.run_status, 'finalizing'::%1$I.run_status)
           AND r.execution_control = 'enabled'

@@ -87,14 +87,16 @@ sequenceDiagram
         Vigilo->>ControlDB: Select candidate through restricted discovery function
         ControlDB-->>Vigilo: Candidate or no work
         alt Candidate selected
-            Vigilo->>ExecutionDB: Read routed shard summaries in one batch per database
+            Vigilo->>ControlDB: Read scoped run placements; commit before remote I/O
+            Vigilo->>ExecutionDB: Read scoped shard-summary batch per database
             alt Every placement read succeeds and summaries are sealed and valid
                 ExecutionDB-->>Vigilo: Terminal summary rows
-                Vigilo->>ControlDB: Claim through restricted lease function; write fenced result and completion event
+                Vigilo->>ControlDB: Claim through restricted lease function; scope atomic result and completion-event commit
                 ControlDB-->>Vigilo: Finalized run or no update
             else Placement read fails or summary is unsealed or invalid
                 ExecutionDB-->>Vigilo: Partial summaries or database error
-                Vigilo->>Vigilo: Defer candidate and continue other runs
+                Vigilo->>ControlDB: Scoped candidate heartbeat update; release transaction
+                Vigilo->>Vigilo: Continue other runs
             end
         end
     end

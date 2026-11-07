@@ -1,4 +1,9 @@
-//! PostgreSQL operations for run finalization.
+//! PostgreSQL discovery, scheduling and atomic finalization of a run.
+//!
+//! Restricted functions return authoritative ownership. Follow-up transactions
+//! bind that identity before protected SQL; scheduling leaves lifecycle state
+//! unchanged, while the terminal CTE rechecks the lease and frozen membership and
+//! commits root counters, owned scorecard and completion event together.
 
 use super::*;
 
@@ -15,7 +20,7 @@ pub(crate) async fn select_next_finalization_candidate(
     excluded_run_ids: &[Uuid],
 ) -> anyhow::Result<Option<ClaimedRunForFinalization>> {
     let candidate = sqlx::query_as::<_, ClaimedRunForFinalization>(
-        "SELECT id, run_key, aggregation_policy_hash FROM vigilo_next_finalization_candidate($1)",
+        "SELECT id, run_key, aggregation_policy_hash, tenant_id FROM vigilo_next_finalization_candidate($1)",
     )
     .bind(excluded_run_ids)
     .fetch_optional(db)
@@ -31,19 +36,18 @@ pub(crate) async fn select_next_finalization_candidate(
 /// The run lifecycle and user-visible `updated_at` timestamp are unchanged.
 pub(crate) async fn mark_finalization_candidate_checked(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
 ) -> anyhow::Result<bool> {
-    let result = sqlx::query(
-        r#"
-        UPDATE runs
-        SET coordinator_heartbeat_at = now()
-        WHERE id = $1::uuid
-          AND status IN ('running'::run_status, 'finalizing'::run_status)
-        "#,
-    )
-    .bind(run_id)
-    .execute(db)
-    .await?;
+    let mut tx = db.begin().await?;
+    // Fixed SQL contains only canonical UUIDs. Scope commands finish before
+    // the protected scheduling UPDATE, sharing its existing submission.
+    let sql = format!(
+        "{}UPDATE runs SET coordinator_heartbeat_at=now() WHERE id='{run_id}'::uuid AND status IN ('running'::run_status,'finalizing'::run_status)",
+        crate::db::scope::system_settings(tenant_id, run_id)
+    );
+    let result = sqlx::Executor::execute(&mut *tx, sql.as_str()).await?;
+    tx.commit().await?;
 
     Ok(result.rows_affected() == 1)
 }
@@ -78,7 +82,7 @@ pub(crate) async fn claim_finalization_candidate(
     lease_seconds: i32,
 ) -> anyhow::Result<Option<ClaimedRunForFinalization>> {
     let claimed = sqlx::query_as::<_, ClaimedRunForFinalization>(
-        "SELECT id, run_key, aggregation_policy_hash FROM vigilo_claim_finalization($1,$2,$3)",
+        "SELECT id, run_key, aggregation_policy_hash, tenant_id FROM vigilo_claim_finalization($1,$2,$3)",
     )
     .bind(run_id)
     .bind(coordinator_id)
@@ -91,6 +95,7 @@ pub(crate) async fn claim_finalization_candidate(
 
 pub(super) async fn finalize_claimed_run(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     coordinator_id: Uuid,
     summary: &FinalizationSummary,
@@ -98,11 +103,16 @@ pub(super) async fn finalize_claimed_run(
     shard_plans: serde_json::Value,
 ) -> anyhow::Result<Option<FinalizedRun>> {
     let scorecard = serde_json::to_value(&summary.scorecard)?;
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
+    // Preserve the former standalone statement's clock boundary: BEGIN and
+    // scope installation must not make an already-expired lease look current.
     let finalized = sqlx::query_as::<_, FinalizedRun>(
         r#"
         WITH run_row AS (
             SELECT
                 id,
+                tenant_id,
                 run_key,
                 expected_execution_count,
                 aggregation_policy_hash
@@ -111,7 +121,7 @@ pub(super) async fn finalize_claimed_run(
               AND status = 'finalizing'::run_status
               AND execution_control = 'enabled'
               AND coordinator_id = $14::uuid
-              AND coordinator_leased_until >= now()
+              AND coordinator_leased_until >= statement_timestamp()
               AND aggregation_policy_hash = $16::text
               AND expected_execution_count = $3
               AND config_snapshot #>> '{settlement_plan,version}' = '1'
@@ -129,6 +139,7 @@ pub(super) async fn finalize_claimed_run(
         ),
         inserted_scorecard AS (
             INSERT INTO run_scorecards (
+                tenant_id,
                 run_id,
                 schema_version,
                 aggregation_policy_hash,
@@ -137,6 +148,7 @@ pub(super) async fn finalize_claimed_run(
                 scorecard
             )
             SELECT
+                rr.tenant_id,
                 rr.id,
                 $15::smallint,
                 $16::text,
@@ -174,16 +186,17 @@ pub(super) async fn finalize_claimed_run(
                     'has_terminal_chunk_failure', $12::bool,
                     'shard_summary_count', $13::int
                 ),
-                finalized_at = COALESCE(r.finalized_at, now()),
-                completed_at = COALESCE(r.completed_at, now()),
+                finalized_at = COALESCE(r.finalized_at, statement_timestamp()),
+                completed_at = COALESCE(r.completed_at, statement_timestamp()),
                 coordinator_leased_until = NULL,
-                coordinator_heartbeat_at = now(),
-                updated_at = now()
+                coordinator_heartbeat_at = statement_timestamp(),
+                updated_at = statement_timestamp()
             FROM run_row rr
             JOIN inserted_scorecard scorecard ON scorecard.run_id = rr.id
             WHERE r.id = rr.id
             RETURNING
                 r.id,
+                r.tenant_id,
                 r.run_key,
                 r.gate_status::text as gate_status,
                 r.terminal_execution_count,
@@ -194,14 +207,15 @@ pub(super) async fn finalize_claimed_run(
         drained_cursors AS (
             UPDATE run_shard_dispatch_cursors c
             SET status = 'drained',
-                updated_at = now()
+                updated_at = statement_timestamp()
             FROM finalized f
             WHERE c.run_id = f.id
             RETURNING 1
         ),
         inserted_event AS (
-            INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, dedupe_key, payload)
+            INSERT INTO outbox_events (tenant_id, event_type, aggregate_type, aggregate_id, dedupe_key, payload)
             SELECT
+                f.tenant_id,
                 'run.completed',
                 'run',
                 f.id,
@@ -253,8 +267,9 @@ pub(super) async fn finalize_claimed_run(
     .bind(summary.missing_execution_count)
     .bind(summary.unresolved_execution_count)
     .bind(shard_plans)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(finalized)
 }

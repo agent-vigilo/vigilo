@@ -950,7 +950,8 @@ async fn finalize_ready_runs(
         checked_run_ids.push(run.id);
 
         let collection =
-            collect_run_shard_summaries(database_router, coordinator_id, run.id).await?;
+            collect_run_shard_summaries(database_router, coordinator_id, run.tenant_id, run.id)
+                .await?;
         let placement_failure_count = collection.failures.failed_operation_count();
         failures.merge(collection.failures);
         let summaries = collection.output.summaries;
@@ -966,7 +967,8 @@ async fn finalize_ready_runs(
                 finalization_candidate_select_ms,
                 "finalization candidate is waiting for sealed shard summaries"
             );
-            run_finalize::mark_finalization_candidate_checked(control_db, run.id).await?;
+            run_finalize::mark_finalization_candidate_checked(control_db, run.tenant_id, run.id)
+                .await?;
             continue;
         }
 
@@ -974,7 +976,8 @@ async fn finalize_ready_runs(
             run_finalize::validate_summary_set(run.id, &summaries, &run.aggregation_policy_hash)
         {
             warn!(run_id = %run.id, error = %error, "invalid finalization summary; deferred this candidate");
-            run_finalize::mark_finalization_candidate_checked(control_db, run.id).await?;
+            run_finalize::mark_finalization_candidate_checked(control_db, run.tenant_id, run.id)
+                .await?;
             continue;
         }
 
@@ -989,10 +992,15 @@ async fn finalize_ready_runs(
             continue;
         };
 
+        anyhow::ensure!(
+            claimed.tenant_id == run.tenant_id,
+            "finalization ownership changed after summary collection"
+        );
         debug!(run_id = %claimed.id, run_key = %claimed.run_key, "claimed run for finalization");
         let finalize_started = Instant::now();
         if let Some(done) = run_finalize::finalize_claimed_run_from_summaries(
             control_db,
+            claimed.tenant_id,
             claimed.id,
             coordinator_id,
             &claimed.aggregation_policy_hash,
@@ -1046,9 +1054,12 @@ struct RunShardSummaryCollection {
 async fn collect_run_shard_summaries(
     database_router: &database::DatabaseRouter,
     coordinator_id: Uuid,
+    tenant_id: Uuid,
     run_id: Uuid,
 ) -> anyhow::Result<PlacementPassResult<RunShardSummaryCollection>> {
-    let placements = database_router.execution_placements_for_run(run_id).await?;
+    let placements = database_router
+        .execution_placements_for_run_with_context(run_id, tenant_id)
+        .await?;
     let mut placements_by_alias = BTreeMap::new();
     for placement in placements {
         placements_by_alias
@@ -1086,8 +1097,12 @@ async fn collect_run_shard_summaries(
                     .iter()
                     .map(|placement| placement.run_shard)
                     .collect::<Vec<_>>();
+                let mut tx = db.begin().await?;
+                crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
                 let summaries =
-                    run_shard_summary::select_run_shard_summaries(&db, run_id, &shards).await?;
+                    run_shard_summary::select_run_shard_summaries(&mut *tx, run_id, &shards)
+                        .await?;
+                tx.commit().await?;
                 let complete = summaries.len() == shards.len();
                 for placement in &placements {
                     if summaries

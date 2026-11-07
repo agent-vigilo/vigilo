@@ -27,7 +27,7 @@ flowchart TD
 
     ReceiptAggregation["<b>Receipt Aggregation</b><br/>Drains ready work in fair rounds with page and time budgets, bounded shard/database concurrency, and one atomic checkpoint per page."]:::component
     FinalizationPass["fa:fa-flag-checkered <br/> <b>Finalization Pass</b> <br/> <small>[Component: Rust]</small> <br/> <small>Bounds finalizable-run work and logs candidate backlog per coordinator cycle.</small>"]:::component
-    FinalizeWorkflow["fa:fa-calculator <br/> <b>Run Finalization Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Merges bounded shard scorecards, applies run gates, and commits the scorecard, gate status, and completion event.</small>"]:::component
+    FinalizeWorkflow["fa:fa-calculator <br/> <b>Run Finalization Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Scopes claimed work, validates exact shard seals, and atomically commits the scorecard, gate status, and completion event.</small>"]:::component
 
     OutboxPublisher["fa:fa-paper-plane <br/> <b>Outbox Publisher</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Claims delivery batches, logs per-placement backlog, publishes with bounded concurrency, and deletes completed rows.</small>"]:::component
     EventPublisher["fa:fa-plug <br/> <b>Event Publisher Boundary</b> <br/> <small>[Component: Rust Trait]</small> <br/> <small>Separates durable outbox handling from the broker transport.</small>"]:::component

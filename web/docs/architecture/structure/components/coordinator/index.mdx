@@ -168,6 +168,13 @@ same identity in a separate short transaction after the page releases its locks.
 Consumption flags and summary checkpoints still commit together; failed pages
 roll back without discarding previously committed progress.
 
+Finalization discovery supplies ownership for scoped route reads and one summary
+read per execution database. Control read transactions end before remote I/O.
+Unready candidates receive a scoped scheduling-heartbeat update. A successful
+lease claim supplies identity for the terminal transaction, which rechecks the
+lease and exact shard membership before committing the run, scorecard and
+completion event together. A failed terminal write leaves those changes uncommitted.
+
 ## Related
 
 - [Structure overview](../..)
