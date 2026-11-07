@@ -781,3 +781,147 @@ async fn aggregation_discovery_preserves_eligibility_order_and_epochs(pool: PgPo
         );
     }
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn aggregation_uses_discovered_ownership_and_scopes_rotation(pool: PgPool) {
+    use futures_util::FutureExt;
+    let mut runs = Vec::new();
+    let tenant = Uuid::now_v7();
+    for owner in [tenant, tenant, Uuid::now_v7()] {
+        let owned = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |c, _| {
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('vigilo.tenant_id',$1,false)")
+                        .bind(owner.to_string())
+                        .execute(c)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        let (run, _) = initialized_chunk(&owned, "failed").await;
+        runs.push(run);
+        owned.close().await;
+    }
+    let role = format!("aggregation_scope_{}", Uuid::now_v7().simple());
+    sqlx::raw_sql(&format!("CREATE ROLE {role} LOGIN PASSWORD 'fixture'; GRANT USAGE ON SCHEMA public TO {role}; GRANT EXECUTE ON FUNCTION vigilo_pending_aggregation(bigint) TO {role};")).execute(&pool).await.unwrap();
+    for table in [
+        "runs",
+        "run_chunks",
+        "run_snapshots",
+        "local_shard_admissions",
+        "run_shard_summaries",
+        "run_chunk_settlements",
+        "run_chunk_settlement_consumptions",
+        "shard_move_captures",
+    ] {
+        let key = if table == "runs" { "id" } else { "run_id" };
+        sqlx::raw_sql(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; CREATE POLICY work_scope ON {table} TO {role} USING(tenant_id=NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid AND {key}=NULLIF(current_setting('vigilo.run_id',true),'')::uuid AND current_setting('vigilo.actor_id',true)='' AND COALESCE(current_setting('vigilo.run_batch',true),'')=''); GRANT SELECT,INSERT,UPDATE ON {table} TO {role};")).execute(&pool).await.unwrap();
+    }
+    sqlx::raw_sql(&format!("GRANT SELECT,INSERT,UPDATE ON shard_move_dirty_keys TO {role}; ALTER TABLE shard_move_dirty_keys ENABLE ROW LEVEL SECURITY; CREATE POLICY work_scope ON shard_move_dirty_keys TO {role} USING(EXISTS(SELECT 1 FROM shard_move_captures c WHERE c.move_id=shard_move_dirty_keys.move_id AND c.tenant_id=shard_move_dirty_keys.tenant_id));")).execute(&pool).await.unwrap();
+    let restricted = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .username(&role)
+                .password("fixture"),
+        )
+        .await
+        .unwrap();
+    let work = async {
+        assert!(
+            aggregation::advance_shard_summary_page(&restricted, Uuid::now_v7(), runs[0], 4, 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            aggregation::advance_shard_summary_page(&restricted, tenant, runs[0], 4, 2)
+                .await
+                .is_err()
+        );
+        sqlx::raw_sql(&format!(
+            "REVOKE UPDATE ON run_chunk_settlement_consumptions FROM {role}"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            advance_pending_summaries(&restricted, &scheduling(6))
+                .await
+                .unwrap(),
+            0
+        );
+        let intact:bool=sqlx::query_scalar("SELECT bool_and(settled_chunk_count=0 AND aggregation_state IS NULL) FROM run_shard_summaries WHERE run_id=ANY($1)").bind(&runs).fetch_one(&pool).await.unwrap();
+        assert!(
+            intact,
+            "failed consumption must roll back the checkpoint and counters"
+        );
+        let consumed:i64=sqlx::query_scalar("SELECT count(*) FROM run_chunk_settlement_consumptions WHERE run_id=ANY($1) AND consumed").bind(&runs).fetch_one(&pool).await.unwrap();
+        assert_eq!(consumed, 0);
+        sqlx::raw_sql(&format!(
+            "GRANT UPDATE ON run_chunk_settlement_consumptions TO {role}"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE run_shard_summaries SET updated_at='2000-01-01' WHERE run_id=$1")
+            .bind(runs[0])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut busy = pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':summary',4))",
+        )
+        .bind(runs[0])
+        .execute(&mut *busy)
+        .await
+        .unwrap();
+        let (result, queries) =
+            record_queries(advance_pending_summaries(&restricted, &scheduling(6))).await;
+        assert_eq!(result.unwrap(), 4);
+        assert_eq!(queries.len(), 27, "{queries:?}");
+        let rotated:bool=sqlx::query_scalar("SELECT updated_at>'2000-01-01'::timestamptz AND settled_chunk_count=0 FROM run_shard_summaries WHERE run_id=$1").bind(runs[0]).fetch_one(&pool).await.unwrap();
+        assert!(
+            rotated,
+            "busy candidate must rotate without consuming receipts"
+        );
+        busy.rollback().await.unwrap();
+        let (result, queries) =
+            record_queries(advance_pending_summaries(&restricted, &scheduling(6))).await;
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(queries.len(), 13, "{queries:?}");
+        let (result, queries) =
+            record_queries(advance_pending_summaries(&restricted, &scheduling(6))).await;
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(queries.len(), 1);
+        let sealed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM run_shard_summaries WHERE sealed AND run_id=ANY($1)",
+        )
+        .bind(&runs)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sealed, 3);
+        let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM run_shard_summaries")
+            .fetch_one(&restricted)
+            .await
+            .unwrap();
+        assert_eq!(visible, 0);
+    };
+    let result = std::panic::AssertUnwindSafe(work).catch_unwind().await;
+    restricted.close().await;
+    sqlx::raw_sql(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}

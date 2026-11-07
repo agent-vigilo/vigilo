@@ -118,7 +118,7 @@ DECLARE installation_schema TEXT := current_schema();
 BEGIN
     EXECUTE format($definition$
 CREATE FUNCTION %1$I.vigilo_pending_aggregation(p_limit bigint)
-RETURNS TABLE(run_id uuid, run_shard smallint, write_epoch bigint)
+RETURNS TABLE(run_id uuid, run_shard smallint, write_epoch bigint, tenant_id uuid)
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
@@ -127,7 +127,7 @@ BEGIN
         RAISE EXCEPTION 'invalid aggregation discovery limit' USING ERRCODE = '22023';
     END IF;
     RETURN QUERY
-SELECT s.run_id,s.run_shard,a.write_epoch
+SELECT s.run_id,s.run_shard,a.write_epoch,s.tenant_id
         FROM %1$I.run_shard_summaries s
         JOIN %1$I.local_shard_admissions a ON a.run_id=s.run_id AND a.run_shard=s.run_shard
         WHERE NOT s.sealed

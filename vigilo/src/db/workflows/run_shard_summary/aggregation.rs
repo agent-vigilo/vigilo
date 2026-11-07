@@ -6,6 +6,8 @@
 //! protects the whole page. Workers never take this aggregation claim. A bounded
 //! fair queue drains multiple pages and runs independent shard pages concurrently;
 //! completed page transactions remain the recovery and visibility boundary.
+//! Restricted discovery supplies ownership for each page and separate rotation
+//! transaction. Claim context clears caller/batch authority before protected work.
 
 use std::time::{
     Duration,
@@ -24,6 +26,7 @@ use serde_json::{
 use sqlx::{
     PgPool,
     Postgres,
+    Row as _,
     Transaction,
 };
 use uuid::Uuid;
@@ -115,7 +118,7 @@ pub(crate) async fn advance_shard_summary(
     write_epoch: i64,
 ) -> anyhow::Result<bool> {
     Ok(matches!(
-        advance_shard_summary_page(db, run_id, shard, write_epoch).await?,
+        advance_shard_summary_page(db, Uuid::nil(), run_id, shard, write_epoch).await?,
         PageOutcome::Advanced | PageOutcome::Sealed | PageOutcome::CaughtUp
     ))
 }
@@ -123,15 +126,19 @@ pub(crate) async fn advance_shard_summary(
 /// Owns one bounded page transaction and reports whether another page may help.
 /// The nonblocking shard claim and shared movement fence precede all page reads.
 /// A sealing commit ends scheduling without another sealed-summary lookup.
-async fn advance_shard_summary_page(
+pub(super) async fn advance_shard_summary_page(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     shard: i16,
     write_epoch: i64,
 ) -> anyhow::Result<PageOutcome> {
     let mut tx = db.begin().await?;
-    let claimed: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text || ':summary', $2::bigint))")
-        .bind(run_id).bind(i64::from(shard)).fetch_one(&mut *tx).await?;
+    // This SELECT reads no protected rows. All returned expressions complete
+    // before the next statement, so context and the claim share one submission
+    // without relying on expression order for protected reads or mutations.
+    let claimed: bool = sqlx::query("SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text || ':summary',$2::bigint)),set_config('vigilo.tenant_id',$3::uuid::text,true),set_config('vigilo.run_id',$1::uuid::text,true),set_config('vigilo.actor_id','',true),set_config('vigilo.run_batch','',true)")
+        .bind(run_id).bind(i64::from(shard)).bind(tenant_id).fetch_one(&mut *tx).await?.try_get(0)?;
     if !claimed {
         return Ok(PageOutcome::Deferred);
     }
@@ -520,8 +527,8 @@ pub(crate) async fn advance_pending_summaries(
     config: &AggregationConfig,
 ) -> anyhow::Result<usize> {
     let limit = config.candidate_limit()?;
-    let candidates = sqlx::query_as::<_, (Uuid, i16, i64)>(
-        "SELECT run_id, run_shard, write_epoch FROM vigilo_pending_aggregation($1)",
+    let candidates = sqlx::query_as::<_, (Uuid, i16, i64, Uuid)>(
+        "SELECT run_id, run_shard, write_epoch, tenant_id FROM vigilo_pending_aggregation($1)",
     )
     .bind(limit)
     .fetch_all(db)
@@ -533,9 +540,11 @@ pub(crate) async fn advance_pending_summaries(
         candidates,
         config,
         || started.elapsed() < config.time_budget,
-        |(run_id, shard, epoch)| async move {
-            match advance_shard_summary_page(db, run_id, shard, epoch).await {
-                Ok(outcome @ (PageOutcome::Advanced | PageOutcome::Sealed | PageOutcome::CaughtUp)) => {
+        |(run_id, shard, epoch, tenant_id)| async move {
+            match advance_shard_summary_page(db, tenant_id, run_id, shard, epoch).await {
+                Ok(
+                    outcome @ (PageOutcome::Advanced | PageOutcome::Sealed | PageOutcome::CaughtUp),
+                ) => {
                     // Publishing the checkpoint already rotates this candidate.
                     return Ok(outcome);
                 }
@@ -545,13 +554,35 @@ pub(crate) async fn advance_pending_summaries(
             }
             // Rotate even unchanged/invalid candidates; no receipt or published
             // counter changes are made by this scheduling-only update.
-            sqlx::query("UPDATE run_shard_summaries SET updated_at = now() WHERE run_id = $1 AND run_shard = $2 AND NOT sealed")
-                .bind(run_id).bind(shard).execute(db).await
-                .with_context(|| format!("rotating aggregation candidate for run {run_id}, shard {shard}"))?;
+            rotate_candidate(db, tenant_id, run_id, shard)
+                .await
+                .with_context(|| {
+                    format!("rotating aggregation candidate for run {run_id}, shard {shard}")
+                })?;
             Ok(PageOutcome::Deferred)
         },
     )
     .await
+}
+
+/// Rotate deferred work under its discovered identity, after the page transaction
+/// has released its locks. Keep this scheduling write separate from checkpoints.
+async fn rotate_candidate(
+    db: &PgPool,
+    tenant_id: Uuid,
+    run_id: Uuid,
+    shard: i16,
+) -> anyhow::Result<()> {
+    let mut tx = db.begin().await?;
+    // Only canonical UUIDs and a typed shard enter this fixed SQL. Commands
+    // install context before the protected UPDATE starts.
+    let rotation_sql = format!(
+        "{}UPDATE run_shard_summaries SET updated_at=now() WHERE run_id='{run_id}'::uuid AND run_shard={shard} AND NOT sealed",
+        crate::db::scope::system_settings(tenant_id, run_id)
+    );
+    sqlx::Executor::execute(&mut *tx, rotation_sql.as_str()).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 #[cfg(test)]

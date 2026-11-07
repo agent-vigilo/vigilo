@@ -31,7 +31,8 @@ flowchart TD
     FinalizeIsolated[Defer run and retain healthy summary reads]
     Aggregate[Restricted ready-shard discovery with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}
-    AggregationPage[Try claim and atomically commit one bounded receipt or canonical page]
+    AggregationPage[Scope claim to discovered work and atomically commit one bounded receipt or canonical page]
+    AggregationRotate[Release page locks and rotate deferred candidate in a scoped transaction]
     AggregationNext[Visit unchecked candidates before revisiting shards with ready work]
     AggregationDrain[Await all admitted page operations under database deadlines]
     Messaging{Messaging context available?}
@@ -78,7 +79,9 @@ flowchart TD
     DispatchClaim -- Yes --> DispatchRun
     DispatchClaim -- No or batch limit reached --> Aggregate
     Aggregate --> AggregationBudget
-    AggregationBudget -- Yes --> AggregationPage --> AggregationNext --> AggregationBudget
+    AggregationBudget -- Yes --> AggregationPage
+    AggregationPage -- Productive --> AggregationNext --> AggregationBudget
+    AggregationPage -- Busy or invalid --> AggregationRotate --> AggregationNext
     AggregationBudget -- No --> AggregationDrain --> FinalizeCandidate
 
     DispatchRun --> DispatchClaim
@@ -129,6 +132,6 @@ flowchart TD
 
     class Start command
     class Success success
-    class CoordinatorId,Database,Controls,SettleControls,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeCandidate,ReadSummaries,FinalizeClaim,FinalizeRun,FinalizeIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
+    class CoordinatorId,Database,Controls,SettleControls,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeCandidate,ReadSummaries,FinalizeClaim,FinalizeRun,FinalizeIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationRotate,AggregationNext,AggregationDrain,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
     class Publish component
     class ContextFail,RecoveryFail,DispatchFail,FinalizeFail,OutboxFail error

@@ -29,7 +29,8 @@ flowchart TD
     FinalizeIsolated[Defer candidate; inspect next run]
     Aggregate[Restricted ready-shard discovery with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}
-    AggregationPage[Try claim and atomically commit one bounded receipt or canonical page]
+    AggregationPage[Scope claim to discovered work and atomically commit one bounded receipt or canonical page]
+    AggregationRotate[Release page locks and rotate deferred candidate in a scoped transaction]
     AggregationNext[Visit unchecked candidates before revisiting shards with ready work]
     AggregationDrain[Await all admitted page operations under database deadlines]
     Messaging{Messaging context available?}
@@ -75,7 +76,9 @@ flowchart TD
 
     Dispatch --> Aggregate
     Aggregate --> AggregationBudget
-    AggregationBudget -- Yes --> AggregationPage --> AggregationNext --> AggregationBudget
+    AggregationBudget -- Yes --> AggregationPage
+    AggregationPage -- Productive --> AggregationNext --> AggregationBudget
+    AggregationPage -- Busy or invalid --> AggregationRotate --> AggregationNext
     AggregationBudget -- No --> AggregationDrain --> Finalize
     Dispatch -. Execution placement fails .-> DispatchIsolated
     Dispatch -. Control dispatch fails .-> CycleFail
@@ -106,5 +109,5 @@ flowchart TD
 
     class Start command
     class Success success
-    class CoordinatorId,Runner,Event,Database,Controls,SettleControls,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryPlacement,Circuit,CircuitSkip,Recover,RecoveryIsolated,Dispatch,DispatchIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Finalize,FinalizeIsolated,Messaging,Outbox,BrokerCircuit,OutboxIsolated,Wait,Shutdown,Stop system
+    class CoordinatorId,Runner,Event,Database,Controls,SettleControls,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryPlacement,Circuit,CircuitSkip,Recover,RecoveryIsolated,Dispatch,DispatchIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationRotate,AggregationNext,AggregationDrain,Finalize,FinalizeIsolated,Messaging,Outbox,BrokerCircuit,OutboxIsolated,Wait,Shutdown,Stop system
     class ContextFail,CycleFail,ShutdownFail error

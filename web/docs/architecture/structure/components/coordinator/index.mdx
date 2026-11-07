@@ -142,7 +142,7 @@ the current token; expired claims can be reclaimed without changing the durable
 event. Claiming uses one database call.
 
 Aggregation discovery uses a restricted database function to return bounded
-run/shard identities and current write epochs. It excludes sealed and idle shards
+run/shard identities, ownership and current write epochs. It excludes sealed and idle shards
 and admissions outside open or draining state. Unconsumed receipts and shards
 ready for final verification remain eligible. Discovery uses one database call;
 page processing rechecks ownership and retains its existing transaction boundary.
@@ -160,6 +160,13 @@ remains in Rust workflows; scoped table grants and row policies support these
 writes on the fixed scheduler connection. Commit, rollback and cancellation end
 the transaction-local scope. Database policy semantics belong to the trusted host;
 context values alone do not establish permission to select arbitrary work.
+
+Aggregation discovery carries the authoritative run identity into each page
+transaction. Context is installed with the page claim before protected receipt
+reads or checkpoint writes. Deferred and invalid candidates rotate under that
+same identity in a separate short transaction after the page releases its locks.
+Consumption flags and summary checkpoints still commit together; failed pages
+roll back without discarding previously committed progress.
 
 ## Related
 

@@ -72,8 +72,11 @@ sequenceDiagram
         Vigilo->>ExecutionDB: Discover bounded ready candidates through restricted function
         loop Fair page admission within database page and time budgets
             Note over Vigilo,ExecutionDB: Bounded shard concurrency with one in-flight page per shard
-            Vigilo->>ExecutionDB: Try page claim, fence ownership, and commit progress or canonical checkpoint
+            Vigilo->>ExecutionDB: Bind discovered identity with page claim; fence ownership and atomically commit checkpoint
             ExecutionDB-->>Vigilo: Ready again, caught up, sealed, busy, or deferred
+            opt Busy or invalid page
+                Vigilo->>ExecutionDB: Rotate candidate in a separate scoped transaction
+            end
             Vigilo->>Vigilo: Visit unchecked candidates before revisiting remaining ready work
         end
         Vigilo->>Vigilo: Await admitted page operations under the database deadline
