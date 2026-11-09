@@ -49,3 +49,9 @@ Example:
 ```bash
 cargo build --manifest-path "evaluators/sentiment-basic-en/Cargo.toml" --target wasm32-wasip2 --release
 ```
+
+## License
+
+Public evaluator implementations and templates in this directory are licensed
+under [Apache 2.0](https://github.com/agent-vigilo/vigilo/blob/main/evaluators/LICENSE).
+The Vigilo engine has a separate FSL-1.1-ALv2 license.

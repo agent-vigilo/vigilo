@@ -65,3 +65,9 @@ or Rust toolchain. See [Publishing Evaluators](https://agentvigilo.com/docs/guid
 ```bash
 vigilo evaluator test 'vigilo/sentiment-basic-en:0.1.0' --input-file evaluators/sentiment-basic-en/example-input.json
 ```
+
+## License
+
+Public evaluator implementations and templates in this directory are licensed
+under [Apache 2.0](https://github.com/agent-vigilo/vigilo/blob/main/evaluators/LICENSE).
+The Vigilo engine has a separate FSL-1.1-ALv2 license.

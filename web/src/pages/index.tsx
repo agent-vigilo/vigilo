@@ -50,7 +50,7 @@ function HomepageHeader() {
             How it works
           </Link>
         </div>
-        <p className={styles.projectDetails}>Open source. Self-hosted.</p>
+        <p className={styles.projectDetails}>Source available. Self-hosted.</p>
       </div>
     </header>
   );

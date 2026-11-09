@@ -60,19 +60,45 @@ package = "vigilo:evaluator"
 
 
 class LicensePackagingTests(unittest.TestCase):
-    def test_crate_license_copies_match_authoritative_workspace_license(self):
+    def test_crate_license_copies_match_their_component_license(self):
         from pathlib import Path
         import tomllib
         root = Path(__file__).resolve().parents[2]
-        license_text = (root / "LICENSE").read_bytes()
+        engine_license = (root / "LICENSE").read_bytes()
+        evaluator_license = (root / "evaluators" / "LICENSE").read_bytes()
         workspace = tomllib.loads((root / "Cargo.toml").read_text())
         for member in workspace["workspace"]["members"]:
             with self.subTest(crate=member):
                 crate = root / member
+                is_evaluator = member.startswith("evaluators/")
+                license_text = evaluator_license if is_evaluator else engine_license
                 self.assertEqual((crate / "LICENSE").read_bytes(), license_text)
                 package = tomllib.loads((crate / "Cargo.toml").read_text())["package"]
-                self.assertEqual(package["license"], "Apache-2.0")
+                self.assertEqual(package["license"], "Apache-2.0" if is_evaluator else "FSL-1.1-ALv2")
                 self.assertNotIn("license-file", package)
+
+        self.assertEqual((root / "vigilo/wit/LICENSE").read_bytes(), evaluator_license)
+
+
+    def test_collection_release_carries_evaluator_license(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from core_evaluators import main
+
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "collection"
+            with patch("sys.argv", ["core_evaluators", "--prepare-only", "--output", str(output)]), \
+                 patch("core_evaluators.build", return_value=[]), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                main()
+            self.assertEqual((output / "LICENSE").read_bytes(),
+                             (root / "evaluators/LICENSE").read_bytes())
+            self.assertNotEqual((output / "LICENSE").read_bytes(),
+                                (root / "LICENSE").read_bytes())
 
 
 if __name__ == "__main__":

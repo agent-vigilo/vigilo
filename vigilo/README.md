@@ -58,4 +58,11 @@ installs the latest compatible core evaluators. Use
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](https://github.com/agent-vigilo/vigilo/blob/main/LICENSE).
+Source-available under [FSL-1.1-ALv2](https://github.com/agent-vigilo/vigilo/blob/main/LICENSE).
+Internal use and self-hosting are permitted; competing commercial offerings are
+restricted by the license. Each version becomes available under Apache 2.0 two
+years after it is first made available.
+
+Evaluator interface definitions under `wit/` are separately licensed under
+[Apache 2.0](https://github.com/agent-vigilo/vigilo/blob/main/vigilo/wit/LICENSE),
+as are the repository's public evaluators and templates.
