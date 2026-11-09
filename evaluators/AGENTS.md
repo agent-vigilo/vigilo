@@ -2,6 +2,12 @@
 
 These rules add to the root guidance for crates under `evaluators/`.
 
+## Licensing
+
+- Public evaluators and templates here use Apache-2.0, governed by `LICENSE` in
+  this directory. Keep crate-local license copies and metadata consistent with it.
+- Evaluator collection releases carry this Apache license, not the engine license.
+
 ## Crate Contract
 
 - One crate implements one evaluator component through one primary `evaluate`

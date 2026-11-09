@@ -81,3 +81,9 @@ The example file includes a `response` fixture with a UTF-8 `body`, optional
 `content_type`, and explicit `configuration`. The test command applies that mapping
 and installs fresh host resources, without calling an agent. It does not accept
 live resource handles from JSON.
+
+## License
+
+Public evaluator implementations and templates in this directory are licensed
+under [Apache 2.0](https://github.com/agent-vigilo/vigilo/blob/main/evaluators/LICENSE).
+The Vigilo engine has a separate FSL-1.1-ALv2 license.

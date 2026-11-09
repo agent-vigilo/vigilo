@@ -2,7 +2,7 @@
 [![Coverage Status](https://codecov.io/gh/agent-vigilo/vigilo/graph/badge.svg?token=CL93O7DW9C)](https://codecov.io/gh/agent-vigilo/vigilo)
 [![Crates.io](https://img.shields.io/crates/v/vigilo.svg)](https://crates.io/crates/vigilo)
 [![Documentation](https://img.shields.io/badge/docs-agentvigilo.com-blue.svg)](https://agentvigilo.com/docs/guides/getting-started)
-[![Apache-2.0 licensed](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![FSL-1.1-ALv2 licensed](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
 
 <p align="center">
   <picture>
@@ -227,8 +227,17 @@ Agent Vigilo is an active systems project focused on reliable AI evaluation, LLM
 
 ## License
 
-[Apache 2.0](LICENSE)
+Agent Vigilo is source-available under the [Functional Source License, Version 1.1,
+ALv2 Future License (FSL-1.1-ALv2)](LICENSE). Internal use and self-hosting are
+permitted; competing commercial offerings are restricted by the license. Each
+version becomes available under Apache 2.0 two years after it is first made available.
 
-The root `LICENSE` is authoritative. Crate-local copies are included in published
-packages and checked against it in CI. Keep those copies identical when updating
-the license.
+Public evaluators and templates under [`evaluators/`](evaluators/LICENSE), and
+interface definitions under [`vigilo/wit/`](vigilo/wit/LICENSE), are licensed under
+Apache 2.0. They can be used, modified, and redistributed commercially under those
+terms. Independently authored evaluators choose their own licenses.
+
+The root `LICENSE` governs the remaining repository-owned content. Crate-local
+license copies and evaluator collection licenses are checked against their
+respective authoritative license files in CI. Third-party components retain their
+own licenses.

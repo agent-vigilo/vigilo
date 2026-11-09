@@ -115,7 +115,7 @@ def main():
     os.chdir(root)
     args.output.mkdir(parents=True, exist_ok=False)
     entries = build(root, args.output, args.binary.resolve())
-    (args.output / "LICENSE").write_bytes((root / "LICENSE").read_bytes())
+    (args.output / "LICENSE").write_bytes((root / "evaluators" / "LICENSE").read_bytes())
     if args.prepare_only:
         catalog = dict(format=FORMAT, collection="1970.01.01.1", evaluators=entries)
         (args.output / "catalog.json").write_text(json.dumps(catalog, indent=2) + "\n")
