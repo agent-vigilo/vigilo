@@ -197,7 +197,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © ${new Date().getFullYear()} Agent Vigilo, Inc.`,
+      copyright: "Copyright (c) 2026 Gregory Langlais",
     },
     prism: {
       theme: prismThemes.github,
