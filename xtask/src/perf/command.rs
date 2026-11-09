@@ -1730,6 +1730,14 @@ mod tests {
         }
     }
 
+    /// Synthetic help stays alive long enough for post-exec RSS sampling. The
+    /// campaign tests exercise orchestration, not the speed of libtest's help.
+    #[test]
+    fn startup_help_fixture() {
+        std::thread::sleep(Duration::from_millis(100));
+        println!("Usage: Commands:");
+    }
+
     fn startup_campaign(command: &str) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
@@ -1739,6 +1747,15 @@ mod tests {
         fs::create_dir_all(&registry_dir).unwrap();
         fs::create_dir_all(&profile_dir).unwrap();
 
+        let command = if command == "--help" {
+            vec![
+                "--exact",
+                "perf::command::tests::startup_help_fixture",
+                "--nocapture",
+            ]
+        } else {
+            vec![command]
+        };
         let registry =
             fs::read_to_string(repository.join("performance/registry/workloads-v1.toml"))
                 .unwrap()
@@ -1746,10 +1763,7 @@ mod tests {
                     "help_signatures = [\"Usage:\", \"Commands:\"]",
                     "help_signatures = [\"Usage:\"]",
                 )
-                .replace(
-                    "command = [\"--help\"]",
-                    &format!("command = [{command:?}]"),
-                );
+                .replace("command = [\"--help\"]", &format!("command = {command:?}"));
         fs::write(registry_dir.join("workloads-v1.toml"), registry).unwrap();
         fs::copy(
             repository.join("performance/profiles/developer-v1.toml"),
