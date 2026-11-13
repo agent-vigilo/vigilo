@@ -96,22 +96,90 @@ const OUTBOX_LEASE_SECONDS: i32 = 60;
 const OUTBOX_RETRY_DELAY_SECONDS: i32 = 10;
 
 #[derive(Debug, Clone)]
-struct CoordinatorRuntimeConfig {
-    run_creation: run_creation::Config,
-    tick_seconds: u64,
-    lease_seconds: i32,
-    max_create_recovery_per_cycle: usize,
-    max_dispatch_per_cycle: usize,
-    max_finalize_per_cycle: usize,
-    aggregation: run_shard_summary::AggregationConfig,
-    aggregation_database_parallelism: NonZeroUsize,
-    run_chunk_dispatch_window_size: i64,
-    chunk_lease_recovery_batch_size: i64,
-    chunk_lease_max_recoveries: i32,
-    outbox_batch_size: i64,
-    outbox_publish_parallelism: usize,
-    outbox_lease_seconds: i32,
-    outbox_retry_delay_seconds: i32,
+/// Bounded orchestration settings shared by CLI adaptation and embedding hosts.
+pub struct CoordinatorRuntimeConfig {
+    pub run_creation: run_creation::Config,
+    pub tick_seconds: u64,
+    pub lease_seconds: i32,
+    pub max_create_recovery_per_cycle: usize,
+    pub max_dispatch_per_cycle: usize,
+    pub max_finalize_per_cycle: usize,
+    pub aggregation: run_shard_summary::AggregationConfig,
+    pub aggregation_database_parallelism: NonZeroUsize,
+    pub run_chunk_dispatch_window_size: i64,
+    pub chunk_lease_recovery_batch_size: i64,
+    pub chunk_lease_max_recoveries: i32,
+    pub outbox_batch_size: i64,
+    pub outbox_publish_parallelism: usize,
+    pub outbox_lease_seconds: i32,
+    pub outbox_retry_delay_seconds: i32,
+}
+
+impl Default for CoordinatorRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            run_creation: Default::default(),
+            tick_seconds: COORDINATOR_TICK_SECONDS,
+            lease_seconds: COORDINATOR_LEASE_SECONDS,
+            max_create_recovery_per_cycle: COORDINATOR_MAX_CREATE_RECOVERY_PER_CYCLE as usize,
+            max_dispatch_per_cycle: COORDINATOR_MAX_DISPATCH_PER_CYCLE as usize,
+            max_finalize_per_cycle: COORDINATOR_MAX_FINALIZE_PER_CYCLE as usize,
+            aggregation: run_shard_summary::AggregationConfig {
+                max_pages: COORDINATOR_MAX_AGGREGATION_PAGES_PER_CYCLE as usize,
+                time_budget: Duration::from_millis(COORDINATOR_AGGREGATION_TIME_BUDGET_MS),
+                parallelism: COORDINATOR_AGGREGATION_PARALLELISM as usize,
+            },
+            aggregation_database_parallelism: NonZeroUsize::new(
+                COORDINATOR_AGGREGATION_DATABASE_PARALLELISM as usize,
+            )
+            .unwrap(),
+            run_chunk_dispatch_window_size: RUN_CHUNK_DISPATCH_WINDOW_SIZE,
+            chunk_lease_recovery_batch_size: CHUNK_LEASE_RECOVERY_BATCH_SIZE,
+            chunk_lease_max_recoveries: CHUNK_LEASE_MAX_RECOVERIES,
+            outbox_batch_size: OUTBOX_BATCH_SIZE,
+            outbox_publish_parallelism: OUTBOX_PUBLISH_PARALLELISM as usize,
+            outbox_lease_seconds: OUTBOX_LEASE_SECONDS,
+            outbox_retry_delay_seconds: OUTBOX_RETRY_DELAY_SECONDS,
+        }
+    }
+}
+impl CoordinatorRuntimeConfig {
+    pub(crate) fn validate(&self) -> Result<(), crate::operations::Error> {
+        let count = |v: usize| (1..=100_000).contains(&v);
+        if !(1..=3600).contains(&self.tick_seconds)
+            || !(1..=86400).contains(&self.lease_seconds)
+            || !count(self.max_create_recovery_per_cycle)
+            || !count(self.max_dispatch_per_cycle)
+            || !count(self.max_finalize_per_cycle)
+            || !count(self.aggregation.max_pages)
+            || !(Duration::from_millis(1)..=Duration::from_secs(60))
+                .contains(&self.aggregation.time_budget)
+            || !(1..=128).contains(&self.aggregation.parallelism)
+            || self.aggregation_database_parallelism.get() > 128
+            || !(1..=1_000_000).contains(&self.run_chunk_dispatch_window_size)
+            || !(1..=1_000_000).contains(&self.chunk_lease_recovery_batch_size)
+            || !(0..=10_000).contains(&self.chunk_lease_max_recoveries)
+            || !(1..=1_000_000).contains(&self.outbox_batch_size)
+            || !(1..=10_000).contains(&self.outbox_publish_parallelism)
+            || !(1..=86400).contains(&self.outbox_lease_seconds)
+            || !(1..=86400).contains(&self.outbox_retry_delay_seconds)
+            || !(1..=1_000_000).contains(&self.run_creation.case_batch_size)
+            || !(1..=100_000).contains(&self.run_creation.case_page_budget)
+        {
+            return Err(crate::operations::Error::InvalidConfiguration(
+                "invalid coordinator work limits",
+            ));
+        }
+        Ok(())
+    }
+}
+/// Library-owned cycle entry: no argument parsing, output or process signals.
+pub(crate) async fn cycle(
+    context: Context,
+    id: Uuid,
+    config: &CoordinatorRuntimeConfig,
+) -> anyhow::Result<()> {
+    run_coordinator_cycle(context, id, config).await
 }
 
 #[derive(Debug, Subcommand)]

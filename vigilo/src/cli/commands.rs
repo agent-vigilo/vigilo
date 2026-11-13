@@ -17,13 +17,13 @@ use crate::context::{
     wasm,
 };
 
-pub(super) mod coordinator;
+pub(crate) mod coordinator;
 pub(super) mod dataset;
 pub(super) mod evaluators;
 pub(super) mod run;
 pub(super) mod setup;
 pub(super) mod shard;
-pub(super) mod worker;
+pub(crate) mod worker;
 
 use super::{
     Executable,

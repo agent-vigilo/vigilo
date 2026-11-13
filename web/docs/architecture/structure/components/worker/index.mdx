@@ -14,13 +14,19 @@ import workerDiagram from './diagram.mmd';
 
 # Worker Components
 
+The trusted library host obtains `operations::Worker` from a validated
+`HostedRuntime`. Its `once()` and cancellable `run()` share the CLI processing
+path and service caches. The host owns cancellation and task joining; shutdown
+drains admitted chunks, and dropped work stops its lease heartbeat.
+
 Describes the major internal responsibilities of the worker runtime.
 
 <Mermaid value={workerDiagram} />
 
 ## Notes
 
-- Workers use `VIGILO_STORAGE_CONFIG` to resolve the frozen storage owner, read
+- Standalone workers use `VIGILO_STORAGE_CONFIG`; hosted workers use the injected
+  resource resolver to resolve the frozen storage owner. They read
   configuration and assigned case files through a shared, bounded immutable-byte
   cache, and fetch misses through the provider-neutral adapter. Every use verifies
   complete files and exact chunk membership before execution. Large assignments

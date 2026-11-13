@@ -140,7 +140,7 @@ struct ChunkLeaseGuard {
 struct ChunkHeartbeat {
     guard: Arc<ChunkLeaseGuard>,
     cancel: CancellationToken,
-    handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -217,16 +217,27 @@ impl ChunkHeartbeat {
         Self {
             guard,
             cancel,
-            handle,
+            handle: Some(handle),
         }
     }
 
-    async fn stop(self) -> crate::models::run_chunk::RunChunk {
+    async fn stop(mut self) -> crate::models::run_chunk::RunChunk {
         self.cancel.cancel();
-        if let Err(err) = self.handle.await {
+        if let Some(handle) = self.handle.take()
+            && let Err(err) = handle.await
+        {
             warn!(error = %err, "worker heartbeat task failed to join");
         }
         self.guard.current_chunk().await
+    }
+}
+
+impl Drop for ChunkHeartbeat {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -529,6 +540,43 @@ impl EvaluatorLoaderService {
             })
             .await?;
         Ok(context.clone())
+    }
+}
+
+/// Persistent library-owned worker state. The host supplies identity explicitly;
+/// standalone commands retain their existing process-label discovery separately.
+pub(crate) struct Service {
+    context: Context,
+    loader: EvaluatorLoaderService,
+    runtime: WorkerRuntime,
+}
+impl Service {
+    pub(crate) fn new(context: Context, id: Uuid, host: Option<String>) -> Self {
+        Self {
+            loader: EvaluatorLoaderService::new(context.clone()),
+            context,
+            runtime: WorkerRuntime {
+                worker_id: id,
+                worker_host: host,
+            },
+        }
+    }
+    pub(crate) async fn once(&self) -> anyhow::Result<usize> {
+        run_worker_drain_pass(self.context.clone(), &self.loader, self.runtime.clone(), 1).await
+    }
+    pub(crate) async fn run(
+        &self,
+        max_inflight: u16,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        start::run(
+            self.context.clone(),
+            self.runtime.clone(),
+            self.loader.clone(),
+            max_inflight,
+            cancel,
+        )
+        .await
     }
 }
 
@@ -1584,6 +1632,45 @@ mod tests {
         },
         output::OutputFormat,
     };
+
+    #[tokio::test]
+    async fn dropping_a_chunk_heartbeat_stops_its_owned_task() {
+        let chunk = serde_json::from_value(json!({
+            "tenant_id": Uuid::nil(), "execution_control": "enabled", "id": Uuid::nil(),
+            "run_id": Uuid::nil(), "run_shard": 0, "dataset_version_id": Uuid::nil(),
+            "profile_group_id": "default", "ordinal_start": 0, "ordinal_end": 1,
+            "status": "leased", "lease_token": null, "leased_until": null,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/vigilo")
+            .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(std::future::pending());
+        let abort = handle.abort_handle();
+        let heartbeat = super::ChunkHeartbeat {
+            guard: super::ChunkLeaseGuard::new(&pool, chunk, 60),
+            cancel: cancel.clone(),
+            handle: Some(handle),
+        };
+        drop(heartbeat);
+        let cancelled = cancel.is_cancelled();
+        let stopped = tokio::time::timeout(Duration::from_secs(1), async {
+            while !abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        // Exact cleanup even when running this test against the broken implementation.
+        abort.abort();
+        assert!(
+            cancelled,
+            "dropping work must stop background lease renewal"
+        );
+        assert!(stopped, "owned heartbeat task must exit after owner drop");
+    }
 
     #[test]
     fn default_worker_processes_one_chunk_at_a_time() {

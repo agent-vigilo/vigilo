@@ -76,6 +76,10 @@ flowchart TD
     Credentials -->|"Service provider: authenticated versioned HTTP"| CredentialService
 
     %% edges
+    HostedWorker["Typed worker handle<br/>Explicit identity, retained caches and host cancellation"]:::component
+    HostedWorker -->|"Runs one delivery or a bounded stream"| WorkerConsumer
+    HostedWorker -->|"Retains execution authority"| RuntimeContext
+    HostedWorker --> Shutdown["Cancel admission, drain work and join<br/>Dropped work stops its owned lease heartbeat"]:::component
     Vigilo -->|"Runs worker start or once through"| CommandFacade
     CommandFacade -->|"Starts continuous mode with"| ServiceLoop
     CommandFacade -->|"Runs one bounded receive pass through"| WorkerConsumer

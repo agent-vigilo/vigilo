@@ -15,7 +15,7 @@ use clap::{
 };
 
 mod args;
-mod commands;
+pub(crate) mod commands;
 use commands::Command;
 #[cfg(test)]
 pub(crate) use commands::worker::claim_hinted_chunk_with_route_refresh;

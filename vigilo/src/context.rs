@@ -99,6 +99,35 @@ impl Context {
         context
     }
 
+    /// Fix host-owned dependencies before sharing; no environment lookup occurs.
+    pub(crate) fn with_runtime_dependencies(
+        mut self,
+        messaging: crate::mq::Config,
+        wasm: wasm::Config,
+    ) -> Self {
+        let inner = Arc::get_mut(&mut self.0).expect("unshared runtime construction");
+        inner.mq.config = Some(messaging);
+        inner.wasm.config = wasm;
+        self
+    }
+    /// Share provider admission/transport across authority views, retaining a
+    /// separate router, policy cache and lazy runtime services for each domain.
+    pub(crate) fn authority_view(
+        &self,
+        router: Arc<database::DatabaseRouter>,
+        policy_age: u64,
+    ) -> anyhow::Result<Self> {
+        let mut view = Self::for_operations(router).with_http_policy_max_age(policy_age)?;
+        let inner = Arc::get_mut(&mut view.0).expect("unshared authority view");
+        inner.mq.config = self.0.mq.config.clone();
+        inner.wasm.config = self.0.wasm.config.clone();
+        view.1 = self.1;
+        view.2 = self.2.clone();
+        view.3 = self.3.clone();
+        view.4 = self.4.clone();
+        Ok(view)
+    }
+
     pub(crate) fn with_evaluator_http(
         mut self,
         service: crate::evaluator_requests::Service,

@@ -49,9 +49,41 @@ pub(crate) async fn request(
     next: ExecutionControl,
 ) -> anyhow::Result<ControlOutcome> {
     let mut tx = pool.begin().await?;
+    let result = request_with(&mut tx, run_id, next).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Caller-owned control never performs scheduler delivery with user credentials.
+pub(crate) async fn request_as(
+    pool: &PgPool,
+    caller: crate::db::scope::UserContext,
+    run_id: Uuid,
+    next: ExecutionControl,
+) -> anyhow::Result<ControlOutcome> {
+    let mut tx = crate::db::scope::begin(pool, caller, run_id).await?;
+    let result = request_with(&mut tx, run_id, next).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+pub(crate) async fn progress_as(
+    pool: &PgPool,
+    caller: crate::db::scope::UserContext,
+    run_id: Uuid,
+) -> anyhow::Result<ControlOutcome> {
+    let mut tx = crate::db::scope::begin(pool, caller, run_id).await?;
+    let result = progress_with(&mut *tx, run_id).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+async fn request_with(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    next: ExecutionControl,
+) -> anyhow::Result<ControlOutcome> {
     let (tenant, previous, revision, status): (Uuid, ExecutionControl, i64, String) = sqlx::query_as(
         "SELECT tenant_id,execution_control,control_revision,status::text FROM runs WHERE id=$1 AND tenant_id=NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid FOR UPDATE")
-        .bind(run_id).fetch_optional(&mut *tx).await?.context("accessible run not found")?;
+        .bind(run_id).fetch_optional(&mut **tx).await?.context("accessible run not found")?;
     ensure!(
         previous.permits_transition(next),
         "revoked execution cannot be restored"
@@ -68,11 +100,10 @@ pub(crate) async fn request(
             .checked_add(1)
             .context("control revision exhausted")?;
         sqlx::query("UPDATE runs SET execution_control=$2,control_revision=$3,control_reason=CASE WHEN $2='revoked' THEN 'run execution permission revoked' ELSE NULL END,updated_at=clock_timestamp() WHERE id=$1")
-            .bind(run_id).bind(next).bind(revision).execute(&mut *tx).await?;
-        enqueue(&mut tx, tenant, run_id, revision, next).await?;
+            .bind(run_id).bind(next).bind(revision).execute(&mut **tx).await?;
+        enqueue(tx, tenant, run_id, revision, next).await?;
     }
-    let result = progress_with(&mut *tx, run_id).await?;
-    tx.commit().await?;
+    let result = progress_with(&mut **tx, run_id).await?;
     Ok(result)
 }
 

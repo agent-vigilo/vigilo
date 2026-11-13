@@ -14,6 +14,11 @@ import coordinatorDiagram from './diagram.mmd';
 
 # Coordinator Components
 
+The trusted library host obtains `operations::Coordinator` from a validated
+`HostedRuntime`. Its bounded `once()` and cancellable `run()` share the CLI cycle
+implementation. Cancellation stops new cycles and drains the active cycle; the
+host owns task joining and dependency shutdown.
+
 Describes the major internal responsibilities of the coordinator runtime.
 
 <Mermaid value={coordinatorDiagram} />

@@ -2,7 +2,8 @@
 //!
 //! A client owns shared, lazy database pools. Operations reuse the same workflows
 //! as the CLI and return values rather than formatting output or installing process
-//! state. Construction does not connect to services. The standalone client assumes
+//! state. Standalone construction is lazy; hosted construction validates fixed
+//! database bindings before returning. The standalone client assumes
 //! an authorized operator. Restricted reads use explicit trusted caller context
 //! and fixed-role pools; authentication and database policy installation belong to
 //! the embedding host.
@@ -75,7 +76,7 @@ pub enum Error {
     /// Invalid bounded command input; the message contains no request payload.
     #[error("invalid operation input: {0}")]
     InvalidInput(&'static str),
-    /// A supplied prepared value belongs to a different operation client.
+    /// The operation conflicts with a prepared value's owner or an active service.
     #[error("operation conflict: {0}")]
     Conflict(&'static str),
     /// The caller cancelled before committing this operation's acceptance.
@@ -246,4 +247,19 @@ pub use database_bindings::{
     DatabaseCredential,
     DatabasePools,
     DatabasePurpose,
+};
+
+mod hosted;
+pub use hosted::{
+    AgentHttpLimits,
+    AggregationOptions,
+    BrokerConfig,
+    Coordinator,
+    CoordinatorOptions,
+    CreationOptions,
+    HostedConfig,
+    HostedRuntime,
+    HostedUser,
+    WasmOptions,
+    Worker,
 };

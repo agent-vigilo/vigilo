@@ -11,9 +11,9 @@ pub(crate) const DEFAULT_CASE_BATCH_SIZE: usize = 1_000;
 pub(crate) const DEFAULT_CASE_PAGE_BUDGET: usize = 64;
 /// Bounded creation work policy retained by the command configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Config {
-    pub(crate) case_batch_size: usize,
-    pub(crate) case_page_budget: usize,
+pub struct Config {
+    pub case_batch_size: usize,
+    pub case_page_budget: usize,
 }
 impl Default for Config {
     fn default() -> Self {

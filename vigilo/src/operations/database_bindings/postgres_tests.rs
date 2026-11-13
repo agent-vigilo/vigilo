@@ -158,6 +158,7 @@ async fn fixed_roles_validate_and_reject_unsafe_deployments(pool: PgPool) {
         assert_eq!(count,0);
         let scheduler=pools.router(Authority::Scheduler,"primary".into(),"single-default".into()).unwrap();
         scoped_dispatch(&pool, scheduler.control().await.unwrap(), &roles, tenant, run).await;
+        hosted_operations(&pool, &pools, &roles, tenant, run).await;
         pools.validate().await.unwrap();
 
     }).catch_unwind().await;
@@ -383,4 +384,170 @@ async fn scoped_dispatch(
             .await
             .unwrap();
     }
+}
+
+/// Exercise public hosting with real fixed identities and request-local policies.
+async fn hosted_operations(
+    admin: &PgPool,
+    pools: &DatabasePools,
+    roles: &[String],
+    tenant: uuid::Uuid,
+    run: uuid::Uuid,
+) {
+    use crate::operations::{
+        BrokerConfig,
+        ExecutionControl,
+        HostedConfig,
+        HostedRuntime,
+        UserContext,
+        resources::{
+            self,
+            Bindings,
+            Request,
+            Resolution,
+            Resolver,
+        },
+    };
+    struct Deny;
+    impl Resolver for Deny {
+        fn bindings(&self, _: Request) -> Resolution<'_, Bindings> {
+            Box::pin(async { Err(resources::Error::Denied) })
+        }
+    }
+    // Keep hosted control transitions independent of the dispatch fixture's rows.
+    let source_run = run;
+    let run = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO dataset_versions(tenant_id,dataset_version_id,dataset_id,dataset_version) VALUES($1,$2,$2,'1')")
+        .bind(tenant).bind(run).execute(admin).await.unwrap();
+    sqlx::query("INSERT INTO runs SELECT (jsonb_populate_record(NULL::runs,to_jsonb(r)||jsonb_build_object('id',$2::uuid,'dataset_id',$2::uuid,'dataset_version_id',$2::uuid,'run_key',$2::text,'status','creating'))).* FROM runs r WHERE id=$1")
+        .bind(source_run).bind(run).execute(admin).await.unwrap();
+    let actor = uuid::Uuid::now_v7();
+    let predicate = format!(
+        "tenant_id=NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid AND current_setting('vigilo.actor_id',true)='{actor}'"
+    );
+    sqlx::raw_sql(&format!("DROP POLICY binding_read ON runs; CREATE POLICY hosted_access ON runs TO {} USING ({predicate}); GRANT UPDATE ON runs TO {};", roles[2], roles[2])).execute(admin).await.unwrap();
+    for table in [
+        "run_control_deliveries",
+        "shard_placements",
+        "shard_move_operations",
+    ] {
+        sqlx::raw_sql(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; CREATE POLICY hosted_access ON {table} TO {} USING ({predicate}); CREATE POLICY hosted_owner ON {table} TO {} USING(true); GRANT SELECT ON {table} TO {};", roles[2], roles[3], roles[2])).execute(admin).await.unwrap();
+    }
+    sqlx::raw_sql(&format!(
+        "GRANT INSERT,UPDATE ON run_control_deliveries TO {};",
+        roles[2]
+    ))
+    .execute(admin)
+    .await
+    .unwrap();
+    let configuration = || {
+        let mut config = HostedConfig::new(
+            pools.clone(),
+            Arc::new(Deny),
+            BrokerConfig::new("amqp://host:fixture@127.0.0.1:1".into()),
+            "primary".into(),
+            "single-default".into(),
+        );
+        config.wasm.max_log_messages = 0;
+        config
+    };
+    let runtime = HostedRuntime::new(configuration()).await.unwrap();
+    // Explicit startup revalidation must reject changed privileges on warm pools.
+    sqlx::raw_sql(&format!("ALTER ROLE {} BYPASSRLS", roles[2]))
+        .execute(admin)
+        .await
+        .unwrap();
+    let rejected = HostedRuntime::new(configuration()).await;
+    sqlx::raw_sql(&format!("ALTER ROLE {} NOBYPASSRLS", roles[2]))
+        .execute(admin)
+        .await
+        .unwrap();
+    assert!(
+        rejected.is_err(),
+        "hosting must reject an unsafe login before yielding a runtime"
+    );
+    let user = runtime.user(UserContext::new(tenant, actor).unwrap());
+    let wrong_actor = runtime.user(UserContext::new(tenant, uuid::Uuid::now_v7()).unwrap());
+    let wrong_owner = runtime.user(UserContext::new(uuid::Uuid::now_v7(), actor).unwrap());
+    for denied in [&wrong_actor, &wrong_owner] {
+        assert!(matches!(
+            denied.run_status(run).await,
+            Err(Error::NotFound(_))
+        ));
+        assert!(
+            denied
+                .control_run(run, ExecutionControl::Paused)
+                .await
+                .is_err()
+        );
+        assert!(denied.run_control_status(run).await.is_err());
+    }
+    let (status, queries) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        user.clone().run_status(run),
+    )
+    .await;
+    status.unwrap();
+    assert_eq!(
+        queries.len(),
+        3,
+        "hosted status has no extra authority lookups: {queries:?}"
+    );
+    let (control, queries) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        user.control_run(run, ExecutionControl::Paused),
+    )
+    .await;
+    assert_eq!(control.unwrap().execution_control, ExecutionControl::Paused);
+    assert_eq!(
+        queries.len(),
+        5,
+        "context and existing control statements only: {queries:?}"
+    );
+    let (control, queries) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        user.run_control_status(run),
+    )
+    .await;
+    assert_eq!(control.unwrap().revision, 1);
+    assert_eq!(
+        queries.len(),
+        2,
+        "context plus existing progress read: {queries:?}"
+    );
+    let repeated = user
+        .control_run(run, ExecutionControl::Paused)
+        .await
+        .unwrap();
+    assert_eq!(repeated.revision, 1);
+    user.control_run(run, ExecutionControl::Enabled)
+        .await
+        .unwrap();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    // A cancelled service must neither touch the unavailable broker nor claim work.
+    let coordinator = runtime.coordinator();
+    let worker = runtime.worker();
+    let stopped = cancel.clone();
+    let coordinator_task = tokio::spawn(async move {
+        crate::db::workflows::run_shard_summary::test_support::record_queries(
+            coordinator.run(stopped),
+        )
+        .await
+    });
+    let worker_task = tokio::spawn(async move {
+        crate::db::workflows::run_shard_summary::test_support::record_queries(worker.run(cancel))
+            .await
+    });
+    for (result, queries) in [coordinator_task.await.unwrap(), worker_task.await.unwrap()] {
+        result.unwrap();
+        assert!(
+            queries.is_empty(),
+            "cancelled services did database work: {queries:?}"
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM runs")
+        .fetch_one(&pools.0.placements["primary"].user.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "pooled request settings must not leak");
+    // Leave pool shutdown to the fixture's exact cleanup, shared with the host root.
+    drop(runtime);
 }

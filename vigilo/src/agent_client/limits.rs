@@ -10,9 +10,9 @@ pub(crate) const DEFAULT_BODY_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Worker ceilings, or effective limits after profile validation.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Limits {
-    pub(crate) max_request_bytes: u64,
-    pub(crate) max_response_bytes: u64,
+pub struct Limits {
+    pub max_request_bytes: u64,
+    pub max_response_bytes: u64,
 }
 
 impl Default for Limits {

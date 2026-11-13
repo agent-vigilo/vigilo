@@ -61,13 +61,13 @@ const PAGE_BYTES: i64 = 4 * 1024 * 1024;
 /// Per-database aggregation work admitted during one coordinator pass.
 /// The time budget stops new page scheduling; already-started transactions finish.
 #[derive(Clone, Debug)]
-pub(crate) struct AggregationConfig {
+pub struct AggregationConfig {
     /// Maximum attempted pages, including busy or invalid candidates.
-    pub(crate) max_pages: usize,
+    pub max_pages: usize,
     /// Page scheduling allowance after discovery; does not cancel active pages.
-    pub(crate) time_budget: Duration,
+    pub time_budget: Duration,
     /// Maximum active shard pages within this database pass.
-    pub(crate) parallelism: usize,
+    pub parallelism: usize,
 }
 
 impl AggregationConfig {

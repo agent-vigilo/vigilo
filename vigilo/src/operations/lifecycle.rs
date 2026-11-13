@@ -143,8 +143,7 @@ impl RunClient {
         }
     }
 
-    /// Internal construction pending the complete hosted runtime acceptance gate.
-    #[allow(dead_code)]
+    /// Construction binds a fixed caller and host-owned resource resolver.
     pub(crate) fn from_hosted(
         context: Context,
         options: run_creation::Config,
@@ -351,6 +350,11 @@ impl RunClient {
         input: PrepareRun,
         cancel: &CancellationToken,
     ) -> Result<RunSubmission, Error> {
+        if self.caller.is_some() {
+            return Err(Error::InvalidConfiguration(
+                "caller-bound runs require explicit preparation and acceptance",
+            ));
+        }
         let prepared = self.prepare_run(input, cancel).await?;
         self.accept_run(prepared, cancel).await
     }
@@ -456,6 +460,33 @@ mod tests {
         assert!(matches!(error, Error::InvalidInput(_)));
         assert!(!error.to_string().contains("must not be returned"));
     }
+    #[tokio::test]
+    async fn hosted_clients_require_explicit_preparation_and_acceptance() {
+        let standalone = client();
+        let hosted = RunClient::from_hosted(
+            standalone.context.clone(),
+            Default::default(),
+            crate::operations::UserContext::new(Uuid::now_v7(), Uuid::now_v7()).unwrap(),
+        );
+        for resume in [false, true] {
+            let input = PrepareRun {
+                run_id: Uuid::nil(),
+                dataset_upload_id: Uuid::nil(),
+                profile: serde_json::json!({}),
+            };
+            let cancel = CancellationToken::new();
+            let result = if resume {
+                hosted.resume_creation(input, &cancel).await
+            } else {
+                hosted.create_run(input, &cancel).await
+            };
+            assert!(
+                matches!(result, Err(Error::InvalidConfiguration(_))),
+                "hosted convenience must fail before parsing or I/O"
+            );
+        }
+    }
+
     #[test]
     fn cloned_clients_share_authority_and_independent_clients_do_not() {
         let client = client();

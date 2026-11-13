@@ -55,8 +55,46 @@ No preparation or acceptance transaction spans blob I/O, and pooled connections
 retain no request settings after commit, rollback or cancellation.
 
 The CLI uses the same typed operations for creation, cancellation and status/watch
-output. Other commands and daemon adapters call private library workflows. Neither pools nor persistence
+output. Other commands call private library workflows. CLI and hosted daemon
+adapters share orchestration and worker cycles. Neither pools nor persistence
 records are part of the public operation API.
+
+## Hosted runtime
+
+`operations::HostedRuntime::new(HostedConfig)` validates the supplied fixed database
+bindings before returning a usable runtime. Construct it once for the serving
+runtime and reuse it across requests and services; validation is startup work.
+Configuration requires a resource
+resolver, explicit broker settings and placement routing; it never selects
+standalone file or environment credentials. Broker connections and Wasm compilation
+are lazy. The host owns authentication, access policies, the Tokio runtime and
+presentation. No process signal handlers or logging subscribers are installed.
+
+The trusted runtime root creates separate handles:
+
+- `user(UserContext)` fixes caller identity for preparation, explicit acceptance,
+  status and execution control. Keep the handle or its clones with the prepared
+  value until acceptance. Combined creation is restricted to standalone operators.
+- `coordinator()` exposes one bounded cycle with `once()` or a loop with
+  `run(CancellationToken)` using scheduler authority.
+- `worker()` exposes one delivery with `once()` or a consumer with
+  `run(CancellationToken)` using execution authority and persistent service caches.
+
+Clones of a daemon handle share one service and reject concurrent invocations;
+create another handle for another service. Worker handles have distinct broker
+consumer identities. User handles cannot create daemon handles. Execution control records durable
+intent; coordinator delivery and worker quiescence follow asynchronously. The
+same workflow bodies serve the CLI and library, without invoking a CLI process.
+Runtime options bound concurrency, HTTP sizes, Wasm execution and coordinator work.
+Wasm options follow the CLI bounds; zero `max_log_messages` disables evaluator logging.
+Derived handles share database pools, resource admission and outbound HTTP limits.
+Broker namespaces are explicit; `None` selects the standard topology.
+
+Cancel and join running services before calling `close()`, which closes all supplied
+shared database pools, including externally retained clones. Coordinator shutdown
+drains its active cycle; worker shutdown drains admitted chunks. Dropping worker
+work stops its lease heartbeat; uncompleted work follows lease recovery rather
+than being reported as completed. Dropping a request cannot undo committed work.
 
 ## Fixed database bindings
 

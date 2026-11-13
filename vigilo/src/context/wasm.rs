@@ -681,6 +681,26 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Validate the standalone command's bounds before hosted engine creation.
+    /// Zero log messages disables logging; execution deadlines remain required.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (65_536..=1_073_741_824).contains(&self.max_memory_bytes)
+                && (1..=10_000_000).contains(&self.max_table_elements)
+                && (1..=1024).contains(&self.max_instances)
+                && (1..=64).contains(&self.max_memories)
+                && (1..=256).contains(&self.max_tables)
+                && (1..=10_000_000_000).contains(&self.fuel_per_evaluation)
+                && (1..=600_000).contains(&self.timeout_ms)
+                && (1..=1_000).contains(&self.epoch_tick_interval_ms)
+                && (1..=1024).contains(&self.max_concurrent_evaluations)
+                && (1..=1_048_576).contains(&self.max_log_message_bytes)
+                && self.max_log_messages <= 100_000,
+            "invalid Wasm limits"
+        );
+        self.store_limits()?;
+        Ok(())
+    }
     fn store_limits(&self) -> anyhow::Result<StoreLimits> {
         Ok(StoreLimitsBuilder::new()
             .memory_size(to_usize("wasm max memory bytes", self.max_memory_bytes)?)

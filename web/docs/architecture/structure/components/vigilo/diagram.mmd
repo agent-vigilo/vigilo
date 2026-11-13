@@ -16,6 +16,11 @@ flowchart TD
 
     LibraryHost["Rust host<br/>Caller-owned runtime and presentation"]:::actor
     StatusOperations["Typed status operation<br/>Shared lazy pools; no output state"]:::component
+    HostedRuntime["Hosted runtime<br/>Validated fixed roles and injected resources"]:::component
+    LibraryHost --> HostedRuntime
+    HostedRuntime --> StatusOperations
+    HostedRuntime -->|"Calls shared cycles in process"| Coordinator
+    HostedRuntime -->|"Calls shared worker services in process"| Worker
     LibraryHost --> StatusOperations
     CliRouter -->|status| StatusOperations
     StatusOperations --> RunQueries

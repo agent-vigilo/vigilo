@@ -62,6 +62,9 @@ flowchart TD
     ObjectStorage[("<b>Object Storage</b><br/>Immutable dataset and run-plan files")]:::component
 
     %% edges
+    HostedCoordinator["Typed scheduler handle<br/>Validated bindings and host cancellation<br/>No CLI parsing or process signals"]:::component
+    HostedCoordinator -->|"Runs bounded shared cycles"| CycleOrchestrator
+    HostedCoordinator -->|"Retains scheduler authority"| RuntimeContext
     Vigilo -->|"Runs coordinator start or once through"| CommandFacade
     CommandFacade -->|"Starts continuous mode with"| ServiceLoop
     CommandFacade -->|"Runs one cycle through"| CycleOrchestrator

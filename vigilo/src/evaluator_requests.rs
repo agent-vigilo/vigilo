@@ -95,6 +95,17 @@ impl Default for Service {
     }
 }
 impl Service {
+    pub(crate) fn with_limits(limits: Limits, concurrency: usize) -> Result<Self> {
+        Self::configured(Config {
+            request_bytes: limits.request_bytes,
+            response_bytes: limits.response_bytes,
+            request_timeout_ms: limits.request_timeout.as_millis().try_into()?,
+            total_time_ms: limits.total_time.as_millis().try_into()?,
+            requests: limits.requests,
+            concurrency,
+            bindings: vec![],
+        })
+    }
     pub(crate) fn from_bindings_json(text: &str) -> Result<Self> {
         ensure!(
             text.len() <= 1024 * 1024,

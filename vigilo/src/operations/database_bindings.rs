@@ -82,7 +82,7 @@ impl DatabaseBindings {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Authority {
+pub(super) enum Authority {
     Scheduler,
     Execution,
     User,
@@ -216,8 +216,7 @@ impl DatabasePools {
 
     /// Construct one internal authority router from these exact validated pools.
     /// Public runtime construction is separate from standalone operator clients.
-    #[allow(dead_code)]
-    fn router(
+    pub(super) fn router(
         &self,
         authority: Authority,
         default_execution_alias: String,
