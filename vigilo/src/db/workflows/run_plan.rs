@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 pub(crate) mod admission;
 pub(crate) mod batches;
+pub(crate) mod preparation;
 mod queries;
 
 use super::{
@@ -55,14 +56,22 @@ pub(crate) struct Lease {
     pub run_id: Uuid,
     pub owner: Uuid,
     pub generation: i64,
+    pub caller: Option<crate::db::scope::UserContext>,
 }
 impl Lease {
+    /// Preparation retains caller policy; accepted admission uses system identity.
+    fn settings(self) -> String {
+        self.caller
+            .map(|caller| caller.settings(self.run_id))
+            .unwrap_or_else(|| crate::db::scope::system_settings(self.tenant_id, self.run_id))
+    }
+
     /// Bind claimed ownership before the lock statement starts. The following
     /// generation/expiry check remains separate so it observes post-wait time.
     async fn lock(self, tx: &mut Transaction<'_, Postgres>) -> Result<()> {
         let sql = format!(
             "{}SELECT id FROM runs WHERE id='{}'::uuid FOR UPDATE",
-            crate::db::scope::system_settings(self.tenant_id, self.run_id),
+            self.settings(),
             self.run_id
         );
         sqlx::Executor::fetch_one(&mut **tx, sql.as_str()).await?;
@@ -95,9 +104,37 @@ pub(crate) async fn load(db: &PgPool, id: Uuid) -> Result<Option<Plan>> {
 /// never re-resolves evaluator artifacts for an already durable creation.
 /// Execution intent commits with identity; a valid creating replay can request
 /// execution, but preparation-only retries never revoke an existing request.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn begin(
     db: &PgPool,
+    id: Uuid,
+    dataset: Uuid,
+    binding: &str,
+    limits: &FormatLimits,
+    draft: &RunDraft,
+    execution: &EvaluatorExecutionPlan,
+    assignments: &[run_create::RunShardPlacementAssignment],
+    execute: bool,
+) -> Result<Plan> {
+    begin_as(
+        preparation::Access::new(db, None),
+        id,
+        dataset,
+        binding,
+        limits,
+        draft,
+        execution,
+        assignments,
+        execute,
+    )
+    .await
+}
+/// Freeze or replay immutable preparation inputs on the caller's actual transaction.
+/// Execution approval remains a separate exact-manifest acceptance boundary.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn begin_as(
+    access: preparation::Access<'_>,
     id: Uuid,
     dataset: Uuid,
     binding: &str,
@@ -113,7 +150,7 @@ pub(crate) async fn begin(
         "execution plan exceeds 512 KiB"
     );
     bounded(async {
-        let mut tx = db.begin().await?;
+        let mut tx = access.transaction(id).await?;
         run_create::upsert_dataset_version(
             &mut tx,
             draft.dataset_version_id,
@@ -203,16 +240,27 @@ pub(crate) async fn begin(
 }
 /// Claim an unleased/expired preparation and advance its generation. Ready,
 /// cancelled, active and currently leased runs cannot acquire preparation authority.
+#[cfg(test)]
 pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
+    claim_as(preparation::Access::new(db, None), id).await
+}
+/// Claim preparation under caller policy; ownership is read from the locked row.
+pub(crate) async fn claim_as(access: preparation::Access<'_>, id: Uuid) -> Result<Lease> {
     bounded(async {
         let owner = Uuid::now_v7();
-        let mut tx = db.begin().await?;
+        let mut tx = access.transaction(id).await?;
         let tenant_id: Option<Uuid> =
             sqlx::query_scalar("SELECT tenant_id FROM runs WHERE id=$1 FOR UPDATE")
                 .bind(id)
                 .fetch_optional(&mut *tx)
                 .await?;
         let tenant_id = tenant_id.context("run not found")?;
+        ensure!(
+            access
+                .caller
+                .is_none_or(|caller| caller.tenant_id() == tenant_id),
+            "preparation owner differs from caller"
+        );
         let claimed = sqlx::query(queries::CLAIM_RUN)
             .bind(id)
             .bind(owner)
@@ -230,6 +278,7 @@ pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
             run_id: id,
             owner,
             generation,
+            caller: access.caller,
         })
     })
     .await
@@ -262,11 +311,7 @@ pub(crate) async fn release(db: &PgPool, lease: Lease, error: Option<&str>) -> R
     let error = error.map(|message| message.chars().take(4096).collect::<String>());
     bounded(async {
         let mut tx = db.begin().await?;
-        sqlx::Executor::execute(
-            &mut *tx,
-            crate::db::scope::system_settings(lease.tenant_id, lease.run_id).as_str(),
-        )
-        .await?;
+        sqlx::Executor::execute(&mut *tx, lease.settings().as_str()).await?;
         sqlx::query(queries::RELEASE_RUN)
             .bind(lease.run_id)
             .bind(lease.owner)

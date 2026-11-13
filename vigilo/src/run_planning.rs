@@ -118,7 +118,9 @@ pub(crate) async fn connect(
         .open(key, plan.limits.0.clone(), budget, cancel)
         .await?;
     ledger::acknowledge(db, lease, &object).await?;
-    let probes = ledger::pending_probes(db, plan.run_id).await?;
+    let probes = ledger::preparation::Access::new(db, lease.caller)
+        .pending_probes(plan.run_id)
+        .await?;
     for probe in probes {
         let budget = Budget::standard();
         ledger::renew(db, lease).await?;
@@ -393,14 +395,10 @@ async fn build_index(writer: &mut Writer<'_, '_>) -> Result<IndexDescriptor> {
         let mut count = 0;
         let mut last = None;
         loop {
-            let rows = ledger::objects(
-                writer.session.db,
-                writer.session.lease.run_id,
-                kind,
-                child_level,
-                after,
-            )
-            .await?;
+            let rows =
+                ledger::preparation::Access::new(writer.session.db, writer.session.lease.caller)
+                    .objects(writer.session.lease.run_id, kind, child_level, after)
+                    .await?;
             if rows.is_empty() {
                 break;
             }

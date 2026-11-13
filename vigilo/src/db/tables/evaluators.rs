@@ -39,8 +39,11 @@ pub(crate) struct EvaluatorRuntimeMetadata {
 ///
 /// Identities are passed as `(namespace, name, version)` tuples and resolved in
 /// one query so run creation and execution do not perform per-evaluator lookups.
-pub(crate) async fn select_evaluator_runtime_metadata_by_identities(
-    db: &PgPool,
+pub(crate) async fn select_evaluator_runtime_metadata_by_identities<
+    'e,
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+>(
+    db: E,
     identities: &[(String, String, String)],
 ) -> anyhow::Result<Vec<EvaluatorRuntimeMetadata>> {
     if identities.is_empty() {

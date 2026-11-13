@@ -138,14 +138,43 @@ pub(crate) async fn resolve_evaluators(
     db: &PgPool,
     profile: &RunProfile,
 ) -> anyhow::Result<Vec<ResolvedEvaluator>> {
-    let (_, mut resolved, issues) = resolve_profile(db, profile).await?;
+    let (_, resolved, issues) = resolve_profile(db, profile).await?;
+    let resolved = require_resolved(resolved, issues)?;
+    let ids = resolved.iter().map(|e| e.evaluator_id).collect::<Vec<_>>();
+    freeze_http_ceiling(
+        resolved,
+        crate::db::tables::evaluator_http_policies::load(db, &ids).await?,
+    )
+}
+/// Resolve metadata and policy ceilings on the caller's already scoped connection.
+pub(crate) async fn resolve_evaluators_with(
+    db: &mut sqlx::PgConnection,
+    profile: &RunProfile,
+) -> anyhow::Result<Vec<ResolvedEvaluator>> {
+    let (_, resolved, issues) = resolve_profile(&mut *db, profile).await?;
+    let resolved = require_resolved(resolved, issues)?;
+    let ids = resolved.iter().map(|e| e.evaluator_id).collect::<Vec<_>>();
+    freeze_http_ceiling(
+        resolved,
+        crate::db::tables::evaluator_http_policies::load(db, &ids).await?,
+    )
+}
+fn require_resolved(
+    resolved: Vec<ResolvedEvaluator>,
+    issues: Vec<String>,
+) -> anyhow::Result<Vec<ResolvedEvaluator>> {
     anyhow::ensure!(
         issues.is_empty(),
         "profile executability validation failed:\n- {}",
         issues.join("\n- ")
     );
-    let ids = resolved.iter().map(|e| e.evaluator_id).collect::<Vec<_>>();
-    let mut policies = crate::db::tables::evaluator_http_policies::load(db, &ids).await?;
+    Ok(resolved)
+}
+/// Both credential paths freeze exactly the same validated capability ceiling.
+fn freeze_http_ceiling(
+    mut resolved: Vec<ResolvedEvaluator>,
+    mut policies: std::collections::BTreeMap<uuid::Uuid, Vec<vigilo::evaluator_http::Rule>>,
+) -> anyhow::Result<Vec<ResolvedEvaluator>> {
     for evaluator in &mut resolved {
         let rules = policies.remove(&evaluator.evaluator_id).unwrap_or_default();
         crate::evaluator_http::Snapshot::new(evaluator.evaluator_id, rules.clone())?;
@@ -154,8 +183,8 @@ pub(crate) async fn resolve_evaluators(
     Ok(resolved)
 }
 
-async fn resolve_profile(
-    db: &PgPool,
+async fn resolve_profile<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
     profile: &RunProfile,
 ) -> anyhow::Result<(HashMap<String, bool>, Vec<ResolvedEvaluator>, Vec<String>)> {
     let mut runnable_by_ref: HashMap<String, bool> = HashMap::new();

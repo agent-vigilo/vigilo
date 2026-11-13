@@ -29,8 +29,8 @@ use crate::db::workflows::run_shard_summary::plan::Manifest;
 /// The caller verifies immutable inputs before this boundary. Recovery cannot
 /// call it to manufacture approval. Locking the run serializes cancellation;
 /// an identical retry is safe after an uncertain commit.
-pub(crate) async fn accept(
-    db: &PgPool,
+pub(crate) async fn accept<'e, E: sqlx::Executor<'e, Database = Postgres>>(
+    db: E,
     id: Uuid,
     manifest: &crate::contracts::case_storage::ObjectRef,
 ) -> Result<()> {
@@ -68,6 +68,7 @@ pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
             run_id,
             owner,
             generation,
+            caller: None,
         })
     })
     .await

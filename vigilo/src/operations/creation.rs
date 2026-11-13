@@ -120,6 +120,7 @@ pub(crate) async fn prepare(
     owner: &OwnerConfig,
     id: Uuid,
     cancel: &CancellationToken,
+    caller: Option<crate::db::scope::UserContext>,
 ) -> anyhow::Result<PreparedRun> {
     let Preparation {
         payload,
@@ -131,6 +132,7 @@ pub(crate) async fn prepare(
     let profile: RunProfile = serde_json::from_value(payload.clone())?;
     let router = context.dbr().await?;
     let db = router.control().await?;
+    let access = run_plan::preparation::Access::new(db, caller);
     ensure!(
         owner.alias() == upload.storage_alias && owner.binding_hash()? == upload.binding_hash,
         "dataset storage owner binding changed"
@@ -142,15 +144,21 @@ pub(crate) async fn prepare(
     // we uploaded its dataset. Resolve only after checking for that durable plan.
     let frozen_plan = match frozen_plan {
         Some(plan) => Some(plan),
-        None => run_plan::load(db, id).await?.map(FrozenPlanInputs::from),
+        None => access.load(id).await?.map(FrozenPlanInputs::from),
     };
     let execution = if let Some(plan) = frozen_plan.as_ref() {
         plan.execution.clone()
     } else {
-        EvaluatorExecutionPlan::new(
-            policy.clone(),
-            run_profile_validation::resolve_evaluators(db, &profile).await?,
-        )
+        let resolved = if let Some(caller) = caller {
+            let mut tx = crate::db::scope::begin(db, caller, id).await?;
+            let resolved =
+                run_profile_validation::resolve_evaluators_with(&mut tx, &profile).await?;
+            tx.commit().await?;
+            resolved
+        } else {
+            run_profile_validation::resolve_evaluators(db, &profile).await?
+        };
+        EvaluatorExecutionPlan::new(policy.clone(), resolved)
     };
     ensure!(
         execution.aggregation_policy_hash == policy,
@@ -214,8 +222,8 @@ pub(crate) async fn prepare(
             .collect::<Vec<_>>();
         run_create::assign_run_shard_placements(router, &representatives).await?
     };
-    let plan = run_plan::begin(
-        db,
+    let plan = run_plan::begin_as(
+        access,
         id,
         upload_id,
         &upload.binding_hash,
@@ -233,7 +241,7 @@ pub(crate) async fn prepare(
     let reference = if let Some(reference) = plan.manifest.as_ref() {
         reference.0.clone()
     } else {
-        let lease = run_plan::claim(db, id).await?;
+        let lease = run_plan::claim_as(access, id).await?;
         let result = async {
             let store = run_planning::connect(db, &plan, lease, owner, cancel).await?;
             run_planning::prepare(
@@ -267,7 +275,8 @@ pub(crate) async fn prepare(
         }
         result?
     };
-    let plan = run_plan::load(db, id)
+    let plan = access
+        .load(id)
         .await?
         .context("published plan disappeared")?;
     let store = std::sync::Arc::from(

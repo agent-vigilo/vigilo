@@ -2,6 +2,7 @@
 //! caching; absent rules deny access. SQL never runs inside a Wasm HTTP call.
 use std::collections::BTreeMap;
 
+#[cfg(test)]
 use sqlx::PgPool;
 use uuid::Uuid;
 use vigilo::evaluator_http::{
@@ -10,7 +11,10 @@ use vigilo::evaluator_http::{
 };
 
 /// Read a bounded policy batch from one committed database statement snapshot.
-pub(crate) async fn load(db: &PgPool, ids: &[Uuid]) -> anyhow::Result<BTreeMap<Uuid, Vec<Rule>>> {
+pub(crate) async fn load<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
+    ids: &[Uuid],
+) -> anyhow::Result<BTreeMap<Uuid, Vec<Rule>>> {
     anyhow::ensure!(ids.len() <= 256, "HTTP policy batch exceeds 256 evaluators");
     if ids.is_empty() {
         return Ok(BTreeMap::new());

@@ -5,6 +5,7 @@ sequenceDiagram
     participant Storage as Blob adapter
     participant Execution as Execution PostgreSQL
     User->>CLI: run create, profile and dataset source
+    Note over CLI,Control: Metadata transactions retain command identity; no transaction spans blob I/O
     opt Inline or file source
         CLI->>Storage: Validate and publish immutable dataset
     end
@@ -17,6 +18,8 @@ sequenceDiagram
     alt Prepare only
         CLI-->>User: Creating run with ready plan, execution held
     else Execution requested
+        CLI->>Control: Accept the exact published root
+        CLI->>Control: Claim accepted admission under system work identity
         loop Bounded metadata pages
             CLI->>Execution: Idempotently seed chunks, references and gate counts
             CLI->>Control: Acknowledge contiguous admission cursor
@@ -27,6 +30,6 @@ sequenceDiagram
             CLI-->>User: Pending run
         else Interrupted or unavailable placement
             CLI-->>User: Creating run and recovery progress
-            Note over Control: Coordinator resumes requested admission
+            Note over Control: Coordinator resumes accepted, requested admission
         end
     end

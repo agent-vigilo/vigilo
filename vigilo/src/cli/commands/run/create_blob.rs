@@ -96,7 +96,7 @@ pub(super) async fn prepare(
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let owner = super::super::dataset::owner(&storage_config)?;
-    let client = crate::operations::RunClient::from_context(context.clone(), owner, config);
+    let client = crate::operations::RunClient::from_context(context.clone(), owner, config, None);
     let prepared = client.prepare_inputs(inputs, id, cancel).await?;
     let result = if prepare_only {
         client.describe(&prepared).await?

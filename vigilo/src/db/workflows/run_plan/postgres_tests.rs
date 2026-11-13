@@ -1139,3 +1139,6 @@ async fn restricted_admission_claim_requires_grant_and_rolls_back_ownership(db: 
 
 #[path = "postgres_tests/admission_scope.rs"]
 mod admission_scope;
+
+#[path = "postgres_tests/scoped_preparation.rs"]
+mod scoped_preparation;

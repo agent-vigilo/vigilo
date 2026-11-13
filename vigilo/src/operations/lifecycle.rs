@@ -123,18 +123,23 @@ pub struct RunClient {
     owner: OwnerConfig,
     options: run_creation::Config,
     id: Uuid,
+    caller: Option<crate::db::scope::UserContext>,
 }
 impl RunClient {
+    /// Trusted construction binds the fixed credential domain. A supplied caller
+    /// requires a user-role router; standalone construction supplies no caller.
     pub(crate) fn from_context(
         context: Context,
         owner: OwnerConfig,
         options: run_creation::Config,
+        caller: Option<crate::db::scope::UserContext>,
     ) -> Self {
         Self {
             context,
             owner,
             options,
             id: Uuid::now_v7(),
+            caller,
         }
     }
 
@@ -172,10 +177,21 @@ impl RunClient {
         cancel: &CancellationToken,
     ) -> anyhow::Result<PreparedRun> {
         let db = self.context.dbr().await?.control().await?;
-        let upload = dataset_upload::load(db, input.dataset_upload_id).await?;
-        let catalog = dataset_upload::catalog(db, input.dataset_upload_id)
-            .await?
-            .context("dataset is not finalized")?;
+        let (upload, catalog) = if let Some(caller) = self.caller {
+            let mut tx = crate::db::scope::begin(db, caller, input.run_id).await?;
+            let upload = dataset_upload::load(&mut *tx, input.dataset_upload_id).await?;
+            let catalog = dataset_upload::catalog(&mut *tx, input.dataset_upload_id)
+                .await?
+                .context("dataset is not finalized")?;
+            tx.commit().await?;
+            (upload, catalog)
+        } else {
+            let upload = dataset_upload::load(db, input.dataset_upload_id).await?;
+            let catalog = dataset_upload::catalog(db, input.dataset_upload_id)
+                .await?
+                .context("dataset is not finalized")?;
+            (upload, catalog)
+        };
         let inputs = creation::Preparation::new(input.profile, upload, catalog, None)?;
         self.prepare_inputs(inputs, input.run_id, cancel).await
     }
@@ -185,7 +201,18 @@ impl RunClient {
         id: Uuid,
         cancel: &CancellationToken,
     ) -> anyhow::Result<PreparedRun> {
-        creation::prepare(&self.context, self.id, inputs, &self.owner, id, cancel).await
+        // The streaming planner has a large nested future. Keep its frame off
+        // embedding hosts' request-task stacks; this allocates once per run.
+        Box::pin(creation::prepare(
+            &self.context,
+            self.id,
+            inputs,
+            &self.owner,
+            id,
+            cancel,
+            self.caller,
+        ))
+        .await
     }
     fn validate(&self, prepared: &PreparedRun) -> Result<(), Error> {
         if self.id != prepared.client_id {
@@ -200,9 +227,15 @@ impl RunClient {
     }
     async fn report(&self, prepared: &PreparedRun) -> anyhow::Result<RunSubmission> {
         let db = self.context.dbr().await?.control().await?;
-        let state = run_creation::select_creation_state(db, prepared.run_id())
-            .await?
-            .context("run disappeared while reporting creation")?;
+        let state = if let Some(caller) = self.caller {
+            let mut tx = crate::db::scope::begin(db, caller, prepared.run_id()).await?;
+            let state = run_creation::select_creation_state(&mut *tx, prepared.run_id()).await?;
+            tx.commit().await?;
+            state
+        } else {
+            run_creation::select_creation_state(db, prepared.run_id()).await?
+        }
+        .context("run disappeared while reporting creation")?;
         let mut data = prepared.details.clone();
         data.status = state.status;
         data.error_message = state.error;
@@ -238,6 +271,25 @@ impl RunClient {
     ) -> anyhow::Result<RunSubmission> {
         anyhow::ensure!(!cancel.is_cancelled(), "run acceptance cancelled");
         let db = self.context.dbr().await?.control().await?;
+        if let Some(caller) = self.caller {
+            let mut tx = crate::db::scope::begin(db, caller, prepared.run_id()).await?;
+            let status: String = sqlx::query_scalar("SELECT status::text FROM runs WHERE id=$1")
+                .bind(prepared.run_id())
+                .fetch_one(&mut *tx)
+                .await?;
+            if status == "creating" {
+                run_plan::admission::accept(
+                    &mut *tx,
+                    prepared.run_id(),
+                    &prepared.reader.reference,
+                )
+                .await?;
+            }
+            tx.commit().await?;
+            // Acceptance is durable; background admission obtains its own system
+            // claim. Never run scheduler work with caller credentials or identity.
+            return self.report(&prepared).await;
+        }
         let status: String = sqlx::query_scalar("SELECT status::text FROM runs WHERE id=$1")
             .bind(prepared.run_id())
             .fetch_one(db)
@@ -275,6 +327,58 @@ impl RunClient {
         cancel: &CancellationToken,
     ) -> Result<RunSubmission, Error> {
         self.create_run(input, cancel).await
+    }
+}
+
+#[cfg(test)]
+impl RunClient {
+    /// Build a real verified-reader fixture tied to this client's private identity.
+    /// Production preparation constructs this proof only after complete validation.
+    pub(crate) fn prepared_for_test(
+        &self,
+        plan: run_plan::Plan,
+        reader: RunReader,
+        draft: &crate::models::run::RunDraft,
+        dataset_hash: String,
+    ) -> PreparedRun {
+        let details = CreationDetails {
+            run_id: plan.run_id,
+            run_key: draft.run_key.clone(),
+            status: "creating".into(),
+            error_message: None,
+            plan_status: "ready".into(),
+            run_plan: PlanReference(reader.reference.clone()),
+            dataset_version_id: draft.dataset_version_id,
+            profile_version_id: draft.profile_version_id.clone(),
+            profile_hash: draft.profile_hash.clone(),
+            dataset_hash,
+            aggregation_policy_hash: draft.aggregation_policy_hash.clone(),
+            execution_plan_hash: plan.execution_plan.hash().unwrap(),
+        };
+        let metadata = CreationMetadata {
+            case_count: reader.dataset.case_count,
+            chunk_count: reader.manifest.chunk_count,
+            chunk_size: 100,
+            dispatchable: false,
+            shard_placement_count: plan.assignments.len(),
+            shard_assignment_policy: "single-default".into(),
+            default_execution_database_alias: "primary".into(),
+            execution_database_aliases: vec!["primary".into()],
+            creation_placement_count: 0,
+            creation_placements_pending: 0,
+            creation_placements_seeded: 0,
+            creation_placements_failed: 0,
+            creation_seed_attempt_count: 0,
+            expected_evaluator_executions: None,
+            resolved_evaluator_refs: None,
+        };
+        PreparedRun {
+            client_id: self.id,
+            plan,
+            reader,
+            details,
+            metadata,
+        }
     }
 }
 

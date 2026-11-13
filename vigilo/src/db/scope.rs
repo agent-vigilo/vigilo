@@ -31,6 +31,16 @@ impl UserContext {
             actor_id,
         })
     }
+    /// Fixed request settings for one short transaction. Only typed UUIDs enter SQL.
+    pub(crate) fn settings(self, run_id: Uuid) -> String {
+        format!(
+            "SET LOCAL vigilo.tenant_id = '{}'; SET LOCAL vigilo.actor_id = '{}'; SET LOCAL vigilo.run_id = '{run_id}'; SET LOCAL vigilo.run_batch = ''; ",
+            self.tenant_id, self.actor_id
+        )
+    }
+    pub(crate) fn tenant_id(self) -> Uuid {
+        self.tenant_id
+    }
 }
 
 /// Starts one transaction and installs all request settings in one SQL statement.

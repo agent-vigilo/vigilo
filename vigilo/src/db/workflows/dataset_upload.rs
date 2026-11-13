@@ -75,7 +75,10 @@ async fn bounded<T>(future: impl std::future::Future<Output = Result<T>>) -> Res
     tokio::time::timeout(std::time::Duration::from_secs(30), future).await?
 }
 
-pub(crate) async fn load(db: &PgPool, id: Uuid) -> Result<Upload> {
+pub(crate) async fn load<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
+    id: Uuid,
+) -> Result<Upload> {
     bounded(async {
         Ok(sqlx::query_as::<_, Upload>(queries::SELECT_UPLOAD)
             .bind(id)
@@ -84,7 +87,10 @@ pub(crate) async fn load(db: &PgPool, id: Uuid) -> Result<Upload> {
     })
     .await
 }
-pub(crate) async fn catalog(db: &PgPool, id: Uuid) -> Result<Option<Catalog>> {
+pub(crate) async fn catalog<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
+    id: Uuid,
+) -> Result<Option<Catalog>> {
     bounded(async {
         Ok(sqlx::query_as(queries::SELECT_CATALOG)
             .bind(id)

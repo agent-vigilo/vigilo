@@ -46,6 +46,14 @@ the two for a trusted operator. `resume_creation` retries the same immutable inp
 and run ID. It is distinct from resuming paused execution. Dropping a request does
 not undo committed preparation, acceptance or control changes.
 
+Preparation retains command identity on its actual metadata transactions,
+including lease renewal, file checkpoints, publication and progress reads. A
+supplied caller context keeps its actor identity until exact plan acceptance;
+accepted admission obtains a separate system claim. Caller-scoped acceptance
+commits approval and reports progress without borrowing scheduler authority.
+No preparation or acceptance transaction spans blob I/O, and pooled connections
+retain no request settings after commit, rollback or cancellation.
+
 The CLI uses the same typed operations for creation, cancellation and status/watch
 output. Other commands and daemon adapters call private library workflows. Neither pools nor persistence
 records are part of the public operation API.

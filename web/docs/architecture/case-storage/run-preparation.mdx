@@ -85,7 +85,11 @@ finalization projection from the same shard metadata in its atomic commit.
 
 The run creation lease lasts five minutes. Each claim also increments a
 plan generation. Mutations lock the run, then recheck the current owner,
-generation, status, and wall-clock expiry. No SQL transaction spans storage I/O.
+generation, status, and wall-clock expiry. Preparation checkpoints retain the command's caller identity when supplied;
+lease renewal and publication enforce that same caller policy. Transaction-local
+settings end with commit, rollback or cancellation. Exact plan acceptance commits
+under caller authority before a separate system admission claim.
+No SQL transaction spans storage I/O.
 Read-only traversal renews the lease periodically, without a SQL mutation for
 every dataset file. Each group of remote writes gets a finite admission window
 before its authority check.

@@ -102,8 +102,8 @@ flowchart TD
 
     RunPlanner -->|"Validates executability with"| RunValidator
     RunPlanner -->|"Persists planned runs through"| RunPersistence
-    RunValidator -->|"Checks evaluator registry and profile data in <br> <small>[SQL/TCP]</small>"| Database
-    RunPersistence -->|"Writes compact plan checkpoints and idempotent execution metadata to <br> <small>[SQL/TCP]</small>"| Database
+    RunValidator -->|"Checks evaluator metadata under command context in <br> <small>[SQL/TCP]</small>"| Database
+    RunPersistence -->|"Scopes preparation checkpoints and exact acceptance before system admission <br> <small>[SQL/TCP]</small>"| Database
     RunQueries -->|"Reads and updates run state in <br> <small>[SQL/TCP]</small>"| Database
     RunQueries -->|"Writes formatted results using"| OutputRenderer
 
