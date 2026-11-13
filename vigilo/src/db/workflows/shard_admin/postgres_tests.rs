@@ -5,16 +5,13 @@ use sqlx::{
     Postgres,
     migrate::MigrateDatabase,
 };
-use tokio::sync::OnceCell;
 
 use super::*;
 use crate::{
     context::database::{
         CircuitBreakerConfig,
-        DatabaseCircuitBreakers,
         DatabaseRouter,
         PlacementConfig,
-        new_shard_placement_cache,
     },
     models::database_placement::{
         DEFAULT_DATABASE_ALIAS,
@@ -23,18 +20,13 @@ use crate::{
 };
 
 fn database_router_with_control_pool(pool: PgPool, uri: String) -> DatabaseRouter {
-    let database_router = DatabaseRouter {
+    let database_router = DatabaseRouter::new(crate::context::database::Config::new(
         uri,
-        max_connections_per_pool: 5,
-        acquire_timeout: std::time::Duration::from_secs(10),
-        placement_config: PlacementConfig::default_single_database(),
-        circuit_breakers: DatabaseCircuitBreakers::new(CircuitBreakerConfig::default()),
-        operation_timeout_config: None,
-        control_pool: OnceCell::new(),
-        placement_pools: OnceCell::new(),
-        dynamic_placement_pools: moka::future::Cache::builder().max_capacity(1_000).build(),
-        shard_placement_cache: new_shard_placement_cache(),
-    };
+        5,
+        std::time::Duration::from_secs(10),
+        CircuitBreakerConfig::default(),
+        PlacementConfig::default_single_database(),
+    ));
     assert!(database_router.control_pool.set(pool).is_ok());
     database_router
 }

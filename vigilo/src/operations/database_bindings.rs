@@ -93,11 +93,15 @@ struct BoundPool {
     guard: Arc<validation::Guard>,
 }
 struct PlacementPools {
+    purpose: DatabasePurpose,
     scheduler: BoundPool,
     execution: BoundPool,
     user: BoundPool,
 }
 struct Inner {
+    max_connections: u32,
+    acquire_timeout: Duration,
+    operation_timeout: Duration,
     control_alias: String,
     placements: BTreeMap<String, PlacementPools>,
 }
@@ -194,6 +198,7 @@ impl DatabasePools {
             placements.insert(
                 alias.clone(),
                 PlacementPools {
+                    purpose: binding.purpose,
                     scheduler: build(&binding.scheduler, Authority::Scheduler)?,
                     execution: build(&binding.execution, Authority::Execution)?,
                     user: build(&binding.user, Authority::User)?,
@@ -201,9 +206,85 @@ impl DatabasePools {
             );
         }
         Ok(Self(Arc::new(Inner {
+            max_connections: config.max_connections,
+            acquire_timeout: config.acquire_timeout,
+            operation_timeout: config.operation_timeout,
             control_alias: config.control_alias,
             placements,
         })))
+    }
+
+    /// Construct one internal authority router from these exact validated pools.
+    /// Public runtime construction is separate from standalone operator clients.
+    #[allow(dead_code)]
+    fn router(
+        &self,
+        authority: Authority,
+        default_execution_alias: String,
+        shard_assignment_policy: String,
+    ) -> Result<Arc<crate::context::database::DatabaseRouter>, Error> {
+        use crate::{
+            context::database::{
+                Config,
+                DatabaseOperationTimeoutConfig,
+                DatabaseRouter,
+                FixedPlacementPool,
+                PlacementConfig,
+            },
+            models::database_placement::{
+                DATABASE_PLACEMENT_ROLE_CONTROL,
+                DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
+                DATABASE_PLACEMENT_ROLE_SHARD,
+            },
+        };
+        let placement = PlacementConfig::new(
+            self.0.control_alias.clone(),
+            default_execution_alias,
+            shard_assignment_policy,
+        )
+        .map_err(|_| {
+            Error::InvalidConfiguration("invalid fixed runtime placement configuration")
+        })?;
+        let config = Config::new(
+            String::new(),
+            self.0.max_connections,
+            self.0.acquire_timeout,
+            Default::default(),
+            placement,
+        )
+        .with_operation_timeout(Some(
+            DatabaseOperationTimeoutConfig::new(self.0.operation_timeout)
+                .map_err(Error::Dependency)?,
+        ));
+        let pools = self
+            .0
+            .placements
+            .iter()
+            .map(|(alias, bindings)| {
+                let pool = match authority {
+                    Authority::Scheduler => &bindings.scheduler.pool,
+                    Authority::Execution => &bindings.execution.pool,
+                    Authority::User => &bindings.user.pool,
+                };
+                let role = match bindings.purpose {
+                    DatabasePurpose::Control => DATABASE_PLACEMENT_ROLE_CONTROL,
+                    DatabasePurpose::Execution => DATABASE_PLACEMENT_ROLE_SHARD,
+                    DatabasePurpose::ControlAndExecution => {
+                        DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+                    }
+                };
+                (
+                    alias.clone(),
+                    FixedPlacementPool {
+                        pool: pool.clone(),
+                        role,
+                    },
+                )
+            })
+            .collect();
+        DatabaseRouter::from_fixed_pools(config, pools)
+            .map(Arc::new)
+            .map_err(Error::Dependency)
     }
 
     /// Opens and explicitly revalidates every configured authority binding before

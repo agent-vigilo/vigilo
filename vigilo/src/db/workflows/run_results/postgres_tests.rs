@@ -8,33 +8,25 @@ use sqlx::{
     ConnectOptions,
     PgPool,
 };
-use tokio::sync::OnceCell;
 
 use super::*;
 use crate::{
     context::database::{
         CircuitBreakerConfig,
-        DatabaseCircuitBreakers,
         DatabaseRouter,
         PlacementConfig,
-        new_shard_placement_cache,
     },
     db::workflows::run_shard_summary::test_support::*,
 };
 
 fn router(pool: &PgPool) -> DatabaseRouter {
-    let router = DatabaseRouter {
-        uri: pool.connect_options().to_url_lossy().to_string(),
-        max_connections_per_pool: 5,
-        acquire_timeout: std::time::Duration::from_secs(10),
-        placement_config: PlacementConfig::default_single_database(),
-        circuit_breakers: DatabaseCircuitBreakers::new(CircuitBreakerConfig::default()),
-        operation_timeout_config: None,
-        control_pool: OnceCell::new(),
-        placement_pools: OnceCell::new(),
-        dynamic_placement_pools: moka::future::Cache::builder().max_capacity(1_000).build(),
-        shard_placement_cache: new_shard_placement_cache(),
-    };
+    let router = DatabaseRouter::new(crate::context::database::Config::new(
+        pool.connect_options().to_url_lossy().to_string(),
+        5,
+        std::time::Duration::from_secs(10),
+        CircuitBreakerConfig::default(),
+        PlacementConfig::default_single_database(),
+    ));
     assert!(router.control_pool.set(pool.clone()).is_ok());
     router
 }

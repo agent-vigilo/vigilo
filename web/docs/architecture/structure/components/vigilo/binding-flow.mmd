@@ -2,7 +2,11 @@ flowchart TD
     Host[Trusted host: explicit placement credentials] --> Config{Configuration valid?}
     Config -->|No| Reject[Reject binding]
     Config -->|Yes| Pools[Shared lazy pools: scheduler, execution, user]
-    Pools --> Connect[Open physical connection]
+    Pools --> Routing[Internal routers retain one fixed authority]
+    Routing --> Bound{Alias supplied and purpose compatible?}
+    Bound -->|No| Reject
+    Bound -->|Yes| Reuse[Reuse exact bound pool; no credential discovery]
+    Reuse --> Connect[Open physical connection when needed]
     Connect --> Guard{Fixed login, scoped table grants, row protections and functions valid?}
     Guard -->|No| Close[Discard connection]
     Guard -->|Yes| Ready[Connection available to its authority]

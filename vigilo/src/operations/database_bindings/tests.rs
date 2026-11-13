@@ -132,3 +132,84 @@ fn ambient_connection_options_cannot_override_bindings() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+#[tokio::test]
+async fn internal_routers_preserve_authority_and_share_bound_pool_lifetimes() {
+    let mut c = config();
+    let mut shard = c.databases["primary"].clone();
+    shard.purpose = DatabasePurpose::Execution;
+    for credential in [&mut shard.scheduler, &mut shard.execution, &mut shard.user] {
+        credential.database_role.push_str("_shard");
+        credential.database_url = format!(
+            "postgres://{}:fixture@127.0.0.1:1/unused",
+            credential.database_role
+        );
+    }
+    c.databases.insert("shard".into(), shard);
+    let pools = DatabasePools::new(c).unwrap();
+    let mut held = Vec::new();
+    for (authority, role) in [
+        (Authority::Scheduler, "scheduler"),
+        (Authority::Execution, "execution"),
+        (Authority::User, "reader"),
+    ] {
+        let router = pools
+            .router(authority, "primary".into(), "single-default".into())
+            .unwrap();
+        assert!(router.uri.is_empty());
+        let context = crate::context::Context::for_operations(router.clone());
+        assert_eq!(
+            context
+                .dbr()
+                .await
+                .unwrap()
+                .control()
+                .await
+                .unwrap()
+                .connect_options()
+                .get_username(),
+            role
+        );
+        let routed = router
+            .execution_write_route(
+                crate::db::workflows::local_shard_admission::LocalShardRouteHint {
+                    run_id: uuid::Uuid::now_v7(),
+                    run_shard: 1,
+                    database_alias: "shard".into(),
+                    write_epoch: 1,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            routed.pool.connect_options().get_username(),
+            format!("{role}_shard")
+        );
+        assert_eq!(routed.pool.size(), 0);
+        assert!(!router.database_url_env_is_resolved("DATABASE_URL"));
+        assert!(
+            router.validate_placement_config().await.is_err(),
+            "administrative setup cannot use a runtime authority domain"
+        );
+        held.push((context, routed.pool));
+    }
+    assert!(
+        pools
+            .router(Authority::User, "unknown".into(), "single-default".into())
+            .is_err()
+    );
+    pools.close().await;
+    for (context, execution) in held {
+        assert!(
+            context
+                .dbr()
+                .await
+                .unwrap()
+                .control()
+                .await
+                .unwrap()
+                .is_closed()
+        );
+        assert!(execution.is_closed());
+    }
+}

@@ -77,6 +77,35 @@ async fn fixed_roles_validate_and_reject_unsafe_deployments(pool: PgPool) {
             let actual:String=sqlx::query_scalar("SELECT current_user::text").fetch_one(&bound.pool).await.unwrap();
             assert_eq!(&actual,role);
         }
+        // Role routing reuses the same guarded pools through actual Context access.
+        // Runtime metadata cannot provide alternate credentials or expand bindings.
+        for role in &roles[..3] {
+            sqlx::query(&format!("GRANT SELECT ON database_placements TO {role}")).execute(&pool).await.unwrap();
+        }
+        for (authority,role) in [Authority::Scheduler,Authority::Execution,Authority::User].into_iter().zip(&roles) {
+            let router=pools.router(authority,"primary".into(),"single-default".into()).unwrap();
+            let context=crate::context::Context::for_operations(router.clone());
+            let actual:String=sqlx::query_scalar("SELECT current_user::text").fetch_one(context.dbr().await.unwrap().control().await.unwrap()).await.unwrap();
+            assert_eq!(&actual,role);
+            let (routed,calls)=crate::db::workflows::run_shard_summary::test_support::record_queries(router.execution_database("primary")).await;
+            let routed=routed.unwrap();
+            assert_eq!(calls.len(),1,"one existing placement lifecycle read, no credential discovery: {calls:#?}");
+            let actual:String=sqlx::query_scalar("SELECT current_user::text").fetch_one(&routed).await.unwrap();
+            assert_eq!(&actual,role);
+            let (hinted,calls)=crate::db::workflows::run_shard_summary::test_support::record_queries(router.execution_write_route(crate::db::workflows::local_shard_admission::LocalShardRouteHint{run_id:uuid::Uuid::now_v7(),run_shard:0,database_alias:"primary".into(),write_epoch:1})).await;
+            hinted.unwrap();
+            assert!(calls.is_empty(),"known worker route remains free of control queries: {calls:#?}");
+            sqlx::query("UPDATE database_placements SET status='draining' WHERE alias='primary'").execute(&pool).await.unwrap();
+            assert!(router.execution_database("primary").await.is_ok());
+            sqlx::query("UPDATE database_placements SET status='disabled' WHERE alias='primary'").execute(&pool).await.unwrap();
+            assert!(router.execution_database("primary").await.is_err());
+            sqlx::query("UPDATE database_placements SET status='active',role='control' WHERE alias='primary'").execute(&pool).await.unwrap();
+            assert!(router.placement("primary").await.is_err(),"metadata cannot change a supplied purpose");
+            sqlx::query("UPDATE database_placements SET role='control_and_shard' WHERE alias='primary'").execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO database_placements(alias,database_url_env,role,status) VALUES('unbound','DATABASE_URL','shard','active')").execute(&pool).await.unwrap();
+            assert!(router.execution_database("unbound").await.unwrap_err().to_string().contains("fixed database binding"));
+            sqlx::query("DELETE FROM database_placements WHERE alias='unbound'").execute(&pool).await.unwrap();
+        }
         // Each unsafe change is observed even on already-established connections.
         let changes=[
             (format!("REVOKE SELECT ON runs FROM {}",roles[3]),format!("GRANT SELECT ON runs TO {}",roles[3])),
@@ -127,7 +156,8 @@ async fn fixed_roles_validate_and_reject_unsafe_deployments(pool: PgPool) {
         client.run_status(context,run).await.unwrap();
         let count:i64=sqlx::query_scalar("SELECT count(*) FROM runs").fetch_one(&pools.0.placements["primary"].user.pool).await.unwrap();
         assert_eq!(count,0);
-        scoped_dispatch(&pool, &pools.0.placements["primary"].scheduler.pool, &roles, tenant, run).await;
+        let scheduler=pools.router(Authority::Scheduler,"primary".into(),"single-default".into()).unwrap();
+        scoped_dispatch(&pool, scheduler.control().await.unwrap(), &roles, tenant, run).await;
         pools.validate().await.unwrap();
 
     }).catch_unwind().await;

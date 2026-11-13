@@ -72,6 +72,15 @@ Connection URIs include the host, database, username and password; TLS settings
 are explicit URI options. These bindings reject ambient `PG*` connection overrides
 and arbitrary startup options. Standalone `Client` configuration is separate.
 
+Internal authority-bound routing reuses these exact pools. Supplied aliases and
+placement purposes bound the available databases; catalog rows cannot supply new
+credentials. Catalog-backed routes retain active/draining lifecycle checks and
+reject purpose changes or missing bindings. Known worker hints select a bound
+execution-capable pool without another control read; execution-local admission
+still verifies work identity and ownership before processing. Fixed routing does
+not discover environment credentials or open replacement operator pools.
+Administrative setup uses the separate standalone operator domain.
+
 Construction validates configuration without opening connections. Call `validate()`
 before serving requests. Each new physical connection independently checks its
 login, role memberships, table protections, function definitions and grants.

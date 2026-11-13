@@ -3,9 +3,11 @@
 //! Commands call this module through
 //! [`crate::context::Context::dbr`] when they first need database
 //! access. This context initializes the database router once, then the router
-//! lazily initializes its control pool and per-placement pools. New aliases are
-//! discovered on first use when their secret is already in the environment;
-//! existing connection parameters remain fixed for the process lifetime.
+//! lazily initializes standalone control and per-placement pools. Standalone
+//! aliases can resolve configured environment credentials. Fixed binding routers
+//! instead retain exactly the supplied authority pools and placement purposes;
+//! absent bindings fail without environment or operator fallback. Placement
+//! lifecycle checks remain live while connection bindings stay fixed.
 //! Runtime commands may attach one operation deadline policy; the router then
 //! applies its derived statement and lock limits to every new pool connection.
 //!
@@ -16,7 +18,10 @@
 mod circuit_breaker;
 
 use std::{
-    collections::HashMap,
+    collections::{
+        BTreeMap,
+        HashMap,
+    },
     sync::Arc,
     time::{
         Duration,
@@ -63,6 +68,9 @@ use crate::{
     },
     models::{
         database_placement::{
+            DATABASE_PLACEMENT_ROLE_CONTROL,
+            DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
+            DATABASE_PLACEMENT_ROLE_SHARD,
             DATABASE_PLACEMENT_STATUS_ACTIVE,
             DATABASE_PLACEMENT_STATUS_PROVISIONING,
             DEFAULT_DATABASE_URL_ENV,
@@ -271,9 +279,17 @@ impl Context {
     }
 }
 
+/// One supplied pool and its declared placement capability. Credentials and
+/// connection validation remain owned by the fixed binding domain.
+pub(crate) struct FixedPlacementPool {
+    pub(crate) pool: PgPool,
+    pub(crate) role: &'static str,
+}
+
 /// Resolves control and execution database pools from placement metadata.
 pub(crate) struct DatabaseRouter {
     pub(crate) uri: String,
+    fixed_pools: Option<BTreeMap<String, FixedPlacementPool>>,
     pub(crate) max_connections_per_pool: u32,
     pub(crate) acquire_timeout: Duration,
     pub(crate) placement_config: PlacementConfig,
@@ -308,6 +324,7 @@ impl DatabaseRouter {
     pub(crate) fn new(config: Config) -> Self {
         Self {
             uri: config.uri,
+            fixed_pools: None,
             max_connections_per_pool: config.max_connections_per_pool,
             acquire_timeout: config.acquire_timeout,
             placement_config: config.placement_config,
@@ -322,11 +339,89 @@ impl DatabaseRouter {
         }
     }
 
+    /// Internal fixed-credential construction. Supplied pools are authoritative;
+    /// no URI or environment fallback exists in this mode. Construction is lazy
+    /// and the pool's connection guard remains responsible for role validation.
+    pub(crate) fn from_fixed_pools(
+        config: Config,
+        pools: BTreeMap<String, FixedPlacementPool>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.uri.is_empty(),
+            "fixed database bindings cannot use an operator URI"
+        );
+        anyhow::ensure!(
+            !pools.is_empty() && pools.len() <= 129,
+            "invalid fixed database binding count"
+        );
+        for (alias, binding) in &pools {
+            anyhow::ensure!(
+                normalize_alias(alias.clone(), "fixed database alias")? == *alias
+                    && matches!(
+                        binding.role,
+                        DATABASE_PLACEMENT_ROLE_CONTROL
+                            | DATABASE_PLACEMENT_ROLE_SHARD
+                            | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+                    ),
+                "invalid fixed database binding"
+            );
+        }
+        let control = pools
+            .get(&config.placement_config.control_database_alias)
+            .ok_or_else(|| anyhow::anyhow!("missing fixed database binding for control"))?;
+        anyhow::ensure!(
+            matches!(
+                control.role,
+                DATABASE_PLACEMENT_ROLE_CONTROL | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+            ),
+            "fixed control database binding has incompatible purpose"
+        );
+        let execution = pools
+            .get(&config.placement_config.default_shard_database_alias)
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing fixed database binding for default execution")
+            })?;
+        anyhow::ensure!(
+            matches!(
+                execution.role,
+                DATABASE_PLACEMENT_ROLE_SHARD | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+            ),
+            "fixed execution database binding has incompatible purpose"
+        );
+        let mut router = Self::new(config);
+        router.fixed_pools = Some(pools);
+        Ok(router)
+    }
+
+    /// Match supplied capability against current placement metadata without
+    /// consulting the metadata's standalone credential-variable reference.
+    fn fixed_placement_pool(&self, placement: &DatabasePlacement) -> anyhow::Result<&PgPool> {
+        let binding = self
+            .fixed_pools
+            .as_ref()
+            .and_then(|p| p.get(&placement.alias))
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing fixed database binding for {}", placement.alias)
+            })?;
+        anyhow::ensure!(
+            binding.role == placement.role,
+            "fixed database binding purpose differs from placement {}",
+            placement.alias
+        );
+        Ok(&binding.pool)
+    }
+
     /// Returns the control database pool.
     ///
     /// The pool is initialized on first use, not when the database router is
     /// retrieved from [`crate::context::Context::dbr`].
     pub async fn control(&self) -> anyhow::Result<&PgPool> {
+        if let Some(pools) = &self.fixed_pools {
+            return pools
+                .get(self.control_database_alias())
+                .map(|binding| &binding.pool)
+                .ok_or_else(|| anyhow::anyhow!("missing fixed database binding for control"));
+        }
         let started = Instant::now();
         self.control_pool
             .get_or_try_init(|| async {
@@ -527,6 +622,9 @@ impl DatabaseRouter {
         placement: &DatabasePlacement,
         started: Instant,
     ) -> anyhow::Result<PgPool> {
+        if self.fixed_pools.is_some() {
+            return Ok(self.fixed_placement_pool(placement)?.clone());
+        }
         let pools = self.placement_pools().await?;
         if placement.alias == self.placement_config.control_database_alias {
             if let Some(configured) = pools.pools_by_alias.get(&placement.alias)
@@ -783,6 +881,19 @@ impl DatabaseRouter {
     }
 
     async fn execution_database_from_hint(&self, alias: &str) -> anyhow::Result<PgPool> {
+        if let Some(pools) = &self.fixed_pools {
+            let binding = pools
+                .get(alias)
+                .ok_or_else(|| anyhow::anyhow!("missing fixed database binding for {alias}"))?;
+            anyhow::ensure!(
+                matches!(
+                    binding.role,
+                    DATABASE_PLACEMENT_ROLE_SHARD | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+                ),
+                "fixed database binding for {alias} cannot serve execution work"
+            );
+            return Ok(binding.pool.clone());
+        }
         if alias == self.control_database_alias() {
             return Ok(self.control().await?.clone());
         }
@@ -1228,6 +1339,10 @@ impl DatabaseRouter {
     }
 
     pub(crate) async fn validate_placement_config(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.fixed_pools.is_none(),
+            "placement setup requires the standalone operator domain"
+        );
         let db = self.control().await?;
         let placements = database_placements::list_serviceable_database_placements(db).await?;
 
@@ -1286,6 +1401,10 @@ impl DatabaseRouter {
     }
 
     fn resolve_database_url_env(&self, database_url_env: &str) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            self.fixed_pools.is_none(),
+            "fixed database bindings do not resolve environment credentials"
+        );
         if database_url_env == DEFAULT_DATABASE_URL_ENV {
             return Ok(self.uri.clone());
         }
@@ -1299,11 +1418,18 @@ impl DatabaseRouter {
     }
 
     pub(crate) fn database_url_env_is_resolved(&self, database_url_env: &str) -> bool {
+        if self.fixed_pools.is_some() {
+            return false;
+        }
         database_url_env == DEFAULT_DATABASE_URL_ENV || std::env::var_os(database_url_env).is_some()
     }
 
     #[allow(dead_code)]
     async fn placement_pools(&self) -> anyhow::Result<&PlacementPools> {
+        anyhow::ensure!(
+            self.fixed_pools.is_none(),
+            "fixed database bindings cannot discover standalone pools"
+        );
         self.placement_pools
             .get_or_try_init(|| async {
                 let db = self.control().await?;
@@ -2590,20 +2716,13 @@ mod tests {
     }
 
     fn database_router_with_control_pool_and_uri(pool: PgPool, uri: String) -> DatabaseRouter {
-        let database_router = DatabaseRouter {
+        let database_router = DatabaseRouter::new(Config::new(
             uri,
-            max_connections_per_pool: 5,
-            acquire_timeout: Duration::from_secs(10),
-            placement_config: PlacementConfig::default_single_database(),
-            circuit_breakers: circuit_breaker::DatabaseCircuitBreakers::new(
-                CircuitBreakerConfig::default(),
-            ),
-            operation_timeout_config: None,
-            control_pool: OnceCell::new(),
-            placement_pools: OnceCell::new(),
-            dynamic_placement_pools: Cache::builder().max_capacity(1_000).build(),
-            shard_placement_cache: new_shard_placement_cache(),
-        };
+            5,
+            std::time::Duration::from_secs(10),
+            CircuitBreakerConfig::default(),
+            PlacementConfig::default_single_database(),
+        ));
         assert!(database_router.control_pool.set(pool).is_ok());
         database_router
     }
@@ -2828,3 +2947,7 @@ mod tests {
         chunk_id
     }
 }
+
+#[cfg(test)]
+#[path = "database/fixed_pool_tests.rs"]
+mod fixed_pool_tests;
