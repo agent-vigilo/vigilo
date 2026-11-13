@@ -29,8 +29,8 @@ pub(crate) use queries::{
     release_chunk_as_pending,
 };
 
-/// Immutable identity supplied by the trusted dispatch path and checked against
-/// the execution-local snapshot in the same statement that claims a chunk.
+/// Queue-carried identity hints. Execution-local verification must match these
+/// against accepted records before binding scope; the claim rechecks them.
 pub(crate) struct AcceptedWork<'a> {
     pub tenant_id: Uuid,
     pub plan_digest: &'a str,
@@ -46,7 +46,33 @@ pub(crate) async fn claim_routed_chunk_for_processing(
     lease_seconds: i32,
     identity: Option<&AcceptedWork<'_>>,
 ) -> anyhow::Result<Option<RunChunk>> {
-    let mut tx = database_router.begin_execution_admission(route).await?;
+    let mut tx = if identity.is_some() {
+        anyhow::ensure!(
+            run_id == route.placement.run_id && run_shard == route.placement.run_shard,
+            "worker route identity mismatch"
+        );
+        let hinted = ExecutionWriteRoute {
+            pool: route.pool.clone(),
+            hint: super::local_shard_admission::LocalShardRouteHint {
+                run_id,
+                run_shard,
+                database_alias: route.placement.database_alias.clone(),
+                write_epoch: route.placement.write_epoch,
+            },
+        };
+        let Some(tx) = database_router
+            .begin_execution_write_admission(&hinted, chunk_id, identity)
+            .await?
+        else {
+            return Ok(None);
+        };
+        tx
+    } else {
+        #[cfg(not(test))]
+        anyhow::bail!("accepted work identity is required");
+        #[cfg(test)]
+        database_router.begin_execution_admission(route).await?
+    };
     let mut chunk = claim_chunk_for_processing_in_transaction(
         &mut tx,
         run_id,
@@ -71,9 +97,12 @@ pub(crate) async fn claim_hinted_chunk_for_processing(
     lease_seconds: i32,
     identity: Option<&AcceptedWork<'_>>,
 ) -> anyhow::Result<Option<RunChunk>> {
-    let mut tx = database_router
-        .begin_execution_write_admission(route)
-        .await?;
+    let Some(mut tx) = database_router
+        .begin_execution_write_admission(route, chunk_id, identity)
+        .await?
+    else {
+        return Ok(None);
+    };
     let mut chunk = claim_chunk_for_processing_in_transaction(
         &mut tx,
         route.hint.run_id,
@@ -88,6 +117,36 @@ pub(crate) async fn claim_hinted_chunk_for_processing(
     }
     tx.commit().await?;
     Ok(chunk)
+}
+
+/// Check pause state only after verifying the message against accepted local work.
+/// A failed verification returns false and never exposes another run's state.
+pub(crate) async fn is_verified_chunk_paused(
+    db: &PgPool,
+    run_id: Uuid,
+    run_shard: i16,
+    chunk_id: Uuid,
+    identity: &AcceptedWork<'_>,
+) -> anyhow::Result<bool> {
+    let mut tx = db.begin().await?;
+    if crate::db::scope::verify_worker(
+        &mut tx,
+        run_id,
+        run_shard,
+        chunk_id,
+        identity.tenant_id,
+        identity.plan_digest,
+    )
+    .await?
+    .is_none()
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    let paused=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM run_chunks WHERE run_id=$1 AND run_shard=$2 AND id=$3 AND execution_control='paused' AND status IN ('pending','leased'))")
+        .bind(run_id).bind(run_shard).bind(chunk_id).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(paused)
 }
 
 /// Dataset case row materialized for worker-side execution.
@@ -116,7 +175,8 @@ pub(crate) async fn mark_chunk_completed_and_settle(
 ) -> anyhow::Result<u64> {
     let lease_token = require_chunk_lease_token(chunk)?;
     let mut tx = db.begin().await?;
-    crate::db::shard_write_fence::lock_shared(&mut tx, chunk.run_id, chunk.run_shard).await?;
+    crate::db::scope::lock_system_shard(&mut tx, chunk.tenant_id, chunk.run_id, chunk.run_shard)
+        .await?;
     let terminal_identity = mark_chunk_completed(&mut tx, chunk, lease_token).await?;
     let rows_affected = u64::from(terminal_identity.is_some());
     if let Some(identity) = terminal_identity {
@@ -145,7 +205,8 @@ pub(crate) async fn mark_chunk_failed_and_settle(
 ) -> anyhow::Result<u64> {
     let lease_token = require_chunk_lease_token(chunk)?;
     let mut tx = db.begin().await?;
-    crate::db::shard_write_fence::lock_shared(&mut tx, chunk.run_id, chunk.run_shard).await?;
+    crate::db::scope::lock_system_shard(&mut tx, chunk.tenant_id, chunk.run_id, chunk.run_shard)
+        .await?;
     let terminal_identity = mark_chunk_failed(&mut tx, chunk, lease_token).await?;
     let rows_affected = u64::from(terminal_identity.is_some());
     if let Some(identity) = terminal_identity {
@@ -202,6 +263,7 @@ mod tests {
     fn chunk(lease_token: Option<Uuid>) -> RunChunk {
         let timestamp = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
         RunChunk {
+            tenant_id: Uuid::nil(),
             execution_control: crate::operations::ExecutionControl::Enabled,
             write_epoch: 3,
             id: Uuid::from_u128(2),
@@ -290,7 +352,7 @@ mod identity_postgres_tests {
         .unwrap();
         let (result, queries) = record_queries(extend_chunk_lease(&pool, &leased, 60)).await;
         let extended = result.unwrap().unwrap();
-        assert_eq!(queries.len(), 1, "{queries:#?}");
+        assert_eq!(queries.len(), 2, "scope and guarded renewal: {queries:#?}");
         assert_eq!(
             extended.execution_control,
             crate::operations::ExecutionControl::Paused
@@ -316,3 +378,6 @@ mod identity_postgres_tests {
         tx.rollback().await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod worker_scope_tests;

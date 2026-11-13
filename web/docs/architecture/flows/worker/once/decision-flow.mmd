@@ -13,8 +13,8 @@ flowchart TD
     BrokerCircuit{Messaging circuit admits receive?}
     Consume{Worker message available?}
     Payload{Chunk-ready payload valid?}
-    Claim{Accepted identity matches and chunk enabled?}
-    Paused{Chunk paused?}
+    Claim{Local identity verified, scope bound, admission valid and chunk enabled?}
+    Paused{Verified local work paused?}
     DelayPaused[Delay message without spending retry budget]
     Context[Load and verify pinned run context]
     Warm[Warm evaluator components]
@@ -24,7 +24,7 @@ flowchart TD
     Http[Invoke bounded agent request with authorized header; bound response reads]
     Permit[Acquire Wasm evaluation permits]
     Execute[Dispatch pinned ABI adapters; enforce host HTTP policy, credentials and budgets]
-    Persist[Persist completed results under lease fences; pause drains allocated batch only]
+    Persist[Persist completed results under verified ownership and lease fences; pause drains allocated batch only]
     CheckRetry{Open retry work?}
     Delay[Release chunk and delay message until retry window]
     Complete[Commit terminal chunk and immutable receipt]

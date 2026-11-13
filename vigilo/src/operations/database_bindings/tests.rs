@@ -98,6 +98,15 @@ fn authority_function_allowlists_follow_placement_purpose() {
                     allowed.contains(&"vigilo_claim_chunk_recovery(integer,bigint)"),
                     purpose != DatabasePurpose::Control
                 );
+                assert!(
+                    !allowed
+                        .contains(&"vigilo_verify_worker_identity(uuid,smallint,uuid,uuid,text)")
+                );
+            } else if authority == Authority::Execution && purpose != DatabasePurpose::Control {
+                assert_eq!(
+                    allowed,
+                    ["vigilo_verify_worker_identity(uuid,smallint,uuid,uuid,text)"]
+                );
             } else {
                 assert!(allowed.is_empty());
             }

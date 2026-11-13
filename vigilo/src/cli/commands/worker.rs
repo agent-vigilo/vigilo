@@ -112,6 +112,7 @@ struct WorkerRuntime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct WorkerRunContextKey {
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
 }
@@ -266,7 +267,7 @@ async fn run_chunk_heartbeat(
                         let renewed = guard.renew().await?;
                         let renewed_attempts = if renewed {
                             Some(execution_processing::heartbeat_running_attempts_for_chunk(
-                                &guard.db,
+                                &guard.db, chunk.tenant_id,
                                 chunk.run_id,
                                 chunk.run_shard,
                                 chunk.id,
@@ -445,13 +446,18 @@ impl EvaluatorLoaderService {
     /// Returns run-scoped profile and evaluator metadata, using cache when available.
     async fn get_or_build_run_context(
         &self,
+        tenant_id: Uuid,
         run_id: Uuid,
         run_shard: i16,
         execution_db: &sqlx::PgPool,
         database_alias: &str,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Arc<WorkerRunContext>> {
-        let key = WorkerRunContextKey { run_id, run_shard };
+        let key = WorkerRunContextKey {
+            tenant_id,
+            run_id,
+            run_shard,
+        };
         let cell = self
             .run_context_cache
             .get_with(key, async { Arc::new(OnceCell::new()) })
@@ -459,8 +465,12 @@ impl EvaluatorLoaderService {
         let context = cell
             .get_or_try_init(|| async {
                 let raw: serde_json::Value = self.context.dbr().await?.run_database_operation(database_alias,"worker_run_snapshot",async {
-                    Ok(sqlx::query_scalar("SELECT config_snapshot FROM run_snapshots WHERE run_id=$1 AND run_shard=$2")
-                        .bind(run_id).bind(run_shard).fetch_one(execution_db).await?)
+                    let mut tx=execution_db.begin().await?;
+                    crate::db::scope::set_system(&mut tx,tenant_id,run_id).await?;
+                    let raw=sqlx::query_scalar("SELECT config_snapshot FROM run_snapshots WHERE run_id=$1 AND run_shard=$2")
+                        .bind(run_id).bind(run_shard).fetch_one(&mut *tx).await?;
+                    tx.commit().await?;
+                    Ok(raw)
                 }).await?;
                 let reference = serde_json::from_value(
                     raw.get("run_plan")
@@ -1044,8 +1054,17 @@ async fn run_worker_message_admitted(
     };
     let db = &db;
     let Some(mut chunk) = claimed else {
-        let paused: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM run_chunks WHERE run_id=$1 AND run_shard=$2 AND id=$3 AND execution_control='paused' AND status IN ('pending','leased'))")
-            .bind(payload.run_id).bind(payload.run_shard).bind(payload.chunk_id).fetch_one(db).await?;
+        let paused = chunk_processing::is_verified_chunk_paused(
+            db,
+            payload.run_id,
+            payload.run_shard,
+            payload.chunk_id,
+            &chunk_processing::AcceptedWork {
+                tenant_id: payload.tenant_id,
+                plan_digest: &payload.plan_digest,
+            },
+        )
+        .await?;
         if paused {
             mq.delay_worker_message(
                 &message.raw,
@@ -1115,7 +1134,7 @@ async fn run_worker_message_admitted(
         runtime.clone(),
     );
     let loaded = tokio::select! {
-        result=evaluator_loader.get_or_build_run_context(chunk.run_id,chunk.run_shard,db,&payload.database_alias,&heartbeat.cancel)=>result,
+        result=evaluator_loader.get_or_build_run_context(chunk.tenant_id,chunk.run_id,chunk.run_shard,db,&payload.database_alias,&heartbeat.cancel)=>result,
         _=heartbeat.cancel.cancelled()=>Err(anyhow::anyhow!("chunk authority lost during context read")),
     };
     let run_context = match loaded {
@@ -1302,6 +1321,7 @@ async fn run_worker_message_admitted(
                     "worker_terminal_transitions",
                     execution_processing::finalize_execution_terminal_transitions(
                         db,
+                        chunk.tenant_id,
                         chunk.run_id,
                         chunk.run_shard,
                         runtime.worker_id,
@@ -1365,6 +1385,7 @@ async fn run_worker_message_admitted(
                     "worker_execution_state_summary",
                     execution_processing::summarize_chunk_execution_state(
                         db,
+                        chunk.tenant_id,
                         chunk.run_id,
                         chunk.run_shard,
                         &case_ids,
@@ -1503,9 +1524,20 @@ pub(crate) async fn claim_hinted_chunk_with_route_refresh(
                     hinted_route.hint.run_shard,
                 )
                 .await;
-            let route = database_router
-                .execution_route(hinted_route.hint.run_id, hinted_route.hint.run_shard)
-                .await?;
+            let route = if let Some(verified) =
+                error.downcast_ref::<crate::db::scope::VerifiedWorkerIdentity>()
+            {
+                database_router
+                    .execution_route_for_verified_worker(*verified)
+                    .await?
+            } else {
+                #[cfg(not(test))]
+                anyhow::bail!("worker route refresh requires verified local identity");
+                #[cfg(test)]
+                database_router
+                    .execution_route(hinted_route.hint.run_id, hinted_route.hint.run_shard)
+                    .await?
+            };
             let claim = chunk_processing::claim_routed_chunk_for_processing(
                 database_router,
                 &route,
@@ -1688,6 +1720,7 @@ mod tests {
         for _ in 0..2 {
             let error = loader
                 .get_or_build_run_context(
+                    Uuid::nil(),
                     run_id,
                     1,
                     &unavailable,

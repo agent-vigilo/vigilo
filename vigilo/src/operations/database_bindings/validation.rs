@@ -204,6 +204,7 @@ LEFT JOIN pg_language l ON l.oid=p.prolang
         if self.purpose != DatabasePurpose::Control {
             tables.extend([
                 "run_chunks",
+                "run_snapshots",
                 "run_shard_summaries",
                 "local_shard_admissions",
                 "run_chunk_settlement_consumptions",
@@ -227,15 +228,17 @@ LEFT JOIN pg_language l ON l.oid=p.prolang
     }
 
     pub fn allowed_signatures(&self) -> Vec<&'static str> {
-        if self.authority != Authority::Scheduler {
-            return Vec::new();
-        }
         CONTRACTS
             .iter()
+            .filter(|c| match self.authority {
+                Authority::Scheduler => !c.worker,
+                Authority::Execution => c.worker,
+                Authority::User => false,
+            })
             .filter(|c| match self.purpose {
                 DatabasePurpose::Control => c.control,
                 DatabasePurpose::Execution => c.execution,
-                DatabasePurpose::ControlAndExecution => true,
+                DatabasePurpose::ControlAndExecution => c.control || c.execution,
             })
             .map(|c| c.signature)
             .collect()

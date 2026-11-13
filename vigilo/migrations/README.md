@@ -158,3 +158,13 @@ ownership alongside event payload and claim token. Publisher follow-up transacti
 bind that identity before changing the ledger and hot delivery row atomically;
 no publication transaction spans broker I/O. Claim batches can contain multiple
 owners without per-event ownership lookups.
+
+The chunk migration owns `vigilo_verify_worker_identity(uuid,smallint,uuid,uuid,text)`.
+It verifies exact queue hints against the local chunk and immutable accepted
+snapshot and holds the existing shared movement fence. It returns ownership only,
+not configuration or payload. The execution caller binds that result before
+protected admission and claim SQL; lease/control/epoch checks remain in Rust-owned
+queries. The limited non-login function owner needs SELECT on chunks and snapshots,
+with appropriate row visibility. Public execution is revoked; only the execution
+credential on execution-capable placements is allowed this entrypoint by the
+binding validator. Setup does not create deployment roles or row policies.

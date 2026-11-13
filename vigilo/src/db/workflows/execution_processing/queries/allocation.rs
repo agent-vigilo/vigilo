@@ -1,4 +1,4 @@
-//! allocation queries for execution processing.
+//! Batched attempt allocation under verified chunk ownership.
 
 use super::super::*;
 
@@ -92,6 +92,7 @@ pub(in crate::db::workflows::execution_processing) async fn allocate_execution_a
     //                   - create the new running attempt.
     // authority update  - point each execution at its new attempt.
     let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, chunk.tenant_id, chunk.run_id).await?;
     lock_live_chunk_lease(&mut tx, chunk).await?;
     let mut query_builder = QueryBuilder::<Postgres>::new(
         r#"

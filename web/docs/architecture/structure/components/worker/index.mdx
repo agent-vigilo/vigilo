@@ -28,8 +28,11 @@ Describes the major internal responsibilities of the worker runtime.
   [Run Preparation](/docs/architecture/case-storage/run-preparation).
 
 - Workers consume `run.chunk.ready` broker messages carrying `run_id`,
-  `run_shard`, `chunk_id`, `database_alias`, and `write_epoch`, then validate
-  local shard admission while claiming the chunk lease.
+  `run_shard`, `chunk_id`, `database_alias`, `write_epoch`, owner and accepted plan
+  identity as hints. A restricted execution-local verifier matches exact chunk and
+  immutable snapshot records, retains the movement fence, and returns trusted
+  ownership before protected admission reads. The existing epoch/control checks
+  and guarded lease claim follow in that transaction.
 - `vigilo worker start` defaults to one in-flight chunk per worker process. `--max-inflight-chunks` / `VIGILO_WORKER_MAX_INFLIGHT_CHUNKS` can raise that limit, and RabbitMQ prefetch is set to the same value.
 - Workers attach a process `worker_id`, host label, internal queue message UUID, broker message id, attempt lease, and heartbeat timestamp to newly allocated attempts.
 - While a chunk is processing, the worker renews the chunk lease and current running attempt leases. Terminal execution transitions require current-attempt authority and a live attempt lease for that worker.
@@ -53,6 +56,15 @@ Describes the major internal responsibilities of the worker runtime.
 - Duplicate broker deliveries are expected under at-least-once messaging; chunk claims, attempt authority tokens, and evaluator-result uniqueness make processing idempotent at the persistence boundary.
 
 Workers settle terminal chunks under the chunk lock, preserve authoritative committed results, and retire unfinished authority before writing an immutable receipt. They acknowledge after this transaction; coordinators own shard aggregation and sealing. See [settlement](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
+The claimed chunk carries its persisted owner into snapshot reads, chunk/attempt
+heartbeats, batched allocation and evidence writes, terminal transitions, retry
+summaries, release and settlement. Each transaction clears unrelated caller context;
+connections are released before HTTP, blob reads, Wasm evaluation or broker I/O.
+The paused-work probe also verifies local identity. This adds no control-database
+ownership lookup. Exceptional stale-route refresh carries the locally verified
+identity into a scoped control read; existing cold registry and policy metadata
+reads remain separate.
 
 ## Related
 

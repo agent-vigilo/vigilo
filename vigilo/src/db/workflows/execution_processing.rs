@@ -424,6 +424,7 @@ fn validate_attempt_allocation_batch(
 
 pub(crate) async fn heartbeat_running_attempts_for_chunk(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
     chunk_id: Uuid,
@@ -433,6 +434,7 @@ pub(crate) async fn heartbeat_running_attempts_for_chunk(
     validate_attempt_lease_seconds(lease_seconds)?;
     heartbeat_running_attempts_for_chunk_query(
         db,
+        tenant_id,
         run_id,
         run_shard,
         chunk_id,

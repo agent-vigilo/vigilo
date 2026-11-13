@@ -14,18 +14,21 @@ use super::super::*;
 /// coordinator recovery or reassignment.
 pub(in crate::db::workflows::execution_processing) async fn heartbeat_running_attempts_for_chunk_query(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
     chunk_id: Uuid,
     worker_id: Uuid,
     lease_seconds: i32,
 ) -> anyhow::Result<u64> {
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE execution_attempts
-        SET leased_until = now() + ($5::int * interval '1 second'),
-            heartbeat_at = now(),
-            updated_at = now()
+        SET leased_until = statement_timestamp() + ($5::int * interval '1 second'),
+            heartbeat_at = statement_timestamp(),
+            updated_at = statement_timestamp()
         FROM executions
         WHERE execution_attempts.run_id = $1::uuid
           AND execution_attempts.run_shard = $2
@@ -43,9 +46,10 @@ pub(in crate::db::workflows::execution_processing) async fn heartbeat_running_at
     .bind(chunk_id)
     .bind(worker_id)
     .bind(lease_seconds)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -66,6 +70,7 @@ pub(in crate::db::workflows::execution_processing) async fn heartbeat_running_at
 /// - Writes terminal error aggregates when a failure is non-retryable or exhausted.
 pub(crate) async fn finalize_execution_terminal_transitions(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
     worker_id: Uuid,
@@ -189,7 +194,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     //                       - creates final error aggregate only after retries end.
     // execution_update      - moves executions to completed/retry_scheduled/failed.
     let mut tx = db.begin().await?;
-    crate::db::shard_write_fence::lock_shared(&mut tx, run_id, run_shard).await?;
+    crate::db::scope::lock_system_shard(&mut tx, tenant_id, run_id, run_shard).await?;
     // Take the chunk lock before any attempt mutation, just like persistence
     // and settlement. A separate statement refreshes the snapshot after waiting.
     let chunks = sqlx::query_as::<_, (Uuid, bool)>(
@@ -530,6 +535,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
 /// the message until retry work is due.
 pub(crate) async fn summarize_chunk_execution_state(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
     case_ids: &[Uuid],
@@ -542,6 +548,8 @@ pub(crate) async fn summarize_chunk_execution_state(
         });
     }
 
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
     let state = sqlx::query_as::<_, ChunkExecutionState>(
         r#"
         SELECT
@@ -568,8 +576,9 @@ pub(crate) async fn summarize_chunk_execution_state(
     .bind(run_id)
     .bind(run_shard)
     .bind(case_ids)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(state)
 }

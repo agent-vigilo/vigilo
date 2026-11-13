@@ -725,6 +725,42 @@ impl DatabaseRouter {
         Ok(ExecutionRoute { placement, pool })
     }
 
+    /// Refresh exceptional routing under identity verified at the source. The
+    /// control transaction ends before resolving an execution pool, including
+    /// when control and execution share a single-connection pool.
+    pub(crate) async fn execution_route_for_verified_worker(
+        &self,
+        identity: crate::db::scope::VerifiedWorkerIdentity,
+    ) -> anyhow::Result<ExecutionRoute> {
+        let db = self.control().await?;
+        let mut tx = db.begin().await?;
+        crate::db::scope::set_system(&mut tx, identity.tenant_id(), identity.run_id()).await?;
+        let placement = shard_placements::select_shard_placement_with(
+            &mut *tx,
+            identity.run_id(),
+            identity.run_shard(),
+        )
+        .await?
+        .ok_or(ExecutionRouteError::MissingShardPlacement {
+            run_id: identity.run_id(),
+            run_shard: identity.run_shard(),
+        })?;
+        tx.commit().await?;
+        if !placement.is_dispatchable() {
+            return Err(ExecutionRouteError::NonDispatchableShardPlacement {
+                run_id: identity.run_id(),
+                run_shard: identity.run_shard(),
+                status: placement.status,
+            }
+            .into());
+        }
+        let pool = self
+            .execution_database(&placement.database_alias)
+            .await?
+            .clone();
+        Ok(ExecutionRoute { placement, pool })
+    }
+
     /// Resolves a queue-carried route without consulting shard control metadata.
     ///
     /// Known placement pools are process-local. A previously unseen database
@@ -805,6 +841,7 @@ impl DatabaseRouter {
 
     /// Acquires write admission for a previously resolved worker route.
     /// The shared movement fence remains held through the caller's transaction.
+    #[cfg(test)]
     pub(crate) async fn begin_execution_admission(
         &self,
         route: &ExecutionRoute,
@@ -899,16 +936,52 @@ impl DatabaseRouter {
         Ok(tx)
     }
 
-    /// Acquires local write admission for a message-carried route hint.
+    /// Verifies queue identity before protected local admission reads. The lookup
+    /// retains the shared movement fence until the caller commits the chunk claim.
     pub(crate) async fn begin_execution_write_admission(
         &self,
         route: &ExecutionWriteRoute,
-    ) -> anyhow::Result<Transaction<'static, Postgres>> {
+        chunk_id: Uuid,
+        identity: Option<&crate::db::workflows::chunk_processing::AcceptedWork<'_>>,
+    ) -> anyhow::Result<Option<Transaction<'static, Postgres>>> {
+        #[cfg(not(test))]
+        anyhow::ensure!(identity.is_some(), "accepted work identity is required");
         let mut tx = route.pool.begin().await?;
-        crate::db::shard_write_fence::lock_shared(&mut tx, route.hint.run_id, route.hint.run_shard)
+        let verified = if let Some(identity) = identity {
+            let Some(verified) = crate::db::scope::verify_worker(
+                &mut tx,
+                route.hint.run_id,
+                route.hint.run_shard,
+                chunk_id,
+                identity.tenant_id,
+                identity.plan_digest,
+            )
+            .await?
+            else {
+                tx.rollback().await?;
+                return Ok(None);
+            };
+            Some(verified)
+        } else {
+            // Unscoped fixture setup only; production requires explicit identity.
+            crate::db::shard_write_fence::lock_shared(
+                &mut tx,
+                route.hint.run_id,
+                route.hint.run_shard,
+            )
             .await?;
-        validate_local_shard_admission(&mut *tx, &route.hint, LocalShardWriteKind::NewWork).await?;
-        Ok(tx)
+            None
+        };
+        if let Err(error) =
+            validate_local_shard_admission(&mut *tx, &route.hint, LocalShardWriteKind::NewWork)
+                .await
+        {
+            return Err(match verified {
+                Some(verified) => error.context(verified),
+                None => error,
+            });
+        }
+        Ok(Some(tx))
     }
 
     /// Acquires shared admission for cleanup across routes on one placement.

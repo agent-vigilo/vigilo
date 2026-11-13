@@ -51,13 +51,20 @@ async fn fixed_roles_validate_and_reject_unsafe_deployments(pool: PgPool) {
     for contract in contracts::CONTRACTS {
         sqlx::raw_sql(&format!(
             "ALTER FUNCTION public.{} OWNER TO {}; GRANT EXECUTE ON FUNCTION public.{} TO {};",
-            contract.signature, roles[3], contract.signature, roles[0]
+            contract.signature,
+            roles[3],
+            contract.signature,
+            if contract.worker {
+                &roles[1]
+            } else {
+                &roles[0]
+            }
         ))
         .execute(&pool)
         .await
         .unwrap();
     }
-    sqlx::raw_sql(&format!("GRANT SELECT ON runs,run_plans,run_control_deliveries,run_shard_dispatch_cursors,shard_placements,database_placements,run_chunks,run_shard_summaries,local_shard_admissions,run_chunk_settlement_consumptions,outbox_delivery_queue,outbox_events TO {}; GRANT UPDATE ON database_placements,runs,run_plans,run_control_deliveries,run_shard_dispatch_cursors,outbox_delivery_queue TO {};",roles[3],roles[3])).execute(&pool).await.unwrap();
+    sqlx::raw_sql(&format!("GRANT SELECT ON run_snapshots,runs,run_plans,run_control_deliveries,run_shard_dispatch_cursors,shard_placements,database_placements,run_chunks,run_shard_summaries,local_shard_admissions,run_chunk_settlement_consumptions,outbox_delivery_queue,outbox_events TO {}; GRANT UPDATE ON database_placements,runs,run_plans,run_control_deliveries,run_shard_dispatch_cursors,outbox_delivery_queue TO {};",roles[3],roles[3])).execute(&pool).await.unwrap();
     let pools = DatabasePools::new(config.clone()).unwrap();
     let result=std::panic::AssertUnwindSafe(async {
         for bound in [&pools.0.placements["primary"].scheduler,&pools.0.placements["primary"].execution,&pools.0.placements["primary"].user] {

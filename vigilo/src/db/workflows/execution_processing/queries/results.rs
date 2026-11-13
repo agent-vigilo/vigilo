@@ -1,4 +1,4 @@
-//! results queries for execution processing.
+//! Atomic evaluator evidence and aggregate persistence under verified ownership.
 
 use super::{
     super::*,
@@ -35,6 +35,7 @@ pub(in crate::db::workflows::execution_processing) async fn persist_completed_ex
     // The shared run-state guard preserves cancellation/finalization ordering
     // without turning the run row into an exclusive worker-side mutex.
     let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, chunk.tenant_id, chunk.run_id).await?;
     lock_live_chunk_lease(&mut tx, chunk).await?;
     let run_id = chunk.run_id;
     let run_shard = chunk.run_shard;

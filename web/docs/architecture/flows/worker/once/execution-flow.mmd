@@ -19,6 +19,7 @@ sequenceDiagram
 
     User->>Vigilo: vigilo worker once
     activate Vigilo
+    Note over Vigilo,ExecutionDB: Protected persistence uses transaction-local verified ownership; no transaction spans external work
     Vigilo->>Vigilo: Build evaluator loader
     Vigilo->>Vigilo: Acquire messaging circuit admission
     Vigilo->>Queue: Consume one worker message
@@ -32,13 +33,13 @@ sequenceDiagram
             Vigilo->>Queue: Acknowledge message
             Vigilo-->>User: Success response
         else Valid payload
-            Vigilo->>ExecutionDB: Validate epoch, accepted identity and enabled control; claim lease
-            ExecutionDB-->>Vigilo: Claimed chunk or no claim
+            Vigilo->>ExecutionDB: Verify local identity and bind scope under movement fence; validate epoch/control; claim lease
+            ExecutionDB-->>Vigilo: Claimed chunk with persisted ownership or no claim
 
-            opt Route hint rejected
-                Vigilo->>ControlDB: Refresh authoritative route once
+            opt Route hint rejected after local identity verification
+                Vigilo->>ControlDB: Refresh route once under verified ownership
                 ControlDB-->>Vigilo: Current alias, lifecycle, and write epoch
-                Vigilo->>ExecutionDB: Validate refreshed admission and retry claim
+                Vigilo->>ExecutionDB: Reverify identity and scoped admission before retry claim
             end
 
             alt Chunk paused

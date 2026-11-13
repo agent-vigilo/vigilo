@@ -23,7 +23,7 @@ flowchart TD
     MessageHandler["fa:fa-envelope-open-text <br/> <b>Chunk Message Handler</b> <br/> <small>[Component: Rust]</small> <br/> <small>Parses chunk-ready payloads and routes invalid, stale, successful, and retryable outcomes.</small>"]:::component
     MessageSettlement["fa:fa-check-double <br/> <b>Message Settlement</b> <br/> <small>[Component: Rust / AMQP]</small> <br/> <small>Acknowledges handled messages, delays planned execution retries, or requeues bounded recoverable failures.</small>"]:::component
 
-    ChunkWorkflow["fa:fa-handshake <br/> <b>Chunk Lease Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Uses message route hints, validates local write epochs, and claims or settles owned leases.</small>"]:::component
+    ChunkWorkflow["fa:fa-handshake <br/> <b>Chunk Lease Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Verifies local accepted identity before scope, validates epochs, and claims or settles owned leases.</small>"]:::component
     RunContextCache["fa:fa-boxes-stacked <br/> <b>Run Context Cache</b> <br/> <small>[Component: Rust / Moka]</small> <br/> <small>Caches verified run snapshots and pinned evaluator execution plans.</small>"]:::component
     EvaluatorLoader["fa:fa-cubes <br/> <b>Evaluator Loader Service</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Loads exact pinned artifacts, resolves ABI adapters, and warms prepared evaluators.</small>"]:::component
     CaseBatchLoader["fa:fa-table-list <br/> <b>Case Batch Loader</b> <br/> <small>[Component: Rust / Storage Adapter]</small> <br/> <small>Verifies immutable configuration and assigned case files within byte budgets.</small>"]:::component
@@ -94,7 +94,7 @@ flowchart TD
 
     WorkerConsumer -->|"Delivers messages to"| MessageHandler
     MessageHandler -->|"Claims chunk ownership with"| ChunkWorkflow
-    ChunkWorkflow -->|"Reads and updates chunk leases in <br> <small>[SQL/TCP]</small>"| Database
+    ChunkWorkflow -->|"Scopes verified chunk reads and lease updates in <br> <small>[SQL/TCP]</small>"| Database
 
     MessageHandler -->|"Loads verified profile and execution plan through"| RunContextCache
     RunContextCache -->|"Reads compact immutable references from <br> <small>[SQL/TCP]</small>"| Database

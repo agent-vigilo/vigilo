@@ -135,6 +135,7 @@ async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool
     );
     let late = crate::db::workflows::execution_processing::finalize_execution_terminal_transitions(
         &pool,
+        uuid::Uuid::nil(),
         run,
         4,
         Uuid::now_v7(),
@@ -652,6 +653,7 @@ async fn terminal_failure_serializes_with_a_waiting_result_writer(pool: PgPool) 
     let writer = tokio::spawn(async move {
         finalize_execution_terminal_transitions(
             &writer_pool,
+            uuid::Uuid::nil(),
             run,
             4,
             worker,

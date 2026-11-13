@@ -1,4 +1,8 @@
-//! PostgreSQL operations for chunk processing.
+//! PostgreSQL claims, renewal and release for execution-local chunk ownership.
+//!
+//! Claims run after verified admission scope. Follow-up transactions bind the
+//! persisted owner carried by the claim, retain opaque lease/write-epoch guards,
+//! and release scope before external work. Heartbeats preserve the claim token.
 
 use super::*;
 
@@ -45,6 +49,7 @@ pub(super) async fn claim_chunk_for_processing_in_transaction(
               AND ($6::text IS NULL OR rs.config_snapshot #>> '{run_plan,digest}' = $6)
 		  )
 		RETURNING
+            tenant_id,
             execution_control,
 			id,
 			run_id,
@@ -159,17 +164,19 @@ pub(crate) async fn extend_chunk_lease(
     lease_seconds: i32,
 ) -> anyhow::Result<Option<RunChunk>> {
     let lease_token = require_chunk_lease_token(chunk)?;
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, chunk.tenant_id, chunk.run_id).await?;
     let mut updated = sqlx::query_as::<_, RunChunk>(
         r#"
 		UPDATE run_chunks
-		SET leased_until = now() + ($4::int * interval '1 second'),
-			updated_at = now()
+		SET leased_until = statement_timestamp() + ($4::int * interval '1 second'),
+			updated_at = statement_timestamp()
 		WHERE run_id = $1::uuid
           AND run_shard = $2
 		  AND id = $3::uuid
 		  AND status = 'leased'
 		  AND lease_token = $5::uuid
-		  AND leased_until >= now()
+		  AND leased_until >= statement_timestamp()
 		  AND EXISTS (
 			SELECT 1
 			FROM local_shard_admissions admission
@@ -185,6 +192,7 @@ pub(crate) async fn extend_chunk_lease(
 			  AND rs.run_shard = run_chunks.run_shard
 		  )
 		RETURNING
+            tenant_id,
             execution_control,
 			id,
 			run_id,
@@ -206,9 +214,10 @@ pub(crate) async fn extend_chunk_lease(
     .bind(lease_seconds)
     .bind(lease_token)
     .bind(chunk.write_epoch)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     if let Some(updated) = &mut updated {
         updated.write_epoch = chunk.write_epoch;
     }
@@ -222,19 +231,21 @@ pub(crate) async fn extend_chunk_lease(
 /// failures and planned execution retry waits.
 pub(crate) async fn release_chunk_as_pending(db: &PgPool, chunk: &RunChunk) -> anyhow::Result<u64> {
     let lease_token = require_chunk_lease_token(chunk)?;
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, chunk.tenant_id, chunk.run_id).await?;
     let result = sqlx::query(
         r#"
 		UPDATE run_chunks
 		SET status = 'pending',
 			lease_token = NULL,
 			leased_until = NULL,
-			updated_at = now()
+			updated_at = statement_timestamp()
 		WHERE run_id = $1::uuid
           AND run_shard = $2
 		  AND id = $3::uuid
 		  AND status = 'leased'
 		  AND lease_token = $4::uuid
-		  AND leased_until >= now()
+		  AND leased_until >= statement_timestamp()
 		  AND EXISTS (
 			SELECT 1
 			FROM local_shard_admissions admission
@@ -250,8 +261,9 @@ pub(crate) async fn release_chunk_as_pending(db: &PgPool, chunk: &RunChunk) -> a
     .bind(chunk.id)
     .bind(lease_token)
     .bind(chunk.write_epoch)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(result.rows_affected())
 }

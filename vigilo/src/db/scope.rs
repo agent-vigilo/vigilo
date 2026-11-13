@@ -8,6 +8,7 @@
 use sqlx::{
     PgPool,
     Postgres,
+    Row,
     Transaction,
 };
 use uuid::Uuid;
@@ -55,6 +56,88 @@ pub(crate) fn system_settings(tenant_id: Uuid, run_id: Uuid) -> String {
     format!(
         "SET LOCAL vigilo.tenant_id = '{tenant_id}'; SET LOCAL vigilo.run_id = '{run_id}'; SET LOCAL vigilo.actor_id = ''; SET LOCAL vigilo.run_batch = ''; "
     )
+}
+
+/// Opaque identity verified against accepted execution-local records. This is
+/// never deserialized from a queue message; it can survive a route-validation
+/// error so exceptional control discovery uses the already verified owner.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct VerifiedWorkerIdentity {
+    tenant_id: Uuid,
+    run_id: Uuid,
+    run_shard: i16,
+}
+impl VerifiedWorkerIdentity {
+    pub(crate) fn tenant_id(self) -> Uuid {
+        self.tenant_id
+    }
+    pub(crate) fn run_id(self) -> Uuid {
+        self.run_id
+    }
+    pub(crate) fn run_shard(self) -> i16 {
+        self.run_shard
+    }
+}
+impl std::fmt::Display for VerifiedWorkerIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("verified worker route admission")
+    }
+}
+
+/// Verify untrusted queue identity against local accepted records and bind only
+/// the returned owner. The restricted function holds the movement fence through
+/// this transaction. No match returns None; the caller must roll back without protected work.
+pub(crate) async fn verify_worker(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    run_shard: i16,
+    chunk_id: Uuid,
+    tenant_id: Uuid,
+    plan_digest: &str,
+) -> Result<Option<VerifiedWorkerIdentity>, sqlx::Error> {
+    let row = sqlx::query(
+        r#"
+        WITH verified AS MATERIALIZED (
+            SELECT * FROM vigilo_verify_worker_identity($1,$2,$3,$4,$5)
+        )
+        SELECT v.tenant_id AS verified_tenant_id,v.run_id AS verified_run_id,
+               set_config('vigilo.tenant_id',v.tenant_id::text,true),
+               set_config('vigilo.run_id',v.run_id::text,true),
+               set_config('vigilo.actor_id','',true),set_config('vigilo.run_batch','',true)
+        FROM verified v
+    "#,
+    )
+    .bind(run_id)
+    .bind(run_shard)
+    .bind(chunk_id)
+    .bind(tenant_id)
+    .bind(plan_digest)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.map(|row| {
+        Ok(VerifiedWorkerIdentity {
+            tenant_id: row.try_get("verified_tenant_id")?,
+            run_id: row.try_get("verified_run_id")?,
+            run_shard,
+        })
+    })
+    .transpose()
+}
+
+/// Bind verified ownership and retain the shared movement fence in one submission.
+/// Only typed UUID/shard values are interpolated into these fixed commands.
+pub(crate) async fn lock_system_shard(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    run_id: Uuid,
+    shard: i16,
+) -> Result<(), sqlx::Error> {
+    let sql = format!(
+        "{} SELECT pg_advisory_xact_lock_shared(hashtextextended('{run_id}'::uuid::text,{shard}::bigint))",
+        system_settings(tenant_id, run_id)
+    );
+    sqlx::Executor::execute(&mut **tx, sql.as_str()).await?;
+    Ok(())
 }
 
 /// Connection-time guard for a dedicated restricted credential domain. Policy

@@ -407,7 +407,7 @@ async fn seed_running_attempt(
     let chunk = sqlx::query_as::<_, crate::models::run_chunk::RunChunk>(
         r#"
             SELECT
-                1::bigint AS write_epoch, execution_control,
+                1::bigint AS write_epoch, tenant_id, execution_control,
                 id, run_id, run_shard, dataset_version_id, profile_group_id,
                 ordinal_start, ordinal_end, status, lease_token, leased_until,
                 created_at, updated_at
@@ -581,6 +581,7 @@ async fn terminal_transition_rejects_expired_attempt_lease(pool: PgPool) {
 
     let result = finalize_execution_terminal_transitions(
         &pool,
+        uuid::Uuid::nil(),
         seed.run_id,
         seed.run_shard,
         seed.worker_id,
@@ -901,6 +902,7 @@ async fn authentication_failure_is_terminal_before_attempt_budget_exhaustion(poo
     let seed = seed_running_attempt(&pool, 120, 120).await;
     finalize_execution_terminal_transitions(
         &pool,
+        uuid::Uuid::nil(),
         seed.run_id,
         seed.run_shard,
         seed.worker_id,
@@ -1000,6 +1002,7 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
         };
         finalize_execution_terminal_transitions(
             &pool,
+            uuid::Uuid::nil(),
             seed.run_id,
             seed.run_shard,
             seed.worker_id,
@@ -1068,6 +1071,7 @@ async fn invocation_diagnostics_use_existing_terminal_summary_for_every_outcome(
         sqlx::query("UPDATE execution_attempts SET outcome_summary = '{\"existing\":true}'::jsonb WHERE id=$1").bind(seed.attempt_id).execute(&pool).await.unwrap();
         finalize_execution_terminal_transitions(
             &pool,
+            uuid::Uuid::nil(),
             seed.run_id,
             seed.run_shard,
             seed.worker_id,
@@ -1236,6 +1240,7 @@ async fn attempt_transition_query_observations(pool: PgPool) {
             probe.start();
             finalize_execution_terminal_transitions(
                 &probe.pool,
+                uuid::Uuid::nil(),
                 seed.run_id,
                 seed.run_shard,
                 seed.worker_id,
@@ -1267,8 +1272,8 @@ async fn attempt_transition_query_observations(pool: PgPool) {
                 .filter(|(_, count)| *count != 0)
                 .collect::<std::collections::BTreeMap<_, _>>();
             assert_eq!(
-                round_trips, 8,
-                "cold-connection exchange baseline must not grow"
+                round_trips, 7,
+                "combined scope/fence submission preserves the measured cold exchange budget"
             );
             if server_counts {
                 assert_eq!(
@@ -1276,6 +1281,7 @@ async fn attempt_transition_query_observations(pool: PgPool) {
                     [
                         ("read".into(), 2),
                         ("mixed".into(), 1),
+                        ("other".into(), 4),
                         ("transaction".into(), 2)
                     ]
                     .into()
@@ -1342,6 +1348,7 @@ async fn retained_response_rejects_stale_or_mismatched_evidence_and_cascades_on_
     assert!(
         finalize_execution_terminal_transitions(
             &pool,
+            uuid::Uuid::nil(),
             seed.run_id,
             seed.run_shard,
             Uuid::now_v7(),
@@ -1388,6 +1395,7 @@ async fn retained_response_rejects_stale_or_mismatched_evidence_and_cascades_on_
     assert!(
         finalize_execution_terminal_transitions(
             &pool,
+            uuid::Uuid::nil(),
             seed.run_id,
             seed.run_shard,
             seed.worker_id,
@@ -1404,6 +1412,7 @@ async fn retained_response_rejects_stale_or_mismatched_evidence_and_cascades_on_
         assert!(
             finalize_execution_terminal_transitions(
                 &pool,
+                uuid::Uuid::nil(),
                 seed.run_id,
                 seed.run_shard,
                 seed.worker_id,
@@ -1417,6 +1426,7 @@ async fn retained_response_rejects_stale_or_mismatched_evidence_and_cascades_on_
     }
     finalize_execution_terminal_transitions(
         &pool,
+        uuid::Uuid::nil(),
         seed.run_id,
         seed.run_shard,
         seed.worker_id,
@@ -1428,6 +1438,7 @@ async fn retained_response_rejects_stale_or_mismatched_evidence_and_cascades_on_
     assert!(
         finalize_execution_terminal_transitions(
             &pool,
+            uuid::Uuid::nil(),
             seed.run_id,
             seed.run_shard,
             seed.worker_id,
@@ -1513,6 +1524,7 @@ async fn persisted_response_replays_through_wasm_without_agent_io(pool: PgPool) 
     transition.response_evidence = Some(packet);
     finalize_execution_terminal_transitions(
         &pool,
+        uuid::Uuid::nil(),
         seed.run_id,
         seed.run_shard,
         seed.worker_id,
@@ -1536,3 +1548,6 @@ async fn persisted_response_replays_through_wasm_without_agent_io(pool: PgPool) 
         serde_json::to_value(replayed.outcome).unwrap()
     );
 }
+
+#[path = "postgres_tests/worker_scope.rs"]
+mod worker_scope;

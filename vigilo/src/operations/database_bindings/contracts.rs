@@ -1,4 +1,4 @@
-//! Scheduler installation contracts derived from the owning CREATE migrations.
+//! Restricted scheduler and worker installation contracts derived from the owning CREATE migrations.
 //!
 //! The SQL body remains defined once in the migration. Connection validation
 //! compares catalog definitions against this binary's embedded source, rather
@@ -9,6 +9,7 @@ pub(super) struct Contract {
     migration: &'static str,
     pub control: bool,
     pub execution: bool,
+    pub worker: bool,
 }
 
 macro_rules! contract {
@@ -18,11 +19,19 @@ macro_rules! contract {
             migration: include_str!(concat!("../../../migrations/", $migration)),
             control: $control,
             execution: $execution,
+            worker: false,
         }
     };
 }
 
 pub(super) const CONTRACTS: &[Contract] = &[
+    Contract {
+        signature: "vigilo_verify_worker_identity(uuid,smallint,uuid,uuid,text)",
+        migration: include_str!("../../../migrations/0018_create_run_chunks.sql"),
+        control: false,
+        execution: true,
+        worker: true,
+    },
     contract!(
         "vigilo_lock_database_placement(text)",
         "0003_create_database_placements.sql",
@@ -214,6 +223,6 @@ mod tests {
             assert!(!definition.result.is_empty());
             assert!(matches!(definition.language.as_str(), "sql" | "plpgsql"));
         }
-        assert_eq!(signatures.len(), 16);
+        assert_eq!(signatures.len(), 17);
     }
 }

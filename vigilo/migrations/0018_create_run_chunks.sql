@@ -157,3 +157,34 @@ $definition$, installation_schema);
     );
 END;
 $install$;
+
+-- Verify queue hints against accepted local work before protected worker reads.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_verify_worker_identity(p_run_id uuid, p_run_shard smallint, p_chunk_id uuid, p_tenant_id uuid, p_plan_digest text)
+RETURNS TABLE(tenant_id uuid, run_id uuid)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+    IF p_run_id IS NULL OR p_run_shard IS NULL OR p_run_shard < 0 OR p_run_shard >= 128
+       OR p_chunk_id IS NULL OR p_tenant_id IS NULL OR p_plan_digest IS NULL
+       OR length(p_plan_digest) < 1 OR length(p_plan_digest) > 256 THEN
+        RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended(p_run_id::text, p_run_shard::bigint));
+    RETURN QUERY
+    SELECT c.tenant_id, c.run_id
+    FROM %1$I.run_chunks c
+    JOIN %1$I.run_snapshots s ON s.tenant_id=c.tenant_id AND s.run_id=c.run_id AND s.run_shard=c.run_shard
+    WHERE c.run_id=p_run_id AND c.run_shard=p_run_shard AND c.id=p_chunk_id
+      AND c.tenant_id=p_tenant_id
+      AND s.config_snapshot #>> '{run_plan,digest}'=p_plan_digest;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_verify_worker_identity(uuid,smallint,uuid,uuid,text) FROM PUBLIC', installation_schema);
+END;
+$install$;
