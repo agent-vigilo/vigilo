@@ -67,6 +67,9 @@ impl From<run_plan::Plan> for FrozenPlanInputs {
     }
 }
 impl Preparation {
+    pub(crate) fn resource_identity(&self) -> (Uuid, String) {
+        (self.upload.id, self.upload.binding_hash.clone())
+    }
     pub(crate) fn new(
         payload: Value,
         upload: dataset_upload::Upload,

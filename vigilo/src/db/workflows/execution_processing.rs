@@ -938,6 +938,7 @@ async fn evaluate_case_execution(
                 client: http,
                 limits: context.agent_http_limits(),
                 credentials: context.agent_credentials(),
+                resources: context.accepted_resources(),
             },
             run_id,
             execution_id,
@@ -1023,6 +1024,7 @@ async fn evaluate_case_execution(
                     let (http_invocation, _http_cancellation) = context.evaluator_http(
                         http_policy.clone(),
                         crate::agent_client::credentials::Execution {
+                            resources: context.accepted_resources(),
                             run_id,
                             execution_id,
                             attempt_id,
@@ -1496,9 +1498,15 @@ pub(crate) async fn process_case_batch_execution(
         .collect::<Vec<_>>();
     let http_policies = context
         .http_policies()
-        .snapshots(&ids, |ids| async move {
+        .snapshots(chunk.tenant_id, &ids, |ids| async move {
             let control = database_router.control().await?;
-            crate::db::tables::evaluator_http_policies::load(control, &ids).await
+            crate::db::tables::evaluator_http_policies::load_for_run(
+                control,
+                chunk.tenant_id,
+                chunk.run_id,
+                &ids,
+            )
+            .await
         })
         .await?;
     let accepted_policies = evaluator_catalog

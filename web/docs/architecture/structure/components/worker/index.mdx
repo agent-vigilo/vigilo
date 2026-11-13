@@ -106,15 +106,36 @@ success, errors, or traps. Resource reads on a store with no table return unavai
 foreign handles cannot authorize access. This path does not persist captured bytes
 or resource handles.
 
+### Resource bindings
+
+A verified immutable run reference selects resource bindings before object reads.
+Standalone workers use operator configuration. An injected resolver receives the
+verified run and plan identity; its reply must match both that request and the
+physical storage binding. Resolver failures stop context construction without
+falling back to process files or environment variables. Run-context caches retain
+only bound resource services alongside immutable inputs; database and queue
+ownership remains in the process context.
+
+Agent and evaluator credential callbacks carry the accepted plan and allocated
+execution/attempt identity. Credentials renew through their provider and remain
+host-only. Per-run binding selection preserves process-wide admission and HTTP
+ceilings. No additional ownership query is performed for a case or callback.
+See [host resource resolution](/docs/configuration/agent-credentials#host-resource-resolution).
+
 ### Evaluator HTTP permissions
 
 Workers load operator policy snapshots in bounded batches through a process-local
-cache. Newly allocated attempts retain immutable evaluator-specific snapshots;
+cache keyed by verified ownership and evaluator identity. Refreshes bind that
+ownership in a short database transaction before reading one policy batch;
+transaction scope is cleared before the connection returns to the pool.
+Newly allocated attempts retain immutable evaluator-specific snapshots;
 revision IDs accompany the existing terminal update. Cache expiry requires a
 successful refresh before new authorization. No policy database call occurs inside
 Wasm HTTP imports. The import checks permission, resolves host-owned credentials and sends a bounded
 request through the async transport while Wasm executes on a blocking thread.
 The invocation owns credential caching and cancellation; a worker-wide semaphore
-bounds concurrent requests. Policy and credential checks add no per-request SQL.
+bounds concurrent requests. Warm cache hits add no SQL. A refresh adds transaction
+and scope setup around its single batched read; policy and credential checks add
+no per-request SQL.
 HTTP failures return status and body; transport or budget failures return host errors.
 See [evaluator HTTP authorization](/docs/configuration/run-profile#evaluator-http-authorization).

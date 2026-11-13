@@ -101,3 +101,7 @@ flowchart TD
     %% links
     click Vigilo "/docs/architecture/structure/components/vigilo/"
     click Worker "/docs/architecture/structure/components/worker/"
+
+    ResourceResolver["Resource binding resolution<br/>Verified accepted run and plan identity<br/>No ambient fallback in injected mode"]:::component
+    CreationRecovery -->|"Injected mode; bind outside transactions"| ResourceResolver
+    ResourceResolver -->|"Pinned namespace and live signing provider"| ObjectStorage

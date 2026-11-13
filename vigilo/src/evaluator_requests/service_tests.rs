@@ -26,6 +26,7 @@ use crate::{
 
 fn execution() -> Execution {
     Execution {
+        resources: None,
         run_id: Uuid::new_v4(),
         execution_id: Uuid::new_v4(),
         attempt_id: Uuid::new_v4(),
@@ -427,4 +428,118 @@ async fn cancellation_interrupts_wasm_host_io_and_releases_permit() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn binding_views_isolate_same_evaluator_credentials_and_share_process_limits() {
+    use vigilo::evaluator_http::transport::BlockingTransport;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let uri = format!("{origin}/judge");
+    let id = Uuid::new_v4();
+    let policy = policy(id, &uri, true);
+    let directory = tempfile::tempdir().unwrap();
+    let mut local = BTreeMap::new();
+    for name in ["alpha", "beta"] {
+        let path = directory.path().join(name);
+        tokio::fs::write(&path, format!("{name}-fixture"))
+            .await
+            .unwrap();
+        local.insert(
+            name.into(),
+            credentials::Binding {
+                source: credentials::Source::File { path },
+                allowed_origin: origin.clone(),
+                header: "authorization".into(),
+                prefix: "Bearer ".into(),
+            },
+        );
+    }
+    let provider = Arc::new(
+        Provider::new(credentials::Config {
+            version: 1,
+            allow_http_loopback: true,
+            provider: credentials::ProviderConfig::Local { bindings: local },
+        })
+        .unwrap(),
+    );
+    let base = Service::configured(Config {
+        concurrency: 1,
+        requests: 1,
+        request_timeout_ms: 5000,
+        total_time_ms: 10000,
+        ..Default::default()
+    })
+    .unwrap();
+    let view = |name| {
+        Service::from_bindings_json(
+            &json!([{"evaluator_id":id,"method":"POST","uri":uri,"credential":name}]).to_string(),
+        )
+        .unwrap()
+        .bind_to(&base)
+    };
+    let (alpha, _alpha_guard) = view("alpha")
+        .invocation(policy.clone(), provider.clone(), execution())
+        .unwrap();
+    let (beta, _beta_guard) = view("beta")
+        .invocation(policy, provider, execution())
+        .unwrap();
+    let request = || Request {
+        method: "POST".into(),
+        uri: uri.clone(),
+        headers: vec![],
+        body: vec![],
+        timeout: None,
+    };
+    let a = alpha.clone();
+    let ar = request();
+    let work_a = tokio::task::spawn_blocking(move || a.send(ar));
+    let (mut first, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let headers = String::from_utf8(read_request(&mut first).await)
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(headers.contains("authorization: bearer alpha-fixture"));
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let br = request();
+    let work_b = tokio::task::spawn_blocking(move || {
+        let _ = started.send(());
+        beta.send(br)
+    });
+    ready.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "binding view multiplied the process request limit"
+    );
+    first
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        .await
+        .unwrap();
+    assert_eq!(work_a.await.unwrap().unwrap().status, 200);
+    let (mut second, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let headers = String::from_utf8(read_request(&mut second).await)
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(headers.contains("authorization: bearer beta-fixture"));
+    second
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        .await
+        .unwrap();
+    assert_eq!(work_b.await.unwrap().unwrap().status, 200);
+    let ar = request();
+    assert_eq!(
+        tokio::task::spawn_blocking(move || alpha.send(ar))
+            .await
+            .unwrap()
+            .err()
+            .unwrap(),
+        "evaluator HTTP budget exhausted"
+    );
 }

@@ -36,6 +36,7 @@ pub(crate) struct S3Config {
     pub allow_http: bool,
     pub path_style: bool,
     pub credential_variables: Option<(String, String, Option<String>)>,
+    pub credentials_provider: Option<aws_sdk_s3::config::SharedCredentialsProvider>,
 }
 
 pub(crate) struct S3Transport {
@@ -143,7 +144,9 @@ impl S3Transport {
         let mut builder = aws_sdk_s3::config::Builder::new()
             .behavior_version(BehaviorVersion::latest())
             .region(Region::new(config.region.clone()));
-        if let Some((access, secret, token)) = &config.credential_variables {
+        if let Some(provider) = &config.credentials_provider {
+            builder = builder.credentials_provider(provider.clone());
+        } else if let Some((access, secret, token)) = &config.credential_variables {
             let access = std::env::var(access).map_err(|_| invalid())?;
             let secret = std::env::var(secret).map_err(|_| invalid())?;
             let token = token

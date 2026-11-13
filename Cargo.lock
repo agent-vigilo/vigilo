@@ -5166,6 +5166,7 @@ dependencies = [
  "async-compression",
  "async-trait",
  "aws-config",
+ "aws-credential-types",
  "aws-sdk-s3",
  "base64",
  "blake3",

@@ -406,6 +406,11 @@ jobs:
           cargo llvm-cov --no-report -p vigilo --locked
           --features blob-storage-services --test blob_storage_services
           -- signed_storage_contract --exact --nocapture
+      - name: Verify injected signing credentials with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features blob-storage-services --test blob_storage_services
+          -- injected_signing_provider_has_no_ambient_fallback --exact --nocapture
       - name: Verify transport faults with coverage
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked

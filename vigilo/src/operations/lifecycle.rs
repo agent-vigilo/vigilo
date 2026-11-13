@@ -120,7 +120,7 @@ impl PreparedRun {
 #[derive(Clone)]
 pub struct RunClient {
     context: Context,
-    owner: OwnerConfig,
+    owner: Option<OwnerConfig>,
     options: run_creation::Config,
     id: Uuid,
     caller: Option<crate::db::scope::UserContext>,
@@ -136,10 +136,26 @@ impl RunClient {
     ) -> Self {
         Self {
             context,
-            owner,
+            owner: Some(owner),
             options,
             id: Uuid::now_v7(),
             caller,
+        }
+    }
+
+    /// Internal construction pending the complete hosted runtime acceptance gate.
+    #[allow(dead_code)]
+    pub(crate) fn from_hosted(
+        context: Context,
+        options: run_creation::Config,
+        caller: crate::db::scope::UserContext,
+    ) -> Self {
+        Self {
+            context,
+            owner: None,
+            options,
+            id: Uuid::now_v7(),
+            caller: Some(caller),
         }
     }
 
@@ -201,13 +217,32 @@ impl RunClient {
         id: Uuid,
         cancel: &CancellationToken,
     ) -> anyhow::Result<PreparedRun> {
+        let (context, owner) = if let Some(caller) = self.caller {
+            let (upload, binding) = inputs.resource_identity();
+            let request =
+                crate::operations::resources::Request::preparation(caller, id, upload, binding);
+            self.context
+                .preparation_resources(request, self.owner.as_ref(), cancel)
+                .await?
+        } else {
+            anyhow::ensure!(
+                !self.context.uses_injected_resources(),
+                "injected preparation requires caller context"
+            );
+            (
+                self.context.clone(),
+                self.owner
+                    .clone()
+                    .context("standalone storage configuration is required")?,
+            )
+        };
         // The streaming planner has a large nested future. Keep its frame off
         // embedding hosts' request-task stacks; this allocates once per run.
         Box::pin(creation::prepare(
-            &self.context,
+            &context,
             self.id,
             inputs,
-            &self.owner,
+            &owner,
             id,
             cancel,
             self.caller,

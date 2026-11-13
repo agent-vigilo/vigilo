@@ -5,6 +5,8 @@
 //! persisted or cached by this provider; evaluator hosts own invocation-scoped
 //! caching. The service owns execution authorization; core enforces
 //! transport, destination, header, size, concurrency, and lifetime boundaries.
+//! Injected hosts receive exact accepted-work and allocated invocation identity;
+//! those providers share admission/transport and never consult standalone sources.
 //! Secrets have no serialization or Debug implementation. This is not protection
 //! against a compromised worker or an authorized endpoint reflecting credentials.
 
@@ -14,6 +16,7 @@ use std::{
         Path,
         PathBuf,
     },
+    sync::Arc,
     time::Duration,
 };
 
@@ -87,37 +90,33 @@ pub(crate) enum Source {
 }
 
 /// Resolution context comes from allocated runtime IDs, not profile metadata.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct Execution {
     pub(crate) run_id: Uuid,
     pub(crate) execution_id: Uuid,
     pub(crate) attempt_id: Uuid,
+    pub(crate) resources: Option<Arc<vigilo::operations::resources::Request>>,
 }
 
-/// Host-verified authority for the initial credential-service contract.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum Authority {
-    Agent,
-    Evaluator {
-        evaluator_id: Uuid,
-        policy_revision: String,
-    },
-}
+pub use vigilo::operations::resources::CredentialAuthority as Authority;
 
 /// Shared bounded provider. No credential material survives a resolution here.
 pub(crate) struct Provider {
     config: Option<Config>,
-    client: OnceCell<reqwest::Client>,
-    permits: Semaphore,
+    client: Arc<OnceCell<reqwest::Client>>,
+    permits: Arc<Semaphore>,
+    resolver: Option<Arc<dyn vigilo::operations::resources::Resolver>>,
+    allow_http_loopback: bool,
 }
 
 impl Default for Provider {
     fn default() -> Self {
         Self {
             config: None,
-            client: OnceCell::new(),
-            permits: Semaphore::new(64),
+            client: Arc::new(OnceCell::new()),
+            permits: Arc::new(Semaphore::new(64)),
+            resolver: None,
+            allow_http_loopback: false,
         }
     }
 }
@@ -281,6 +280,23 @@ impl Source {
 }
 
 impl Provider {
+    /// Share transport and the process-wide admission limit, isolating resolution
+    /// through verified per-invocation context rather than process configuration.
+    pub(crate) fn injected(
+        &self,
+        resolver: Arc<dyn vigilo::operations::resources::Resolver>,
+    ) -> Self {
+        Self {
+            config: None,
+            resolver: Some(resolver),
+            client: self.client.clone(),
+            permits: self.permits.clone(),
+            allow_http_loopback: self
+                .config
+                .as_ref()
+                .map_or(self.allow_http_loopback, |c| c.allow_http_loopback),
+        }
+    }
     /// Load nonsecret operator configuration once, bounded and without exposing
     /// parser input in diagnostics. Secret sources remain dynamically resolved.
     pub(crate) async fn load(path: &Path) -> Result<Self, Failure> {
@@ -369,11 +385,23 @@ impl Provider {
         authority: Authority,
     ) -> Result<Resolved, Failure> {
         validate_reference(reference)?;
-        let config = self
+        let allow_loopback = self
             .config
             .as_ref()
-            .ok_or_else(|| configuration("agent credential provider is not configured"))?;
-        let destination = url(destination, config.allow_http_loopback)?;
+            .map_or(self.allow_http_loopback, |c| c.allow_http_loopback);
+        if self.config.is_none() && self.resolver.is_none() {
+            return Err(configuration("agent credential provider is not configured"));
+        }
+        if execution
+            .resources
+            .as_ref()
+            .is_some_and(|r| r.run_id() != execution.run_id || r.plan_digest().is_none())
+        {
+            return Err(configuration(
+                "credential execution does not match accepted work",
+            ));
+        }
+        let destination = url(destination, allow_loopback)?;
         for name in headers.keys() {
             if [
                 "host",
@@ -398,40 +426,96 @@ impl Provider {
         }
         tokio::time::timeout(RESOLUTION_TIMEOUT, async {
             let _permit = self.permits.acquire().await.map_err(|_| unavailable())?;
-            let resolved = match &config.provider {
-                ProviderConfig::Local { bindings } => {
-                    let binding = bindings
-                        .get(reference)
-                        .ok_or_else(|| configuration("agent credential binding is unavailable"))?;
-                    origin_matches(
-                        &binding.allowed_origin,
-                        &destination,
-                        config.allow_http_loopback,
-                    )?;
-                    let name = header(&binding.header)?;
-                    check_collision(headers, &name)?;
-                    binding_value(
-                        &binding.header,
-                        &binding.prefix,
-                        &binding.source.read().await?,
-                    )?
-                }
-                ProviderConfig::Service {
-                    endpoint,
-                    token,
-                    grants_directory,
-                } => {
-                    self.resolve_service(
-                        endpoint,
-                        token,
-                        grants_directory,
-                        (reference, &destination),
-                        execution,
-                        authority,
-                    )
-                    .await?
-                }
-            };
+            let resolved =
+                if let Some(resolver) = &self.resolver {
+                    let resources = execution
+                        .resources
+                        .clone()
+                        .filter(|r| !r.tenant_id().is_nil() && r.plan_digest().is_some())
+                        .ok_or_else(|| configuration("host credentials require accepted work"))?;
+                    if execution.execution_id.is_nil() || execution.attempt_id.is_nil() {
+                        return Err(configuration(
+                            "host credentials require allocated invocation identity",
+                        ));
+                    }
+                    let request = vigilo::operations::resources::CredentialRequest {
+                        resources,
+                        execution_id: execution.execution_id,
+                        attempt_id: execution.attempt_id,
+                        authority: authority.clone(),
+                        reference: reference.into(),
+                        destination: destination.to_string(),
+                    };
+                    let value = resolver
+                        .credential(request.clone())
+                        .await
+                        .map_err(|error| match error {
+                            vigilo::operations::resources::Error::Unavailable => unavailable(),
+                            vigilo::operations::resources::Error::Denied => Failure::terminal(
+                                Kind::Authentication,
+                                "credential provider denied resolution",
+                            ),
+                            _ => configuration("invalid host credential resolution"),
+                        })?;
+                    if value.request != request {
+                        return Err(configuration(
+                            "credential provider returned different identity",
+                        ));
+                    }
+                    if value
+                        .header
+                        .len()
+                        .saturating_add(value.allowed_origin.len())
+                        .saturating_add(value.value.len())
+                        > MAX_RESPONSE_BYTES
+                    {
+                        return Err(configuration(
+                            "credential provider response exceeds its limit",
+                        ));
+                    }
+                    origin_matches(&value.allowed_origin, &destination, allow_loopback)?;
+                    let mut resolved = binding_value(&value.header, "", &value.value)?;
+                    resolved.expires_at = Some(value.expires_at);
+                    resolved
+                } else {
+                    let config = self.config.as_ref().ok_or_else(|| {
+                        configuration("agent credential provider is not configured")
+                    })?;
+                    match &config.provider {
+                        ProviderConfig::Local { bindings } => {
+                            let binding = bindings.get(reference).ok_or_else(|| {
+                                configuration("agent credential binding is unavailable")
+                            })?;
+                            origin_matches(
+                                &binding.allowed_origin,
+                                &destination,
+                                config.allow_http_loopback,
+                            )?;
+                            let name = header(&binding.header)?;
+                            check_collision(headers, &name)?;
+                            binding_value(
+                                &binding.header,
+                                &binding.prefix,
+                                &binding.source.read().await?,
+                            )?
+                        }
+                        ProviderConfig::Service {
+                            endpoint,
+                            token,
+                            grants_directory,
+                        } => {
+                            self.resolve_service(
+                                endpoint,
+                                token,
+                                grants_directory,
+                                (reference, &destination),
+                                execution,
+                                authority,
+                            )
+                            .await?
+                        }
+                    }
+                };
             check_collision(headers, &resolved.name)?;
             resolved.check_validity()?;
             Ok(resolved)
@@ -461,6 +545,7 @@ impl Provider {
             authority,
             credential: reference,
             destination: destination.as_str(),
+            run_plan_digest: execution.resources.as_ref().and_then(|r| r.plan_digest()),
             run_id: execution.run_id,
             execution_id: execution.execution_id,
             attempt_id: execution.attempt_id,
@@ -535,6 +620,7 @@ struct ServiceRequest<'a> {
     authority: Authority,
     credential: &'a str,
     destination: &'a str,
+    run_plan_digest: Option<&'a str>,
     run_id: Uuid,
     execution_id: Uuid,
     attempt_id: Uuid,

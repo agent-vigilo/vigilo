@@ -36,7 +36,7 @@ sequenceDiagram
 
             Vigilo->>ControlDB: Discover accepted candidates; claim identity, lease and generation
             Vigilo->>ControlDB: Bind claimed identity and read protected plan details
-            Vigilo->>Objects: Verify roots, configuration, gate counts and bounded chunk pages
+            Vigilo->>Objects: Resolve exact accepted resource bindings; verify roots, configuration, gate counts and bounded chunk pages
             Vigilo->>ExecutionDB: Scope each transaction; replay admission and verify exact local coverage
             Vigilo->>ControlDB: Checkpoint progress; lock placements through restricted function and activate
             Note over Vigilo,ControlDB: Failed candidates release ownership, preparation-only runs stay held

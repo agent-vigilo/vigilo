@@ -16,7 +16,7 @@ flowchart TD
     Claim{Local identity verified, scope bound, admission valid and chunk enabled?}
     Paused{Verified local work paused?}
     DelayPaused[Delay message without spending retry budget]
-    Context[Load and verify pinned run context]
+    Context[Bind verified resources and verify pinned run context]
     Warm[Warm evaluator components]
     Cases[Read exact immutable bytes from bounded cache or storage; verify complete files and membership]
     Limits[Validate and serialize request within byte ceilings]

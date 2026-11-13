@@ -89,6 +89,7 @@ impl Server {
 }
 fn execution() -> Execution {
     Execution {
+        resources: None,
         run_id: Uuid::nil(),
         execution_id: Uuid::from_u128(1),
         attempt_id: Uuid::from_u128(2),
@@ -121,6 +122,7 @@ async fn invoke(
 ) -> anyhow::Result<contracts::evaluator::AgentOutput> {
     agent_client::invoke(
         agent_client::Services {
+            resources: None,
             client: &reqwest::Client::new(),
             limits: Limits::default(),
             credentials: provider,
@@ -174,7 +176,7 @@ async fn service_protocol_resolves_for_runtime_scope_without_enterprise_dependen
         serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
     assert_eq!(
         body,
-        serde_json::json!({"version":1,"authority":{"kind":"agent"},"credential":"agent-api","destination":format!("{}/", agent.url),"run_id":Uuid::nil(),"execution_id":Uuid::from_u128(1),"attempt_id":Uuid::from_u128(2),"grant":"grant-canary"})
+        serde_json::json!({"version":1,"authority":{"kind":"agent"},"credential":"agent-api","destination":format!("{}/", agent.url),"run_plan_digest":null,"run_id":Uuid::nil(),"execution_id":Uuid::from_u128(1),"attempt_id":Uuid::from_u128(2),"grant":"grant-canary"})
     );
     let sent = agent.request().await;
     assert!(sent.contains("authorization: Bearer agent-canary"));
@@ -433,6 +435,7 @@ async fn usage_is_adapter_specific_and_correlation_cannot_be_overridden() {
         }
         let invocation = agent_client::invoke(
             agent_client::Services {
+                resources: None,
                 client: &reqwest::Client::new(),
                 limits: Limits::default(),
                 credentials: &Provider::default(),

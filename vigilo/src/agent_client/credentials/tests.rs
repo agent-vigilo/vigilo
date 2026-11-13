@@ -2,6 +2,7 @@ use super::*;
 
 fn execution() -> Execution {
     Execution {
+        resources: None,
         run_id: Uuid::nil(),
         execution_id: Uuid::nil(),
         attempt_id: Uuid::nil(),

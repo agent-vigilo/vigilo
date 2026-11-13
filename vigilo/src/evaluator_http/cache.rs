@@ -26,10 +26,12 @@ use super::{
 };
 
 /// Worker-owned cache; loader is supplied by the host, keeping SQL outside policy.
+/// Entries are partitioned by a trusted owner key; a cache hit grants no authority
+/// beyond the policy snapshot itself. Capacity is shared across all partitions.
 pub struct Cache {
     age: Duration,
     capacity: usize,
-    entries: Mutex<BTreeMap<Uuid, Entry>>,
+    entries: Mutex<BTreeMap<(Uuid, Uuid), Entry>>,
 }
 struct Entry {
     read_at: Instant,
@@ -59,10 +61,12 @@ impl Cache {
         })
     }
     /// Fetch at most one bounded batch. Missing rows become cached deny-all snapshots.
+    /// The partition comes from verified host context, never evaluator input.
     /// The load and wait share a bounded deadline. Failed loads leave expired entries
     /// expired. Callers freeze the returned snapshot only for their allocated attempt.
     pub async fn snapshots<F, Fut>(
         &self,
+        partition: Uuid,
         ids: &[Uuid],
         load: F,
     ) -> Result<BTreeMap<Uuid, Arc<Snapshot>>>
@@ -84,7 +88,7 @@ impl Cache {
                 .iter()
                 .filter(|id| {
                     entries
-                        .get(id)
+                        .get(&(partition, **id))
                         .is_none_or(|entry| entry.read_at.elapsed() >= self.age)
                 })
                 .copied()
@@ -111,33 +115,35 @@ impl Cache {
                 );
                 // Evict entries outside this requested batch before insertion. Held
                 // attempt snapshots remain valid through Arc ownership.
-                entries.retain(|id, entry| ids.contains(id) || entry.read_at.elapsed() < self.age);
+                entries.retain(|(owner, id), entry| {
+                    (*owner == partition && ids.contains(id)) || entry.read_at.elapsed() < self.age
+                });
                 while entries.len()
                     + fresh
                         .iter()
-                        .filter(|(id, _)| !entries.contains_key(id))
+                        .filter(|(id, _)| !entries.contains_key(&(partition, *id)))
                         .count()
                     > self.capacity
                 {
                     let key = entries
                         .keys()
-                        .find(|id| !ids.contains(id))
+                        .find(|(owner, id)| *owner != partition || !ids.contains(id))
                         .copied()
                         .unwrap();
                     entries.remove(&key);
                 }
                 for (id, snapshot) in fresh {
-                    entries.insert(id, Entry { read_at, snapshot });
+                    entries.insert((partition, id), Entry { read_at, snapshot });
                 }
             }
             ensure!(
                 ids.iter()
-                    .all(|id| entries[id].read_at.elapsed() < self.age),
+                    .all(|id| entries[&(partition, *id)].read_at.elapsed() < self.age),
                 "policy expired while preparing batch"
             );
             Ok(ids
                 .into_iter()
-                .map(|id| (id, entries[&id].snapshot.clone()))
+                .map(|id| (id, entries[&(partition, id)].snapshot.clone()))
                 .collect())
         })
         .await

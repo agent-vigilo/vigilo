@@ -14,7 +14,7 @@ use sqlx::{
 use uuid::Uuid;
 
 /// Identity supplied by an authenticated embedding host.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UserContext {
     tenant_id: Uuid,
     actor_id: Uuid,
@@ -31,6 +31,10 @@ impl UserContext {
             actor_id,
         })
     }
+    /// Authenticated actor identity, available to trusted host providers.
+    pub fn actor_id(self) -> Uuid {
+        self.actor_id
+    }
     /// Fixed request settings for one short transaction. Only typed UUIDs enter SQL.
     pub(crate) fn settings(self, run_id: Uuid) -> String {
         format!(
@@ -38,7 +42,8 @@ impl UserContext {
             self.tenant_id, self.actor_id
         )
     }
-    pub(crate) fn tenant_id(self) -> Uuid {
+    #[doc(hidden)]
+    pub fn tenant_id(self) -> Uuid {
         self.tenant_id
     }
 }
@@ -78,7 +83,8 @@ pub(crate) struct VerifiedWorkerIdentity {
     run_shard: i16,
 }
 impl VerifiedWorkerIdentity {
-    pub(crate) fn tenant_id(self) -> Uuid {
+    #[doc(hidden)]
+    pub fn tenant_id(self) -> Uuid {
         self.tenant_id
     }
     pub(crate) fn run_id(self) -> Uuid {

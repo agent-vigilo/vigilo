@@ -137,6 +137,38 @@ async fn preparation_preserves_caller_through_checkpoints_and_publication(pool: 
             _ => panic!("authorized input reads must reach physical binding validation without opening storage"),
         }
         assert_eq!(input_calls.len(),3,"one caller scope for upload and catalog: {input_calls:#?}");
+        // Host resource selection uses already authorized metadata, outside SQL,
+        // and cannot silently reuse the standalone owner configuration.
+        struct DeniedHost(std::sync::Mutex<Vec<crate::operations::resources::Request>>);
+        impl crate::operations::resources::Resolver for DeniedHost {
+            fn bindings(&self,request:crate::operations::resources::Request) -> crate::operations::resources::Resolution<'_,crate::operations::resources::Bindings> {
+                Box::pin(async move { self.0.lock().unwrap().push(request); Err(crate::operations::resources::Error::Denied) })
+            }
+        }
+        let host=Arc::new(DeniedHost(Default::default()));
+        let context=runtime_context(&restricted).with_resource_resolver(host.clone());
+        context.dbr().await.unwrap().control_pool.set(restricted.clone()).unwrap();
+        let hosted=crate::operations::RunClient::from_hosted(context,Default::default(),caller);
+        let hosted_id=Uuid::now_v7();
+        let (denied,queries)=record_queries(hosted.prepare_run(crate::operations::PrepareRun { run_id:hosted_id,dataset_upload_id:f.upload.id,profile:f.payload.clone() },&f.cancel)).await;
+        assert!(denied.is_err());
+        assert_eq!(queries.len(),3,"host binding adds no SQL to input reads: {queries:#?}");
+        {
+            let requests=host.0.lock().unwrap();
+            assert_eq!(requests.len(),1);
+            assert_eq!(requests[0].caller(),Some(caller));
+            assert_eq!(requests[0].tenant_id(),tenant);
+            assert_eq!(requests[0].run_id(),hosted_id);
+            assert_eq!(requests[0].dataset_upload_id(),Some(f.upload.id));
+            assert_eq!(requests[0].binding_hash(),f.upload.binding_hash);
+            assert!(requests[0].plan_digest().is_none());
+        }
+        let context=runtime_context(&restricted).with_resource_resolver(host.clone());
+        context.dbr().await.unwrap().control_pool.set(restricted.clone()).unwrap();
+        let denied=crate::operations::RunClient::from_hosted(context,Default::default(),crate::db::scope::UserContext::new(tenant,Uuid::now_v7()).unwrap());
+        assert!(denied.prepare_run(crate::operations::PrepareRun { run_id:Uuid::now_v7(),dataset_upload_id:f.upload.id,profile:f.payload.clone() },&f.cancel).await.is_err());
+        assert_eq!(host.0.lock().unwrap().len(),1,"unauthorized input must not reach host resources");
+
         let shared = Arc::new(Store::connect(f.memory.clone(), "cases".into(), f.plan.limits.0.clone(), Resources::standard(), Budget::standard(), &f.cancel, "capability-probes/reader-fixture".into()).await.unwrap());
         let prepared = || async {
             let reader = crate::case_reader::RunReader::open(shared.clone(), &reference, f.plan.limits.0.clone(), f.plan.run_id, &f.cancel).await.unwrap();

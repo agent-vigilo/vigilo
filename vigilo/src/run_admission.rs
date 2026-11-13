@@ -485,9 +485,24 @@ pub(crate) async fn recover(
                 let plan = ledger::load(db, lease).await?.context("plan disappeared")?;
                 let plan = &plan;
                 let cancel = CancellationToken::new();
+                let reference = plan
+                    .manifest
+                    .as_ref()
+                    .context("accepted plan has no manifest")?;
+                let request = crate::operations::resources::Request::accepted(
+                    lease.tenant_id,
+                    lease.run_id,
+                    &reference.digest,
+                    plan.storage_binding_hash.clone(),
+                )?;
                 let reader = open_reader(
                     plan,
-                    context.storage(&plan.storage_binding_hash, &plan.limits),
+                    async {
+                        context
+                            .execution_resources(request, &plan.limits, &cancel)
+                            .await
+                            .map(|(_, store)| store)
+                    },
                     budget,
                     &cancel,
                 )

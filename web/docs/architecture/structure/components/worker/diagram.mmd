@@ -142,12 +142,18 @@ flowchart TD
     click Vigilo "/docs/architecture/structure/components/vigilo/"
     click Coordinator "/docs/architecture/structure/components/coordinator/"
 
-    HttpPolicyCache["Evaluator HTTP policy cache<br/>30-second default maximum age"]:::component
+    HttpPolicyCache["Owner-bound evaluator HTTP policy cache<br/>Shared capacity; 30-second default maximum age"]:::component
     PolicyStore["Control database operator policy rows"]:::storage
     ExecutionProcessor -->|"Freeze evaluator snapshots per attempt"| HttpPolicyCache
-    HttpPolicyCache -->|"Bounded batched misses and refreshes"| PolicyStore
+    HttpPolicyCache -->|"Owner-scoped transaction; one bounded policy batch"| PolicyStore
 
     EvaluatorHttp["Bounded evaluator HTTP<br/>Pinned DNS, deadlines and cancellation"]:::component
     EvaluatorCredentials["Host credential provider<br/>Invocation-scoped cache"]:::component
     EvaluatorExecutor -->|"Authorized requests under frozen snapshot"| EvaluatorHttp
     EvaluatorHttp -->|"Resolve bound credential within budget"| EvaluatorCredentials
+
+    ResourceResolver["Host resource resolver<br/>Exact work identity and pinned storage binding<br/>Bounded resolution; no ambient fallback"]:::component
+    RunContextCache -->|"Injected mode; resolve before immutable reads"| ResourceResolver
+    ResourceResolver -->|"Request-bound storage signing"| Objects
+    ResourceResolver -->|"Bind accepted invocation identity"| EvaluatorCredentials
+    AgentClient -->|"Injected mode; resolve agent credentials"| ResourceResolver

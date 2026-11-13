@@ -20,6 +20,7 @@ pub use control::{
     ControlOutcome,
     ExecutionControl,
 };
+pub mod resources;
 pub(crate) mod status;
 use std::time::Duration;
 

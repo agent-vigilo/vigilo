@@ -80,6 +80,7 @@ async fn invoke_bytes(response: &[u8], limit: u64) -> anyhow::Result<agent_clien
     });
     let result = agent_client::invoke(
         agent_client::Services {
+            resources: None,
             client: &reqwest::Client::new(),
             credentials: &agent_client::credentials::Provider::default(),
             limits: Limits {
@@ -152,6 +153,7 @@ async fn oversized_request_and_profile_fail_before_connection() {
     };
     let result = agent_client::invoke(
         agent_client::Services {
+            resources: None,
             client: &reqwest::Client::new(),
             limits,
             credentials: &agent_client::credentials::Provider::default(),
@@ -173,6 +175,7 @@ async fn oversized_request_and_profile_fail_before_connection() {
     p.agent.http.max_response_bytes = Some(11);
     let result = agent_client::invoke(
         agent_client::Services {
+            resources: None,
             client: &reqwest::Client::new(),
             limits,
             credentials: &agent_client::credentials::Provider::default(),
@@ -210,6 +213,7 @@ async fn response_timeout_remains_enforced_during_body_read() {
     });
     let result = agent_client::invoke(
         agent_client::Services {
+            resources: None,
             client: &reqwest::Client::new(),
             limits: Limits::default(),
             credentials: &agent_client::credentials::Provider::default(),
@@ -289,6 +293,7 @@ async fn credential_reference_without_provider_fails_closed() {
     let profile = serde_json::from_value(value).unwrap();
     let err = agent_client::invoke(
         agent_client::Services {
+            resources: None,
             client: &reqwest::Client::new(),
             limits: Limits::default(),
             credentials: &agent_client::credentials::Provider::default(),
@@ -674,7 +679,8 @@ async fn timeout_after_remote_acceptance_can_repeat_effects_with_distinct_attemp
             let credentials = agent_client::credentials::Provider::default();
             for (index, attempt) in attempts.iter().enumerate() {
                 let result = agent_client::invoke(
-                    agent_client::Services {client: &client, limits: Limits::default(), credentials: &credentials},
+                    agent_client::Services {
+            resources: None,client: &client, limits: Limits::default(), credentials: &credentials},
                     run, execution, *attempt, &p, &case(),
                 ).await;
                 if index == 0 {

@@ -16,7 +16,7 @@ flowchart TD
     Controls[Claim deliveries; scope apply, quiescence and acknowledgement transactions]
     SettleControls[Claim quiescent revocations; scope cleanup and acknowledgement]
     RecoverCreation[Discover accepted ready plans and acquire fenced admission lease]
-    ReadPlan[Bind claimed identity; load protected plan and verify immutable inputs]
+    ReadPlan[Bind claimed identity and exact resources; verify protected plan and immutable inputs]
     AdmitPlan[Scope placement transactions; verify coverage and lock catalog for activation]
     CreationDeferred[Release ownership and continue bounded candidates]
     Circuit{Alias circuit admits operation?}

@@ -51,6 +51,7 @@ sequenceDiagram
                 Note over Vigilo,ExecutionDB: Pause drains allocated batch; revocation interrupts calls; persistence stays lease-fenced
                 Vigilo->>ExecutionDB: Read compact snapshot and immutable plan reference
                 ExecutionDB-->>Vigilo: Compact plan, binding and gate metadata
+                Vigilo->>Vigilo: Bind verified work to storage and credential services; fail without fallback
                 Vigilo->>Vigilo: Look up exact binding and file references in bounded byte cache
                 opt Cache miss or file over 1 MiB
                     Vigilo->>Objects: Read required configuration, plan and case files

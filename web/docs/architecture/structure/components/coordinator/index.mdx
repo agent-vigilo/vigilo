@@ -192,3 +192,9 @@ is held during broker publication, and mixed-owner batches retain bounded concur
 - [Vigilo components](../vigilo)
 - [Worker components](../worker)
 - [Glossary](/docs/glossary)
+
+Resource selection uses the claimed accepted run and plan identity before object
+reads. Injected storage bindings must match the exact request and physical binding;
+denial, expiry or resolution failure defers admission without using standalone
+configuration. Provider calls run outside database transactions and add no
+ownership lookup. See [host resource resolution](/docs/configuration/agent-credentials#host-resource-resolution).

@@ -31,7 +31,7 @@ impl EvaluatorAbiIdentity {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResolvedEvaluator {
     /// Immutable outbound permission ceiling; no rules means no HTTP authority.
-    pub(crate) http_rules: Vec<crate::evaluator_http::Rule>,
+    pub(crate) http_rules: Vec<vigilo::evaluator_http::Rule>,
     pub(crate) evaluator_ref: String,
     pub(crate) evaluator_id: Uuid,
     pub(crate) content_hash: String,
@@ -123,10 +123,10 @@ mod tests {
         let mut changed_grants = first.clone();
         changed_grants.evaluators[0]
             .http_rules
-            .push(crate::evaluator_http::Rule {
+            .push(vigilo::evaluator_http::Rule {
                 uri: "https://judge.example/score".into(),
                 method: "POST".into(),
-                action: crate::evaluator_http::Action::Allow,
+                action: vigilo::evaluator_http::Action::Allow,
                 networks: vec![],
             });
         assert_ne!(first.hash().unwrap(), changed_grants.hash().unwrap());

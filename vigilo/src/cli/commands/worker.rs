@@ -98,6 +98,7 @@ enum RetrySettlement {
 
 #[derive(Debug)]
 struct WorkerRunContext {
+    resources: crate::context::resources::Services,
     reader: Arc<crate::case_reader::RunReader>,
     profile: RunProfile,
     evaluator_catalog: execution_processing::RunEvaluatorCatalog,
@@ -472,7 +473,7 @@ impl EvaluatorLoaderService {
                     tx.commit().await?;
                     Ok(raw)
                 }).await?;
-                let reference = serde_json::from_value(
+                let reference: crate::contracts::case_storage::ObjectRef = serde_json::from_value(
                     raw.get("run_plan")
                         .ok_or_else(|| anyhow::anyhow!("run snapshot has no immutable plan"))?
                         .clone(),
@@ -481,7 +482,8 @@ impl EvaluatorLoaderService {
                 let binding = raw["storage_binding_hash"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing storage binding"))?;
-                let store = self.context.storage(binding, &limits).await?;
+                let request = crate::operations::resources::Request::accepted(tenant_id,run_id,&reference.digest,binding.to_owned())?;
+                let (resources, store) = self.context.execution_resources(request,&limits,cancel).await?;
                 let reader = Arc::new(
                     crate::case_reader::RunReader::open_cached(
                         store,
@@ -518,6 +520,7 @@ impl EvaluatorLoaderService {
                     runtime_artifact_digest: execution_processing::response::runtime_digest().await?,
                 };
                 Ok::<_, anyhow::Error>(Arc::new(WorkerRunContext {
+                    resources: resources.resource_services(),
                     response_identity,
                     reader,
                     profile: snapshot.profile,
@@ -1236,7 +1239,7 @@ async fn run_worker_message_admitted(
                     case_ids.extend(cases.iter().map(|case| case.case_id));
                     outcomes.extend(
                         execution_processing::process_case_batch_execution(
-                            &context,
+                            &run_context.resources.apply(&context),
                             db,
                             &payload.database_alias,
                             &chunk,

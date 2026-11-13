@@ -95,6 +95,33 @@ impl Default for Service {
     }
 }
 impl Service {
+    pub(crate) fn from_bindings_json(text: &str) -> Result<Self> {
+        ensure!(
+            text.len() <= 1024 * 1024,
+            "evaluator HTTP config exceeds 1 MiB"
+        );
+        let bindings = serde_json::from_str(text)
+            .map_err(|_| anyhow::anyhow!("invalid evaluator credential bindings"))?;
+        Self::configured(Config {
+            bindings,
+            ..Default::default()
+        })
+    }
+    /// Isolate binding selection while retaining process-wide ceilings and permits.
+    pub(crate) fn bind_to(self, base: &Self) -> Self {
+        Self {
+            config: Config {
+                bindings: self.config.bindings,
+                request_bytes: base.config.request_bytes,
+                response_bytes: base.config.response_bytes,
+                request_timeout_ms: base.config.request_timeout_ms,
+                total_time_ms: base.config.total_time_ms,
+                requests: base.config.requests,
+                concurrency: base.config.concurrency,
+            },
+            permits: base.permits.clone(),
+        }
+    }
     /// Read a bounded operator file once, before the worker begins accepting work.
     pub(crate) async fn load(path: &Path) -> Result<Self> {
         let mut bytes = Vec::new();
@@ -240,7 +267,7 @@ impl Credentials for Resolver {
                     &binding.credential,
                     uri,
                     &BTreeMap::new(),
-                    self.execution,
+                    self.execution.clone(),
                     self.authority.clone(),
                 )
                 .await

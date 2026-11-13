@@ -45,6 +45,7 @@ fn variable(name: &str) -> anyhow::Result<String> {
 fn config(prefix: &str) -> anyhow::Result<S3Config> {
     let endpoint = variable("VIGILO_BLOB_TEST_ENDPOINT")?;
     Ok(S3Config {
+        credentials_provider: None,
         alias: "acceptance".into(),
         probe_key: format!("capability-probes/{}", uuid::Uuid::now_v7()),
         bucket: variable("VIGILO_BLOB_TEST_BUCKET")?,
@@ -425,6 +426,104 @@ async fn ceph_fault_contract() -> anyhow::Result<()> {
         .map_err(|_| {
             anyhow::anyhow!("exact fixture cleanup failed: {owned}; acceptance: {result:?}")
         })?;
+    }
+    result
+}
+
+/// The explicit signing provider takes precedence and cannot fall back to valid
+/// process credentials when it denies resolution. Exact keys are cleaned on error.
+#[tokio::test]
+async fn injected_signing_provider_has_no_ambient_fallback() -> anyhow::Result<()> {
+    use aws_credential_types::provider::{
+        ProvideCredentials,
+        SharedCredentialsProvider,
+        error::CredentialsError,
+        future,
+    };
+    #[derive(Debug)]
+    struct Denied;
+    impl ProvideCredentials for Denied {
+        fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+        where
+            Self: 'a,
+        {
+            future::ProvideCredentials::ready(Err(CredentialsError::provider_error(
+                "fixture denied",
+            )))
+        }
+    }
+    let _service = SERVICE_LOCK.lock().await;
+    let prefix = format!("injected-signing/{}", uuid::Uuid::now_v7());
+    let cfg = config(&prefix)?;
+    let client = raw(&cfg).await?;
+    let cancel = CancellationToken::new();
+    let limits = FormatLimits::default();
+    let data = b"injected-provider-fixture";
+    let reference = ObjectRef::for_bytes(
+        "acceptance".into(),
+        "cases/data".into(),
+        StorageFormat::CaseBatch,
+        data,
+        &limits,
+    )?;
+    let key = format!("{prefix}/{}", reference.key);
+    let mut injected = config(&prefix)?;
+    let probe = format!("{prefix}/{}", injected.probe_key);
+    injected.credentials_provider = Some(SharedCredentialsProvider::new(Credentials::new(
+        variable("VIGILO_BLOB_TEST_ACCESS_KEY_ID")?,
+        variable("VIGILO_BLOB_TEST_SECRET_ACCESS_KEY")?,
+        None,
+        None,
+        "injected-fixture",
+    )));
+    injected.credential_variables = Some((
+        "UNUSED_INJECTED_ACCESS".into(),
+        "UNUSED_INJECTED_SECRET".into(),
+        None,
+    ));
+    let result: anyhow::Result<()> = async {
+        let store = S3Storage::open(
+            injected,
+            limits.clone(),
+            Resources::standard(),
+            Budget::standard(),
+            &cancel,
+        )
+        .await?;
+        store
+            .create(&reference, input(data), Budget::standard(), &cancel)
+            .await?;
+        let value = store.read(&reference, Budget::standard(), &cancel).await?;
+        let mut bytes = Vec::new();
+        value.reader().await?.read_to_end(&mut bytes).await?;
+        anyhow::ensure!(bytes == data);
+        let mut denied = config(&prefix)?; // Valid environment bindings deliberately remain present.
+        denied.credentials_provider = Some(SharedCredentialsProvider::new(Denied));
+        let denied = S3Storage::reader(
+            denied,
+            limits,
+            Resources::standard(),
+            Budget::standard(),
+            &cancel,
+        )
+        .await?;
+        anyhow::ensure!(
+            denied
+                .read(&reference, Budget::standard(), &cancel)
+                .await
+                .is_err(),
+            "denied provider used ambient credentials"
+        );
+        Ok(())
+    }
+    .await;
+    for owned in [&key, &probe] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client.delete_object().bucket(&cfg.bucket).key(owned).send(),
+        )
+        .await?
+        .map_err(|_| anyhow::anyhow!("injected fixture exact cleanup failed"))?;
     }
     result
 }

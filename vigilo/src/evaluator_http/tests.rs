@@ -257,7 +257,7 @@ async fn cache_batches_negative_results_and_coalesces_concurrent_refreshes() {
         let ids = ids.clone();
         tasks.spawn(async move {
             cache
-                .snapshots(&ids, |requested| async move {
+                .snapshots(Uuid::nil(), &ids, |requested| async move {
                     count.fetch_add(1, Ordering::SeqCst);
                     assert_eq!(requested.len(), 2);
                     tokio::task::yield_now().await;
@@ -278,7 +278,7 @@ async fn cache_batches_negative_results_and_coalesces_concurrent_refreshes() {
     assert_eq!(count.load(Ordering::SeqCst), 1);
     assert!(
         cache
-            .snapshots(&[], |_| async { panic!("empty cache query") })
+            .snapshots(Uuid::nil(), &[], |_| async { panic!("empty cache query") })
             .await
             .unwrap()
             .is_empty()
@@ -289,7 +289,7 @@ async fn expired_policy_cannot_authorize_on_refresh_failure_and_old_snapshot_is_
     let cache = cache::Cache::new(Duration::from_millis(30), 2).unwrap();
     let id = Uuid::nil();
     let first = cache
-        .snapshots(&[id], |_| async {
+        .snapshots(Uuid::nil(), &[id], |_| async {
             Ok(BTreeMap::from([(id, vec![rule()])]))
         })
         .await
@@ -298,16 +298,156 @@ async fn expired_policy_cannot_authorize_on_refresh_failure_and_old_snapshot_is_
     for _ in 0..2 {
         assert!(
             cache
-                .snapshots(&[id], |_| async { anyhow::bail!("unavailable") })
+                .snapshots(Uuid::nil(), &[id], |_| async {
+                    anyhow::bail!("unavailable")
+                })
                 .await
                 .is_err()
         );
     }
     let next = cache
-        .snapshots(&[id], |_| async { Ok(BTreeMap::new()) })
+        .snapshots(Uuid::nil(), &[id], |_| async { Ok(BTreeMap::new()) })
         .await
         .unwrap();
     assert_ne!(first[&id].revision(), next[&id].revision());
     assert!(first[&id].authorize(id, "POST", &rule().uri).is_ok());
     assert!(next[&id].authorize(id, "POST", &rule().uri).is_err());
+}
+
+#[tokio::test]
+async fn cache_does_not_share_grants_between_owners() {
+    let cache = cache::Cache::new(Duration::from_secs(30), 2).unwrap();
+    let id = Uuid::from_u128(7);
+    let allowed = cache
+        .snapshots(Uuid::from_u128(1), &[id], |_| async {
+            Ok(BTreeMap::from([(id, vec![rule()])]))
+        })
+        .await
+        .unwrap();
+    let denied = cache
+        .snapshots(Uuid::from_u128(2), &[id], |_| async { Ok(BTreeMap::new()) })
+        .await
+        .unwrap();
+    assert!(allowed[&id].authorize(id, "POST", &rule().uri).is_ok());
+    assert!(denied[&id].authorize(id, "POST", &rule().uri).is_err());
+}
+
+#[tokio::test]
+async fn cache_coalesces_within_partitions_and_bounds_shared_capacity() {
+    let cache = Arc::new(cache::Cache::new(Duration::from_secs(30), 2).unwrap());
+    let id = Uuid::from_u128(7);
+    let count = Arc::new(AtomicUsize::new(0));
+    let mut tasks = tokio::task::JoinSet::new();
+    for partition in [Uuid::from_u128(1), Uuid::from_u128(2)]
+        .into_iter()
+        .cycle()
+        .take(20)
+    {
+        let cache = cache.clone();
+        let count = count.clone();
+        tasks.spawn(async move {
+            let snapshots = cache
+                .snapshots(partition, &[id], |_| async {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    Ok(if partition == Uuid::from_u128(1) {
+                        BTreeMap::from([(id, vec![rule()])])
+                    } else {
+                        BTreeMap::new()
+                    })
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                snapshots[&id].authorize(id, "POST", &rule().uri).is_ok(),
+                partition == Uuid::from_u128(1)
+            );
+        });
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    // A whole batch in a third partition displaces both earlier entries.
+    let ids = [Uuid::from_u128(8), Uuid::from_u128(9)];
+    cache
+        .snapshots(Uuid::from_u128(3), &ids, |requested| async move {
+            assert_eq!(requested, ids);
+            Ok(BTreeMap::new())
+        })
+        .await
+        .unwrap();
+    for partition in [Uuid::from_u128(1), Uuid::from_u128(2)] {
+        cache
+            .snapshots(partition, &[id], |_| async {
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok(BTreeMap::new())
+            })
+            .await
+            .unwrap();
+    }
+    assert_eq!(count.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn failed_partition_refresh_cannot_install_partial_or_foreign_grants() {
+    let cache = cache::Cache::new(Duration::from_secs(30), 4).unwrap();
+    let owner = Uuid::from_u128(1);
+    let other = Uuid::from_u128(2);
+    let id = Uuid::from_u128(7);
+    let second = Uuid::from_u128(8);
+    let held = cache
+        .snapshots(owner, &[id], |_| async {
+            Ok(BTreeMap::from([(id, vec![rule()])]))
+        })
+        .await
+        .unwrap();
+    assert!(
+        cache
+            .snapshots(other, &[id], |_| async { anyhow::bail!("unavailable") })
+            .await
+            .is_err()
+    );
+    assert!(
+        cache
+            .snapshots(other, &[id], |_| async {
+                Ok(BTreeMap::from([(second, vec![rule()])]))
+            })
+            .await
+            .is_err()
+    );
+    let mut invalid = rule();
+    invalid.method = "invalid method".into();
+    assert!(
+        cache
+            .snapshots(other, &[id, second], |_| async {
+                Ok(BTreeMap::from([
+                    (id, vec![rule()]),
+                    (second, vec![invalid]),
+                ]))
+            })
+            .await
+            .is_err()
+    );
+    let denied = cache
+        .snapshots(other, &[id, second], |requested| async move {
+            assert_eq!(requested, vec![id, second]);
+            Ok(BTreeMap::new())
+        })
+        .await
+        .unwrap();
+    assert!(denied[&id].authorize(id, "POST", &rule().uri).is_err());
+    let hit = cache
+        .snapshots(owner, &[id], |_| async {
+            panic!("failed foreign refresh evicted valid grant")
+        })
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&held[&id], &hit[&id]));
+    assert!(
+        cache
+            .snapshots(owner, &[id; 5], |_| async { panic!("oversized query") })
+            .await
+            .is_err()
+    );
 }

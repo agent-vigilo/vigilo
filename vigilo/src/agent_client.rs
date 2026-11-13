@@ -44,6 +44,7 @@ pub(crate) struct Services<'a> {
     pub(crate) client: &'a reqwest::Client,
     pub(crate) limits: limits::Limits,
     pub(crate) credentials: &'a credentials::Provider,
+    pub(crate) resources: Option<std::sync::Arc<vigilo::operations::resources::Request>>,
 }
 
 #[path = "agent_client/capture.rs"]
@@ -429,6 +430,7 @@ async fn invoke_inner(
                     &http.url,
                     &http.headers,
                     credentials::Execution {
+                        resources: services.resources.clone(),
                         run_id,
                         execution_id,
                         attempt_id,
