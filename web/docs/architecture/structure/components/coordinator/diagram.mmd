@@ -29,7 +29,7 @@ flowchart TD
     FinalizationPass["fa:fa-flag-checkered <br/> <b>Finalization Pass</b> <br/> <small>[Component: Rust]</small> <br/> <small>Bounds finalizable-run work and logs candidate backlog per coordinator cycle.</small>"]:::component
     FinalizeWorkflow["fa:fa-calculator <br/> <b>Run Finalization Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Scopes claimed work, validates exact shard seals, and atomically commits the scorecard, gate status, and completion event.</small>"]:::component
 
-    OutboxPublisher["fa:fa-paper-plane <br/> <b>Outbox Publisher</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Claims delivery batches, logs per-placement backlog, publishes with bounded concurrency, and deletes completed rows.</small>"]:::component
+    OutboxPublisher["fa:fa-paper-plane <br/> <b>Outbox Publisher</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Claims owned delivery batches, publishes with bounded concurrency, and scopes atomic completion or retry transactions.</small>"]:::component
     EventPublisher["fa:fa-plug <br/> <b>Event Publisher Boundary</b> <br/> <small>[Component: Rust Trait]</small> <br/> <small>Separates durable outbox handling from the broker transport.</small>"]:::component
     MessagingCircuit["fa:fa-shield-halved <br/> <b>Messaging Circuit Admission</b> <br/> <small>[Component: Rust]</small> <br/> <small>Rejects broker operations during outages and admits one bounded recovery probe.</small>"]:::component
     MqPublisher["fa:fa-envelope-open-text <br/> <b>RabbitMQ Event Publisher</b> <br/> <small>[Component: Rust / AMQP]</small> <br/> <small>Declares durable topology and publishes persistent mandatory JSON events with confirms.</small>"]:::component

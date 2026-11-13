@@ -193,13 +193,9 @@ async fn scheduler_reads_preserve_empty_and_filtered_backlogs(pool: PgPool) {
             .unwrap(),
         0
     );
-    outbox_events::mark_outbox_event_published(
-        &pool,
-        claimed[0].id,
-        claimed[0].claim_token.unwrap(),
-    )
-    .await
-    .unwrap();
+    outbox_events::mark_outbox_event_published(&pool, &claimed[0], claimed[0].claim_token.unwrap())
+        .await
+        .unwrap();
     assert_eq!(
         outbox_events::count_publishable_outbox_backlog(&pool)
             .await

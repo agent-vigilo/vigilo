@@ -175,6 +175,12 @@ lease claim supplies identity for the terminal transaction, which rechecks the
 lease and exact shard membership before committing the run, scorecard and
 completion event together. A failed terminal write leaves those changes uncommitted.
 
+Claims return authoritative ledger ownership with each event. After broker I/O,
+mark-published and retry bookkeeping each use a short transaction scoped to that
+identity, with unrelated caller context cleared. The claim token fences stale
+publishers; ledger and delivery-row changes commit together. No database transaction
+is held during broker publication, and mixed-owner batches retain bounded concurrency.
+
 ## Related
 
 - [Structure overview](../..)

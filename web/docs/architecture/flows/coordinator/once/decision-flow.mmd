@@ -38,13 +38,13 @@ flowchart TD
     Messaging{Messaging context available?}
     OutboxCatalog{Outbox placement catalog available?}
     OutboxPlacement{Database placements remain?}
-    ClaimOutbox[Claim publishable delivery rows through restricted function]
+    ClaimOutbox[Claim delivery rows and authoritative ownership through restricted function]
     Events{Claimed delivery rows remain?}
     BrokerCircuit{Messaging circuit admits publish?}
     Publish[Publish event to queue with bounded concurrency]
     PublishResult{Publish succeeded?}
-    MarkPublished[Mark ledger published and delete delivery row]
-    Reschedule[Reschedule delivery row for retry]
+    MarkPublished[Scoped transaction: fence claim and commit ledger plus delivery deletion]
+    Reschedule[Scoped transaction: fence claim and commit ledger plus retry]
     OutboxIsolated[Classify failure, count it, and skip alias]
     Stats[Log cycle statistics]
 

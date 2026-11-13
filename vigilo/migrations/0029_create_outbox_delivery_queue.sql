@@ -105,7 +105,7 @@ RETURNS TABLE(
     dedupe_key text, payload jsonb, status text, claim_shard smallint,
     available_at timestamptz, claim_token uuid, claimed_until timestamptz,
     publish_attempt_count integer, published_at timestamptz, error_message text,
-    created_at timestamptz, updated_at timestamptz
+    created_at timestamptz, updated_at timestamptz, tenant_id uuid
 )
 LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
@@ -159,7 +159,8 @@ WITH claim AS (
             e.published_at,
             COALESCE(leased.error_message, e.error_message) AS error_message,
             e.created_at,
-            e.updated_at
+            e.updated_at,
+            e.tenant_id
         FROM leased
         JOIN %1$I.outbox_events e
           ON e.id = leased.event_id

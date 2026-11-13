@@ -34,7 +34,7 @@ flowchart TD
     AggregationNext[Visit unchecked candidates before revisiting shards with ready work]
     AggregationDrain[Await all admitted page operations under database deadlines]
     Messaging{Messaging context available?}
-    Outbox[Restricted delivery queue claim; publish with bounded concurrency]
+    Outbox[Claim owned batches; publish concurrently; commit scoped bookkeeping]
     BrokerCircuit{Messaging circuit admits publish?}
     OutboxIsolated[Count placement failure and continue aliases]
     Wait[Wait for next tick]

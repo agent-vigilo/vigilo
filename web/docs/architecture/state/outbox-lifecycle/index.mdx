@@ -44,6 +44,12 @@ identifies the logical event.
   fenced publisher claims, chunk-claim checks, current-attempt and
   live-attempt-lease authority checks, and evaluator-result uniqueness.
 
+Claims return authoritative ledger ownership with each event. After broker I/O,
+mark-published and retry bookkeeping each use a short transaction scoped to that
+identity, with unrelated caller context cleared. The claim token fences stale
+publishers; ledger and delivery-row changes commit together. No database transaction
+is held during broker publication, and mixed-owner batches retain bounded concurrency.
+
 ## Related
 
 - [Coordinator once flow](/docs/architecture/flows/coordinator/once/)

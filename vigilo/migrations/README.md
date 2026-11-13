@@ -152,3 +152,9 @@ a small result is not a constant-time workload. All bind relations to their
 installation schema, fix the search path and deny public execution. Function
 owners require only SELECT on the referenced relations; callers require explicit
 EXECUTE grants, not work-table access.
+
+The delivery-queue migration's restricted claim returns authoritative ledger
+ownership alongside event payload and claim token. Publisher follow-up transactions
+bind that identity before changing the ledger and hot delivery row atomically;
+no publication transaction spans broker I/O. Claim batches can contain multiple
+owners without per-event ownership lookups.

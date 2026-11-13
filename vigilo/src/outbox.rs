@@ -11,6 +11,9 @@
 //! published or reschedule the delivery row for retry.
 //! This keeps database state and external message delivery loosely coupled
 //! without losing events when a process exits between commit and publish.
+//! Claims carry trusted ledger ownership across broker I/O; per-event follow-up
+//! transactions install that scope and clear unrelated caller context before
+//! atomically marking delivery or rescheduling. Publication stays at-least-once.
 
 use async_trait::async_trait;
 use futures_util::{
@@ -123,7 +126,7 @@ async fn publish_claimed_event(
     match publisher.publish(&event).await {
         Ok(()) => {
             let marked =
-                outbox_events::mark_outbox_event_published(db, event.id, claim_token).await?;
+                outbox_events::mark_outbox_event_published(db, &event, claim_token).await?;
             if marked == 0 {
                 warn!(
                     event_id = %event.id,
@@ -144,7 +147,7 @@ async fn publish_claimed_event(
             );
             let rescheduled = outbox_events::reschedule_outbox_event(
                 db,
-                event.id,
+                &event,
                 claim_token,
                 retry_delay_seconds,
                 &message,
@@ -220,3 +223,6 @@ pub(crate) async fn publish_pending_events(
 
     Ok(stats)
 }
+
+#[cfg(test)]
+mod postgres_tests;

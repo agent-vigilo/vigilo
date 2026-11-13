@@ -107,18 +107,18 @@ sequenceDiagram
     loop Serviceable outbox placements
         Vigilo->>ExecutionDB: Read backlog and claim payload batch through restricted functions
         alt Placement operation succeeds
-            ExecutionDB-->>Vigilo: Joined event payload batch
+            ExecutionDB-->>Vigilo: Joined event payload batch with authoritative ledger ownership
             loop Bounded outbox publish concurrency
                 Vigilo->>Vigilo: Acquire messaging circuit admission
                 alt Messaging circuit is open
-                    Vigilo->>ExecutionDB: Reschedule delivery row for retry with claim token
+                    Vigilo->>ExecutionDB: Begin scoped retry transaction; validate owner and claim token; commit ledger and delivery update
                 else Circuit is closed or half-open probe
                     Vigilo->>Queue: Publish persistent mandatory event
                     Queue-->>Vigilo: Confirmed publish or returned/nacked publish
                     alt Publish confirmed and claim token current
-                        Vigilo->>ExecutionDB: Mark ledger published and delete delivery row
+                        Vigilo->>ExecutionDB: Begin scoped completion transaction; validate owner and claim token; commit ledger and delivery deletion
                     else Publish failed or unroutable
-                        Vigilo->>ExecutionDB: Reschedule delivery row for retry with claim token
+                        Vigilo->>ExecutionDB: Begin scoped retry transaction; validate owner and claim token; commit ledger and delivery update
                     else Claim token no longer current
                         Vigilo->>Vigilo: Ignore stale publisher result
                     end

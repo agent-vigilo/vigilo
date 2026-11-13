@@ -13,13 +13,15 @@ flowchart TD
     Dedupe{Dedupe key exists?}
     Ready{Delivery row available now?}
     Claim[FOR UPDATE SKIP LOCKED over sharded delivery queue]
-    Leased[Delivery row with claim_token and future available_at]
+    Leased[Delivery row with claim_token, ownership and future available_at]
     Topology[Declare durable exchange queues and bindings]
     Publish[Persistent mandatory publish with message id]
     Confirm{Broker confirms and routed?}
-    Fence{Claim token still current?}
-    Published[Ledger published and delivery row deleted]
-    Retry[Delivery row with retry delay]
+    Scope[Begin transaction and bind claimed ledger ownership]
+    Fence{Claim token and ownership still current?}
+    RetryFence{Failed publish claim still current?}
+    Published[Commit ledger published and delivery row deleted]
+    Retry[Commit ledger error and delivery retry delay]
     Stale[Stale publisher result ignored]
     Failed[Ledger failed and delivery row removed]
     Noop[No transition]
@@ -36,8 +38,10 @@ flowchart TD
     Ready -- Yes --> Claim --> Leased --> Topology --> Publish --> Queue --> Confirm
     Ready -- No --> Noop
 
-    Confirm -- Yes --> Fence
-    Confirm -- No --> Retry
+    Confirm -- Yes --> Scope --> Fence
+    Confirm -- No --> RetryScope[Begin scoped retry transaction] --> RetryFence
+    RetryFence -- Yes --> Retry
+    RetryFence -- No --> Stale
     Fence -- Yes --> Published
     Fence -- No --> Stale
     Retry --> Delivery
@@ -45,7 +49,7 @@ flowchart TD
     Ledger -. Direct administrative update .-> Failed
 
     class StateChange command
-    class Ledger,Delivery,Dedupe,Ready,Claim,Leased,Topology,Publish,Confirm,Fence,Retry,Stale system
+    class Ledger,Delivery,Dedupe,Ready,Claim,Leased,Topology,Publish,Confirm,Scope,RetryScope,Fence,RetryFence,Retry,Stale system
     class Published success
     class Failed error
     class Noop component

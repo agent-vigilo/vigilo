@@ -3,7 +3,9 @@
 //! `outbox_events` is the durable event ledger. `outbox_delivery_queue` is the
 //! hot claim/retry table scanned by publishers. Successful publication updates
 //! the ledger and deletes the delivery row so the hot queue only contains
-//! unfinished work.
+//! unfinished work. Restricted claims carry ledger ownership; completion/retry
+//! transactions bind that identity, clear other caller context, and atomically
+//! change the ledger and delivery row. No transaction spans broker I/O.
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -16,6 +18,7 @@ use crate::models::outbox_event::{
 
 const OUTBOX_EVENT_SELECT: &str = r#"
     SELECT
+        e.tenant_id,
         e.id,
         e.event_type,
         e.aggregate_type,
@@ -150,69 +153,83 @@ pub(crate) async fn count_publishable_outbox_backlog(db: &PgPool) -> anyhow::Res
 /// Marks an outbox event as successfully published and removes delivery work.
 pub(crate) async fn mark_outbox_event_published(
     db: &PgPool,
-    id: Uuid,
+    event: &OutboxEvent,
     claim_token: Uuid,
 ) -> anyhow::Result<u64> {
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, event.tenant_id, event.aggregate_id).await?;
     let result = sqlx::query(
         r#"
         WITH deleted AS (
             DELETE FROM outbox_delivery_queue
             WHERE event_id = $1::uuid
               AND claim_token = $2::uuid
+              AND tenant_id = $3::uuid
+              AND EXISTS (SELECT 1 FROM outbox_events e WHERE e.id=$1::uuid AND e.tenant_id=$3::uuid AND e.aggregate_id=$4::uuid)
             RETURNING event_id
         )
         UPDATE outbox_events e
         SET status = 'published'::outbox_status,
-            published_at = now(),
+            published_at = statement_timestamp(),
             error_message = NULL,
-            updated_at = now()
+            updated_at = statement_timestamp()
         FROM deleted
         WHERE e.id = deleted.event_id
         "#,
     )
-    .bind(id)
+    .bind(event.id)
     .bind(claim_token)
-    .execute(db)
+    .bind(event.tenant_id)
+    .bind(event.aggregate_id)
+    .execute(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
 /// Reschedules a failed publish attempt for later retry.
 pub(crate) async fn reschedule_outbox_event(
     db: &PgPool,
-    id: Uuid,
+    event: &OutboxEvent,
     claim_token: Uuid,
     retry_after_seconds: i32,
     error_message: &str,
 ) -> anyhow::Result<u64> {
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, event.tenant_id, event.aggregate_id).await?;
     let result = sqlx::query(
         r#"
         WITH rescheduled AS (
             UPDATE outbox_delivery_queue q
-            SET available_at = now() + ($3::int * interval '1 second'),
+            SET available_at = statement_timestamp() + ($3::int * interval '1 second'),
                 claim_token = NULL,
                 claimed_until = NULL,
                 error_message = $4,
-                updated_at = now()
+                updated_at = statement_timestamp()
             WHERE q.event_id = $1::uuid
               AND q.claim_token = $2::uuid
+              AND q.tenant_id = $5::uuid
+              AND EXISTS (SELECT 1 FROM outbox_events e WHERE e.id=$1::uuid AND e.tenant_id=$5::uuid AND e.aggregate_id=$6::uuid)
             RETURNING q.event_id
         )
         UPDATE outbox_events e
         SET error_message = $4,
-            updated_at = now()
+            updated_at = statement_timestamp()
         FROM rescheduled
         WHERE e.id = rescheduled.event_id
         "#,
     )
-    .bind(id)
+    .bind(event.id)
     .bind(claim_token)
     .bind(retry_after_seconds)
     .bind(error_message)
-    .execute(db)
+    .bind(event.tenant_id)
+    .bind(event.aggregate_id)
+    .execute(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -397,19 +414,19 @@ mod tests {
         let current = reclaimed[0].claim_token.unwrap();
         assert_ne!(old_token, current);
         assert_eq!(
-            mark_outbox_event_published(&pool, first.id, old_token)
+            mark_outbox_event_published(&pool, &first, old_token)
                 .await
                 .unwrap(),
             0
         );
         assert_eq!(
-            reschedule_outbox_event(&pool, first.id, old_token, 60, "stale")
+            reschedule_outbox_event(&pool, &first, old_token, 60, "stale")
                 .await
                 .unwrap(),
             0
         );
         assert_eq!(
-            reschedule_outbox_event(&pool, first.id, current, 60, "retry")
+            reschedule_outbox_event(&pool, &first, current, 60, "retry")
                 .await
                 .unwrap(),
             1
@@ -428,7 +445,7 @@ mod tests {
         assert_eq!(retry[0].error_message.as_deref(), Some("retry"));
         assert_eq!(retry[0].publish_attempt_count, Some(3));
         assert_eq!(
-            mark_outbox_event_published(&pool, first.id, retry[0].claim_token.unwrap())
+            mark_outbox_event_published(&pool, &first, retry[0].claim_token.unwrap())
                 .await
                 .unwrap(),
             1
