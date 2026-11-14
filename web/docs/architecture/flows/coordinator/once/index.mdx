@@ -23,6 +23,9 @@ It then resumes accepted `creating` runs with execution enabled and an available
 lease recovery, dispatch, receipt aggregation, finalization, and outbox publication. Dispatch work is
 claimed through a `run_id + run_shard` cursor, and each operation selects a
 partition-local chunk window before inserting one outbox event record per chunk.
+The scoped snapshot statement also reads the routing records; pool selection
+reuses them without another control-database borrow. Execution admission retains
+the ownership fence.
 
 ## Execution Flow
 

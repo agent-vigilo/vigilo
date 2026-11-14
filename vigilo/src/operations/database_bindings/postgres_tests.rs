@@ -157,7 +157,7 @@ async fn fixed_roles_validate_and_reject_unsafe_deployments(pool: PgPool) {
         let count:i64=sqlx::query_scalar("SELECT count(*) FROM runs").fetch_one(&pools.0.placements["primary"].user.pool).await.unwrap();
         assert_eq!(count,0);
         let scheduler=pools.router(Authority::Scheduler,"primary".into(),"single-default".into()).unwrap();
-        scoped_dispatch(&pool, scheduler.control().await.unwrap(), &roles, tenant, run).await;
+        scoped_dispatch(&pool, &scheduler, &roles, tenant, run).await;
         hosted_operations(&pool, &pools, &roles, tenant, run).await;
         pools.validate().await.unwrap();
 
@@ -188,7 +188,7 @@ async fn fixed_roles_validate_and_reject_unsafe_deployments(pool: PgPool) {
 /// protected control writes without losing its lock or exposing other runs.
 async fn scoped_dispatch(
     admin: &PgPool,
-    scheduler: &PgPool,
+    router: &crate::context::database::DatabaseRouter,
     roles: &[String],
     tenant: uuid::Uuid,
     run: uuid::Uuid,
@@ -197,8 +197,10 @@ async fn scoped_dispatch(
         run_dispatch,
         run_shard_summary::test_support::record_queries,
     };
+    let scheduler = router.control().await.unwrap();
     for (table, key) in [
         ("runs", "id"),
+        ("shard_placements", "run_id"),
         ("run_shard_dispatch_cursors", "run_id"),
         ("outbox_events", "aggregate_id"),
     ] {
@@ -294,7 +296,40 @@ async fn scoped_dispatch(
             60,
         ))
         .await;
-        assert_eq!(snapshot.unwrap().unwrap().tenant_id, tenant);
+        let snapshot = snapshot.unwrap().unwrap();
+        assert_eq!(snapshot.tenant_id, tenant);
+        let (resolved, routing_queries) = record_queries(tokio::time::timeout(
+            Duration::from_secs(1),
+            router.execution_route_from_placements(
+                &snapshot.shard_placement,
+                &snapshot.database_placement,
+            ),
+        ))
+        .await;
+        let resolved = resolved
+            .expect("routing must not borrow the occupied single-connection pool")
+            .unwrap();
+        assert_eq!(resolved.placement.run_id, run);
+        assert!(
+            routing_queries.is_empty(),
+            "claimed routing must reuse projected metadata: {routing_queries:?}"
+        );
+        let mut disabled = snapshot.database_placement.0.clone();
+        disabled.status = "disabled".into();
+        assert!(
+            router
+                .execution_route_from_placements(&snapshot.shard_placement, &disabled)
+                .await
+                .is_err()
+        );
+        let mut moving = snapshot.shard_placement.0.clone();
+        moving.status = "moving".into();
+        assert!(
+            router
+                .execution_route_from_placements(&moving, &snapshot.database_placement)
+                .await
+                .is_err()
+        );
         assert_eq!(
             queries.len(),
             1,

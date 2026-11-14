@@ -58,6 +58,8 @@ pub struct Probe {
     stop: Arc<AtomicBool>,
     sockets: Arc<Mutex<Vec<TcpStream>>>,
     task: Option<JoinHandle<Result<Observation>>>,
+    rounds: Arc<AtomicU64>,
+    bytes: Arc<AtomicU64>,
 }
 impl Probe {
     /// Only accepts loopback plaintext endpoints owned by the service harness.
@@ -85,9 +87,11 @@ impl Probe {
         let sockets = Arc::new(Mutex::new(Vec::new()));
         let stopped = stop.clone();
         let owned = sockets.clone();
+        let rounds = Arc::new(AtomicU64::new(0));
+        let bytes = Arc::new(AtomicU64::new(0));
+        let (measured_rounds, measured_bytes) = (rounds.clone(), bytes.clone());
         let task = thread::spawn(move || {
-            let rounds = Arc::new(AtomicU64::new(0));
-            let bytes = Arc::new(AtomicU64::new(0));
+            let (rounds, bytes) = (measured_rounds, measured_bytes);
             let mut workers = Vec::new();
             let mut failure = None;
             while !stopped.load(Ordering::SeqCst) {
@@ -208,16 +212,35 @@ impl Probe {
             stop,
             sockets,
             task: Some(task),
+            rounds,
+            bytes,
         })
+    }
+    /// Read monotonic counters at a quiescent workload boundary. Final connection
+    /// counts and forwarding validity are available only after `finish()` joins.
+    pub fn snapshot(&self) -> Observation {
+        Observation {
+            connections: None,
+            query_sync_exchanges: self.rounds.load(Ordering::SeqCst),
+            frontend_bytes: self.bytes.load(Ordering::SeqCst),
+        }
     }
     /// Stops acceptance and joins all forwarding work, rejecting observation errors.
     pub fn finish(mut self) -> Result<Observation> {
         self.stop.store(true, Ordering::SeqCst);
-        self.task
+        let joined = self
+            .task
             .take()
             .unwrap()
             .join()
-            .map_err(|_| anyhow::anyhow!("protocol probe panicked"))?
+            .map_err(|_| anyhow::anyhow!("protocol probe panicked"))??;
+        let snapshot = self.snapshot();
+        ensure!(
+            snapshot.query_sync_exchanges == joined.query_sync_exchanges
+                && snapshot.frontend_bytes == joined.frontend_bytes,
+            "protocol counters changed after forwarding joined"
+        );
+        Ok(joined)
     }
 }
 impl Drop for Probe {

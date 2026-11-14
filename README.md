@@ -148,6 +148,10 @@ The end-to-end tier runs `multi_database_routing` and `multi_database_e2e`
 separately because they require the complete distributed dependency set. The
 workflow builds the evaluator Wasm and supplies the required database,
 messaging, storage-owner configuration (`VIGILO_STORAGE_CONFIG`), and opt-in environment variables.
+It exercises the public hosted library with restricted database roles, injected
+resources, two owners, concurrent coordinators and workers, forged queue hints,
+pause/resume, revocation, and lease recovery. Synthetic row policies belong to the
+test fixture; they are not installed by the runtime.
 
 The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, blob storage integration, performance service integration, migration, end-to-end, evaluator compatibility, and documentation checks run as separate required CI jobs.
 

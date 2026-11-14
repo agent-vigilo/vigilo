@@ -800,7 +800,9 @@ impl DatabaseRouter {
         self.execution_database(&placement.database_alias).await
     }
 
-    /// Resolves an active execution route together with its current fence.
+    /// Fixture resolver for unscoped operator routing. Runtime dispatch uses its
+    /// scoped snapshot; exceptional workers require verified local identity.
+    #[cfg(test)]
     pub(crate) async fn execution_route(
         &self,
         run_id: Uuid,
@@ -821,6 +823,41 @@ impl DatabaseRouter {
             .await?
             .clone();
         Ok(ExecutionRoute { placement, pool })
+    }
+
+    /// Resolve records read on the claimed dispatch transaction, without another
+    /// control-pool borrow or an unscoped/cached shard lookup. The caller retains
+    /// its cursor claim; execution-local admission rechecks the movement fence.
+    pub(crate) async fn execution_route_from_placements(
+        &self,
+        placement: &ShardPlacement,
+        database: &DatabasePlacement,
+    ) -> anyhow::Result<ExecutionRoute> {
+        validate_run_shard(placement.run_shard)?;
+        anyhow::ensure!(
+            placement.database_alias == database.alias,
+            "dispatch placement identity mismatch"
+        );
+        if !placement.is_dispatchable() {
+            return Err(ExecutionRouteError::NonDispatchableShardPlacement {
+                run_id: placement.run_id,
+                run_shard: placement.run_shard,
+                status: placement.status.clone(),
+            }
+            .into());
+        }
+        anyhow::ensure!(
+            database.can_serve_owned_shards(),
+            "dispatch database cannot serve owned shards"
+        );
+        require_shard_capable_placement(database)?;
+        let pool = self
+            .resolve_placement_pool(database, Instant::now())
+            .await?;
+        Ok(ExecutionRoute {
+            placement: placement.clone(),
+            pool,
+        })
     }
 
     /// Refresh exceptional routing under identity verified at the source. The

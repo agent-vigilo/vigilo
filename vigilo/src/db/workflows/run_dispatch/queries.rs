@@ -112,6 +112,8 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
             RETURNING id
         )
         SELECT
+            to_jsonb(sp) AS shard_placement,
+            to_jsonb(dp) AS database_placement,
             started_run.tenant_id,
             started_run.id AS run_id,
             $2::smallint AS run_shard,
@@ -134,6 +136,8 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
             started_run.config_snapshot,
             (SELECT COUNT(*)::bigint FROM started_event) AS run_started_event_records_inserted
         FROM started_run
+        JOIN shard_placements sp ON sp.run_id=started_run.id AND sp.run_shard=$2
+        JOIN database_placements dp ON dp.alias=sp.database_alias
         "#,
     )
     .bind(route.run_id)
@@ -151,6 +155,8 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
     let running = sqlx::query_as::<_, DispatchRunSnapshot>(
         r#"
         SELECT
+            to_jsonb(sp) AS shard_placement,
+            to_jsonb(dp) AS database_placement,
             r.tenant_id,
             r.id AS run_id,
             $2::smallint AS run_shard,
@@ -173,11 +179,13 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
             r.config_snapshot,
             0::bigint AS run_started_event_records_inserted
         FROM runs r
+        JOIN shard_placements sp ON sp.run_id=r.id AND sp.run_shard=$2
+        JOIN database_placements dp ON dp.alias=sp.database_alias
         WHERE r.id = $1::uuid
           AND r.status = 'running'::run_status
           AND r.tenant_id=$3
           AND r.execution_control = 'enabled'
-        FOR SHARE
+        FOR SHARE OF r
         "#,
     )
     .bind(route.run_id)

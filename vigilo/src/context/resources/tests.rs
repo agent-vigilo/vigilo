@@ -659,3 +659,44 @@ async fn resource_binding_admission_is_process_bounded_and_released_on_abort() {
     );
     assert_eq!(host.bindings.load(Ordering::SeqCst), 65);
 }
+
+#[tokio::test]
+async fn injected_credentials_require_https_unless_loopback_is_explicit() {
+    let host = Arc::new(Host::default());
+    for allow in [false, true] {
+        let base = Provider::default();
+        let base = if allow {
+            base.with_http_loopback(true)
+        } else {
+            base
+        };
+        let provider = base.injected(host.clone());
+        for (uri, loopback) in [
+            ("http://127.0.0.1:8080/invoke", true),
+            ("http://[::1]:8080/invoke", true),
+            ("http://localhost/invoke", false),
+            ("http://192.0.2.1/invoke", false),
+            ("http://127.0.0.1.evil/invoke", false),
+            ("https://agent.example/invoke", false),
+        ] {
+            let result = provider
+                .resolve(
+                    "shared",
+                    uri,
+                    &Default::default(),
+                    execution(request(1, 'a')),
+                )
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                uri.starts_with("https:") || allow && loopback,
+                "{uri}, explicit={allow}"
+            );
+        }
+    }
+    assert_eq!(
+        host.credentials.load(Ordering::SeqCst),
+        4,
+        "ineligible origins must not resolve credentials"
+    );
+}

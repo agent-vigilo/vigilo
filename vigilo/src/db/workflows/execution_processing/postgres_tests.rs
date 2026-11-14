@@ -1122,6 +1122,8 @@ async fn statement_counts(pool: &PgPool) -> std::collections::BTreeMap<String, i
         FROM pg_stat_statements
         WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
           AND query NOT LIKE '/* evidence_measure */%'
+          -- Match client submissions even when the server also tracks trigger SQL.
+          AND toplevel
         GROUP BY 1
     "#).fetch_all(pool).await.unwrap().into_iter().collect()
 }

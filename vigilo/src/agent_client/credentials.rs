@@ -280,6 +280,13 @@ impl Source {
 }
 
 impl Provider {
+    /// Trusted construction may permit plaintext credentials on literal loopback
+    /// origins for local development. Shared admission remains unchanged.
+    pub(crate) fn with_http_loopback(mut self, allow: bool) -> Self {
+        self.allow_http_loopback = allow;
+        self
+    }
+
     /// Share transport and the process-wide admission limit, isolating resolution
     /// through verified per-invocation context rather than process configuration.
     pub(crate) fn injected(

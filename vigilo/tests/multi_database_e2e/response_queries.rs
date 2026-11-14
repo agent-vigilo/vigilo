@@ -3,10 +3,10 @@
 //! A supplied immutable binary and Wasm allow comparison with preserved releases.
 use std::collections::BTreeMap;
 
-use super::*;
-
-#[path = "../support/postgres_probe.rs"]
-mod postgres_probe;
+use super::{
+    postgres_probe,
+    *,
+};
 
 /// Owns only the unique temporary directory created by this scenario.
 struct InputCleanup(PathBuf);

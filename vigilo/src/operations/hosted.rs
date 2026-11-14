@@ -92,6 +92,9 @@ pub struct HostedConfig {
     pub coordinator: CoordinatorOptions,
     pub wasm: WasmOptions,
     pub agent_http: AgentHttpLimits,
+    /// Local development only; HTTPS remains required unless explicitly enabled.
+    /// The exception accepts literal loopback addresses, never arbitrary HTTP hosts.
+    pub agent_credentials_allow_http_loopback: bool,
     pub evaluator_http: crate::evaluator_http::transport::Limits,
     pub evaluator_http_concurrency: usize,
     pub policy_max_age_seconds: u64,
@@ -115,6 +118,7 @@ impl HostedConfig {
             coordinator: Default::default(),
             wasm: Default::default(),
             agent_http: Default::default(),
+            agent_credentials_allow_http_loopback: false,
             evaluator_http: Default::default(),
             evaluator_http_concurrency: 64,
             policy_max_age_seconds: 30,
@@ -175,6 +179,10 @@ impl HostedRuntime {
             )
         };
         let user = Context::for_operations(router(Authority::User)?)
+            .with_agent_credentials(
+                crate::agent_client::credentials::Provider::default()
+                    .with_http_loopback(config.agent_credentials_allow_http_loopback),
+            )
             .with_resource_resolver(config.resources)
             .with_runtime_dependencies(messaging, config.wasm)
             .with_agent_http_limits(config.agent_http)

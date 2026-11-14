@@ -4,8 +4,15 @@
 //! RabbitMQ, and a built evaluator WASM artifact. It drives the public `vigilo`
 //! binary through recoverable creation, dispatch, worker processing,
 //! finalization, results/export, cancellation, and validation failure paths.
+//! Public-library acceptance also exercises restricted roles, injected resources,
+//! shared runtime services, controls and dropped-worker recovery.
 
+#[path = "support/postgres_probe.rs"]
+mod postgres_probe;
 mod support;
+
+#[path = "multi_database_e2e/hosted.rs"]
+mod hosted;
 
 #[path = "multi_database_e2e/recovery.rs"]
 mod recovery;

@@ -21,7 +21,10 @@ How `vigilo coordinator start` runs configurable coordinator cycles continuously
 until shutdown or service failure. Each cycle resumes a bounded number of
 expired `creating` runs before chunk lease recovery and normal dispatch.
 
-Dispatch claims one open `run_id + run_shard` cursor per window. Dispatch and
+Dispatch claims one open `run_id + run_shard` cursor per window. Its scoped snapshot
+statement also reads the routing records, allowing pool selection without a second
+control-database borrow. Execution admission still checks the ownership fence.
+Dispatch and
 recovery insert one `run.chunk.ready` outbox event record per chunk, including
 the chunk's `run_shard`, execution `database_alias`, and `write_epoch` in the
 payload. Publication preserves that route hint so workers can claim

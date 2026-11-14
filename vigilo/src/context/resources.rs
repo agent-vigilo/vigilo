@@ -146,8 +146,6 @@ impl Context {
         }
     }
     /// Bind a host resolver before constructing a hosted application runtime.
-    /// Public hosted construction remains gated until integrated acceptance.
-    #[allow(dead_code)]
     pub(crate) fn with_resource_resolver(mut self, resolver: Arc<dyn Resolver>) -> Self {
         self.4.resolver = Some(resolver);
         self

@@ -59,7 +59,8 @@ sequenceDiagram
             Vigilo->>ControlDB: Read dispatch backlog through restricted function
             loop Bounded dispatch windows
                 Vigilo->>ControlDB: Claim cursor and bind returned work identity in one statement
-                Vigilo->>ControlDB: Prepare run snapshot on the same scoped transaction
+                Vigilo->>ControlDB: Read snapshot and routing records on the same scoped transaction
+                Vigilo->>Vigilo: Validate route and select bound execution pool
                 Vigilo->>ExecutionDB: Bind claimed identity, fence movement and validate admission
                 Vigilo->>ExecutionDB: Dispatch routed chunk window
                 alt Execution placement succeeds

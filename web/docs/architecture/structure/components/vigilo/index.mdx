@@ -69,6 +69,9 @@ resolver, explicit broker settings and placement routing; it never selects
 standalone file or environment credentials. Broker connections and Wasm compilation
 are lazy. The host owns authentication, access policies, the Tokio runtime and
 presentation. No process signal handlers or logging subscribers are installed.
+Outbound credentials use the same secure destination rules as standalone providers;
+the [credential configuration](/docs/configuration/agent-credentials#host-resource-resolution)
+describes the explicit local-development exception.
 
 The trusted runtime root creates separate handles:
 

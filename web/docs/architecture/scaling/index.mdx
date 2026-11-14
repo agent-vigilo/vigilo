@@ -199,7 +199,9 @@ Coordinator dispatch is route-constrained:
   `FOR UPDATE SKIP LOCKED` and retains that transaction through the routed
   write. Running dispatches share the run lifecycle lock; the initial
   pending-to-running transition is exclusive.
-- The database router resolves that shard placement to an execution database pool.
+- The existing scoped snapshot statement reads the shard and database placement
+  records. The router validates their purpose, lifecycle and matching alias, then
+  selects the bound execution pool without another control-database lookup.
 - The execution database upserts `run_snapshots`, marks pending chunks
   dispatched, and inserts `run.chunk.ready` outbox event records.
 - The control cursor is released or marked `drained` after the execution

@@ -721,7 +721,10 @@ async fn dispatch_ready_chunk_windows(
             .deadline_database_operation(
                 &database_alias,
                 "dispatch_execution_pool",
-                database_router.execution_route(route.run_id, route.run_shard),
+                database_router.execution_route_from_placements(
+                    &snapshot.shard_placement,
+                    &snapshot.database_placement,
+                ),
             )
             .await
             .map_err(anyhow::Error::new)
@@ -749,6 +752,7 @@ async fn dispatch_ready_chunk_windows(
         };
         if execution_route.placement.database_alias != route.database_alias
             || execution_route.placement.route_version != route.route_version
+            || execution_route.placement.write_epoch != route.write_epoch
         {
             debug!(
                 run_id = %route.run_id,

@@ -50,6 +50,10 @@ pub(crate) struct DispatchedRun {
 /// Immutable run context copied from the control database before execution dispatch.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DispatchRunSnapshot {
+    /// Live routing records read with the claimed cursor's existing scope.
+    pub(crate) shard_placement: sqlx::types::Json<crate::models::shard_placement::ShardPlacement>,
+    pub(crate) database_placement:
+        sqlx::types::Json<crate::models::database_placement::DatabasePlacement>,
     pub(crate) tenant_id: Uuid,
     pub(crate) run_id: Uuid,
     pub(crate) run_shard: i16,
