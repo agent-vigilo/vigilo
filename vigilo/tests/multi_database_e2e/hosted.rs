@@ -335,6 +335,17 @@ impl Fixture {
             let status = self.await_terminal(owner, run).await?;
             anyhow::ensure!(status.gate_passed, "hosted run failed: {status:?}");
             assert_eq!(status.details.terminal_execution_count, 101);
+            let results = self.user(owner).run_results(run).await?;
+            assert_eq!(results.summary.execution_count, 101);
+            assert_eq!(results.summary.aggregate_count, 101);
+            assert_eq!(results.summary.passed_execution_count, 101);
+            assert!(results.summary_complete);
+            assert!(results.scorecard.is_some());
+            let other = *owners.iter().find(|&&id| id != owner).unwrap();
+            assert!(matches!(
+                self.user(other).run_results(run).await,
+                Err(vigilo::operations::Error::NotFound(_))
+            ));
             let count:i64=sqlx::query_scalar("SELECT count(*) FROM executions WHERE tenant_id=$1 AND run_id=$2 AND status='completed'").bind(owner).bind(run).fetch_one(&self.db.admin[1]).await?;
             assert_eq!(count, 101);
         }
@@ -352,8 +363,7 @@ impl Fixture {
                 .fetch_one(&self.db.admin[1])
                 .await?;
         assert!(workers >= 2, "both shared-client workers must execute work");
-        self.failure_scenarios(owners[0], uploads[&owners[0]])
-            .await?;
+        Box::pin(self.failure_scenarios(owners[0], uploads[&owners[0]])).await?;
         Ok(())
     }
     async fn cleanup_objects(&self) -> anyhow::Result<()> {
@@ -438,11 +448,13 @@ async fn restricted_lifecycle_uses_injected_resources_and_shared_workers() -> an
         .try_init();
     let mut fixture = Fixture::new().await?;
     let scenario = std::env::var("VIGILO_E2E_HOSTING_SAMPLE").ok();
+    // Heap-own the independent scenarios so their large composed async states
+    // do not inflate the test thread's fixed stack budget while polling SDK I/O.
     let result = std::panic::AssertUnwindSafe(async {
         if let Some(config) = scenario {
-            fixture.measurement(serde_json::from_str(&config)?).await
+            Box::pin(fixture.measurement(serde_json::from_str(&config)?)).await
         } else {
-            fixture.exercise().await
+            Box::pin(fixture.exercise()).await
         }
     })
     .catch_unwind()

@@ -54,8 +54,8 @@ commits approval and reports progress without borrowing scheduler authority.
 No preparation or acceptance transaction spans blob I/O, and pooled connections
 retain no request settings after commit, rollback or cancellation.
 
-The CLI uses the same typed operations for creation, cancellation and status/watch
-output. Other commands call private library workflows. CLI and hosted daemon
+The CLI uses the same typed operations for creation, cancellation, status/watch
+and results-summary output. Other commands call private library workflows. CLI and hosted daemon
 adapters share orchestration and worker cycles. Neither pools nor persistence
 records are part of the public operation API.
 
@@ -152,6 +152,27 @@ Execution admission verifies compact local metadata before activation. The
 foreground caller resumes preparation; coordinators recover requested admission
 under the run creation lease. See
 [Run Preparation](/docs/architecture/case-storage/run-preparation).
+
+## Results summary operations
+
+`operations::Client::run_results(run_id)` and `HostedUser::run_results(run_id)`
+return the same typed `RunResults` projection used by `vigilo run results`.
+`UserClient::run_results(context, run_id)` supports explicit caller-bound reads
+with fixed database bindings. These operations return values; interfaces own output
+formatting, HTTP responses and delivery.
+
+The projection contains `ResultsDetails`, numeric `ResultsSummary`, an optional
+published scorecard, and route/summary coverage counts. `summary_complete` means
+every discovered route has a summary and the route set is nonempty. It does not
+mean the run is terminal or sealed. Unscored averages remain absent; missing
+summaries contribute no invented scores. An unavailable route or missing credential
+binding returns an error rather than a control-database fallback.
+
+Hosted reads bind current caller context on the control transaction, commit it
+before remote I/O, then read summaries once per bound execution placement using
+new caller-scoped transactions. No execution bodies, attempt records, credentials
+or evaluator diagnostics are part of this operation. The CLI retains its JSON
+envelope; see [Results](/docs/architecture/flows/run/results).
 
 ## Status read flow
 

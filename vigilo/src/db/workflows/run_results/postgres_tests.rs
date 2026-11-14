@@ -130,3 +130,105 @@ async fn results_batch_preserves_ascending_shard_score_addition_across_aliases(p
     assert_eq!(result.aggregate_count, 3);
     assert_eq!(result.passed_execution_count, 3);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn typed_results_preserve_batched_queries_coverage_and_lifecycle(pool: PgPool) {
+    use crate::operations::{
+        Client,
+        Config,
+        Error,
+    };
+    let run = Uuid::now_v7();
+    let dataset_id = Uuid::now_v7();
+    let dataset = Uuid::now_v7();
+    seed_control_run(&pool, run, dataset_id, dataset).await;
+    for shard in 0..128 {
+        seed_run_snapshot(&pool, run, shard, dataset_id, dataset, 1).await;
+    }
+    sqlx::query("INSERT INTO shard_placements(run_id,run_shard,database_alias,status) SELECT $1,shard,'primary','active' FROM generate_series(0,127) shard").bind(run).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO run_shard_summaries(run_id,run_shard,expected_execution_count,execution_count,aggregate_count,score_count,score_sum,min_score,max_score,status) SELECT $1,shard,1,1,1,1,0.5,0.5,0.5,'running' FROM generate_series(0,126) shard").bind(run).execute(&pool).await.unwrap();
+    let client = Client::new(Config::new(
+        pool.connect_options().to_url_lossy().to_string(),
+    ))
+    .unwrap();
+    let first = client.run_results(run).await.unwrap();
+    assert_eq!(first.execution_route_count, 128);
+    assert_eq!(first.shard_summary_count, 127);
+    assert!(!first.summary_complete);
+    assert_eq!(first.summary.execution_count, 127);
+    assert_eq!(first.summary.average_score, Some(0.5));
+    assert_eq!(first.scorecard, None);
+    let (value, queries) = record_queries(client.run_results(run)).await;
+    assert_eq!(value.unwrap(), first);
+    assert_eq!(
+        queries.len(),
+        132,
+        "standalone summary retains existing live placement checks: {queries:?}"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|q| q.contains("FROM run_shard_summaries"))
+            .count(),
+        1
+    );
+    let comparison_router = router(&pool);
+    async fn cli_read_sequence(router: &DatabaseRouter, pool: &PgPool, run: Uuid) {
+        crate::db::tables::runs::select_run_by_id(pool, run)
+            .await
+            .unwrap()
+            .unwrap();
+        select_run_results_summary(router, run).await.unwrap();
+        select_run_scorecard(pool, run).await.unwrap();
+    }
+    cli_read_sequence(&comparison_router, &pool, run).await;
+    let (_, baseline) = record_queries(cli_read_sequence(&comparison_router, &pool, run)).await;
+    assert_eq!(
+        queries, baseline,
+        "typed extraction must preserve standalone SQL submissions exactly"
+    );
+    eprintln!(
+        "128-shard standalone results: {} SQL submissions; exact existing CLI sequence retained",
+        queries.len()
+    );
+    for status in ["creating", "running", "failed", "cancelled", "completed"] {
+        sqlx::query("UPDATE runs SET status=$2::run_status WHERE id=$1")
+            .bind(run)
+            .bind(status)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let result = client.run_results(run).await.unwrap();
+        assert_eq!(result.details.status, status);
+        assert_eq!(result.summary, first.summary);
+    }
+    sqlx::query("UPDATE run_shard_summaries SET run_shard=127 WHERE run_id=$1 AND run_shard=126")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // The summary set is still incomplete; equal counts are not confused with seals.
+    assert!(!client.run_results(run).await.unwrap().summary_complete);
+    sqlx::query("DELETE FROM shard_placements WHERE run_id=$1 AND run_shard=126")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let full = client.run_results(run).await.unwrap();
+    assert!(full.summary_complete);
+    assert_eq!(full.summary.sealed_shard_count, 0);
+    sqlx::query("DELETE FROM shard_placements WHERE run_id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let empty = client.run_results(run).await.unwrap();
+    assert_eq!(empty.summary.execution_count, 0);
+    assert_eq!(empty.summary.average_score, None);
+    assert!(!empty.summary_complete);
+    assert!(matches!(
+        client.run_results(Uuid::now_v7()).await,
+        Err(Error::NotFound(_))
+    ));
+}

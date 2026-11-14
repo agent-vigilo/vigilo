@@ -10,10 +10,10 @@ flowchart TD
     Start([vigilo run results])
 
     RunId{Run id valid?}
-    LoadRun[Load run]
+    LoadRun[Shared typed operation loads run]
     Found{Run exists?}
-    Summary[Batch summaries by database; merge progress and scorecard in shard order]
-    Payload[Build summary-only payload]
+    Summary[Batch summaries by database; load scorecard and return typed coverage]
+    Payload[CLI formats typed summary-only result]
 
     Success([Success response])
 

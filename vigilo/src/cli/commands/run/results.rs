@@ -6,15 +6,14 @@
 
 use super::*;
 
-pub(super) fn run_results_payload(
-    run: &Run,
-    summary: &RunResultsSummary,
-    scorecard: Option<&Value>,
-) -> Value {
+pub(super) fn run_results_payload(results: &crate::operations::RunResults) -> Value {
+    let run = &results.details;
+    let summary = &results.summary;
+    let scorecard = &results.scorecard;
     json!({
         "data": {
             "run": {
-                "run_id": run.id,
+                "run_id": run.run_id,
                 "run_key": run.run_key,
                 "status": run.status,
                 "gate_status": run.gate_status,
@@ -63,12 +62,9 @@ pub(super) fn run_results_payload(
 pub(super) async fn exec(context: Context, run_id: String) -> anyhow::Result<()> {
     let run_id = parse_run_id(&run_id)?;
     let database_router = context.dbr().await?;
-    let db = database_router.control().await?;
     let out = context.out().await?;
-    let run = select_existing_run(db, run_id).await?;
-    let summary = run_results_workflow::select_run_results_summary(database_router, run_id).await?;
-    let scorecard = run_results_workflow::select_run_scorecard(db, run_id).await?;
-    let payload = run_results_payload(&run, &summary, scorecard.as_ref());
+    let results = crate::operations::results::read(database_router, run_id).await?;
+    let payload = run_results_payload(&results);
 
     out.write_value(&payload)?;
     Ok(())

@@ -261,6 +261,11 @@ impl HostedUser {
     pub async fn run_status(&self, id: Uuid) -> Result<RunStatus, Error> {
         self.status.run_status(self.context, id).await
     }
+    /// Reads bounded summary metadata under current caller authority on every
+    /// participating database. No execution bodies or diagnostics are returned.
+    pub async fn run_results(&self, id: Uuid) -> Result<super::RunResults, Error> {
+        self.status.run_results(self.context, id).await
+    }
     /// Durable intent only; scheduler delivery and quiescence are asynchronous.
     pub async fn control_run(
         &self,

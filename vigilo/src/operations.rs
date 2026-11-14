@@ -22,6 +22,7 @@ pub use control::{
     ExecutionControl,
 };
 pub mod resources;
+pub(crate) mod results;
 pub(crate) mod status;
 use std::time::Duration;
 
@@ -33,6 +34,11 @@ pub use lifecycle::{
     PreparedRun,
     RunClient,
     RunSubmission,
+};
+pub use results::{
+    ResultsDetails,
+    ResultsSummary,
+    RunResults,
 };
 pub use status::{
     CreationProgress,
@@ -154,6 +160,12 @@ impl Client {
             Default::default(),
             None,
         ))
+    }
+
+    /// Reads summary counts and the published scorecard without loading execution
+    /// payloads. A missing run is NotFound; route failures return no partial value.
+    pub async fn run_results(&self, run_id: Uuid) -> Result<RunResults, Error> {
+        results::read(&self.database, run_id).await
     }
 
     /// Durably changes execution permission. Delivery and worker quiescence are

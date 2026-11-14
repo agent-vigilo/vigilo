@@ -124,6 +124,7 @@ async fn restricted_status_and_pooled_context_fail_closed(pool: PgPool) {
         "run_plan_shards",
         "shard_placements",
         "run_shard_summaries",
+        "run_scorecards",
     ] {
         // This fixture provides only an identity fence, not an application RBAC model.
         sqlx::raw_sql(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; CREATE POLICY bounded_read ON {table} FOR SELECT TO {role} USING (tenant_id=NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid); GRANT SELECT ON {table} TO {role};"))
@@ -209,6 +210,19 @@ async fn restricted_status_and_pooled_context_fail_closed(pool: PgPool) {
     let (allowed, denied) = tokio::join!(client.run_status(a, run), client.run_status(b, run));
     assert!(allowed.is_ok());
     assert!(matches!(denied, Err(Error::NotFound(_))));
+    // Combined placement reuses the same one-connection pool after committing
+    // the control read, rather than borrowing it twice concurrently.
+    sqlx::query("INSERT INTO shard_placements(tenant_id,run_id,run_shard,database_alias,status) VALUES($1,$2,0,'primary','active')").bind(a.tenant_id()).bind(run).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO run_snapshots SELECT (jsonb_populate_record(NULL::run_snapshots,to_jsonb(r)||jsonb_build_object('run_id',r.id,'run_shard',0))).* FROM runs r WHERE id=$1").bind(run).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO run_shard_summaries(tenant_id,run_id,run_shard,expected_execution_count,status) VALUES($1,$2,0,0,'running')").bind(a.tenant_id()).bind(run).execute(&pool).await.unwrap();
+    let combined = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.run_results(a, run),
+    )
+    .await
+    .expect("combined reads cannot retain the only control connection")
+    .unwrap();
+    assert!(combined.summary_complete);
     // A timed-out future drops its transaction and releases its identity.
     let cancelled = tokio::time::timeout(std::time::Duration::from_millis(100), async {
         let mut tx = scope::begin(&client.control, a, run).await.unwrap();
@@ -279,6 +293,7 @@ async fn routed_status_requires_explicit_protected_execution_binding(pool: PgPoo
             ("runs", "id"),
             ("shard_placements", "run_id"),
             ("run_shard_summaries", "run_id"),
+            ("run_scorecards", "run_id"),
         ] {
             sqlx::raw_sql(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; CREATE POLICY bounded_read ON {table} FOR SELECT TO {role} USING (tenant_id=NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid AND {key}=NULLIF(current_setting('vigilo.run_id',true),'')::uuid); GRANT SELECT ON {table} TO {role}"))
                 .execute(db).await.unwrap();
@@ -309,6 +324,10 @@ async fn routed_status_requires_explicit_protected_execution_binding(pool: PgPoo
         missing.run_status(context, run).await,
         Err(Error::InvalidConfiguration(_))
     ));
+    assert!(matches!(
+        missing.run_results(context, run).await,
+        Err(Error::InvalidConfiguration(_))
+    ));
     missing.control.close().await;
     config
         .execution_databases
@@ -331,6 +350,127 @@ async fn routed_status_requires_explicit_protected_execution_binding(pool: PgPoo
     assert!(status.live_progress_complete);
     // Deliberately different control and execution counts prove the read routed.
     assert_eq!(status.details.live_progress.execution_count, 4);
+    let results = client.run_results(context, run).await.unwrap();
+    assert_eq!(results.summary.execution_count, 4);
+    assert!(results.summary_complete);
+    assert_eq!(results.execution_route_count, 1);
+    assert_eq!(results.shard_summary_count, 1);
+    assert_eq!(results.scorecard, None);
+    let (result, queries) = record_queries(client.run_results(context, run)).await;
+    assert!(result.is_ok());
+    assert_eq!(
+        queries.len(),
+        6,
+        "routed results: four reads and two context submissions: {queries:?}"
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|q| q.contains("FROM run_shard_summaries"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        queries
+            .iter()
+            .filter(|q| q.contains("FROM run_scorecards"))
+            .count(),
+        1
+    );
+    assert!(
+        queries
+            .iter()
+            .all(|q| !q.contains("FROM executions") && !q.contains("FROM execution_attempts"))
+    );
+    eprintln!(
+        "restricted routed results: {} SQL submissions plus two BEGIN/COMMIT pairs",
+        queries.len()
+    );
+    // Route cardinality must not turn metadata or data reads into per-shard I/O.
+    sqlx::query("INSERT INTO shard_placements(tenant_id,run_id,run_shard,database_alias,status) SELECT $1,$2,shard,'execution','active' FROM generate_series(1,127) shard").bind(tenant).bind(run).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO run_snapshots SELECT (jsonb_populate_record(NULL::run_snapshots,to_jsonb(s)||jsonb_build_object('run_shard',shard))).* FROM run_snapshots s CROSS JOIN generate_series(1,127) shard WHERE s.run_id=$1 AND s.run_shard=0").bind(run).execute(&execution).await.unwrap();
+    sqlx::query("INSERT INTO run_shard_summaries(tenant_id,run_id,run_shard,expected_execution_count,execution_count,status) SELECT $1,$2,shard,1,1,'running' FROM generate_series(1,127) shard").bind(tenant).bind(run).execute(&execution).await.unwrap();
+    let (many, queries) = record_queries(client.run_results(context, run)).await;
+    let many = many.unwrap();
+    assert_eq!(many.execution_route_count, 128);
+    assert_eq!(many.shard_summary_count, 128);
+    assert!(many.summary_complete);
+    assert_eq!(many.summary.execution_count, 131);
+    assert_eq!(
+        queries.len(),
+        6,
+        "128 hosted shards retain six submissions: {queries:?}"
+    );
+    eprintln!(
+        "128-shard hosted results: {} SQL submissions plus two BEGIN/COMMIT pairs",
+        queries.len()
+    );
+    sqlx::query("INSERT INTO run_scorecards(tenant_id,run_id,schema_version,aggregation_policy_hash,shard_count,passed,scorecard) VALUES($1,$2,1,'hash',1,false,$3)")
+        .bind(tenant).bind(run).bind(serde_json::json!({"gates":[]})).execute(&pool).await.unwrap();
+    assert_eq!(
+        client.run_results(context, run).await.unwrap().scorecard,
+        Some(serde_json::json!({"gates":[]}))
+    );
+    let wrong = UserContext::new(Uuid::now_v7(), Uuid::now_v7()).unwrap();
+    let (allowed, denied) = tokio::join!(
+        client.run_results(context, run),
+        client.run_results(wrong, run)
+    );
+    assert!(allowed.is_ok());
+    assert!(matches!(denied, Err(Error::NotFound(_))));
+    assert!(matches!(
+        client.run_results(context, Uuid::now_v7()).await,
+        Err(Error::NotFound(_))
+    ));
+    // Permission changes on this actor are rechecked, including a previous cache hit.
+    sqlx::raw_sql(&format!("CREATE POLICY revoked_actor ON runs AS RESTRICTIVE FOR SELECT TO {role} USING(current_setting('vigilo.actor_id',true)<>'{}')", context.actor_id())).execute(&pool).await.unwrap();
+    assert!(matches!(
+        client.run_results(context, run).await,
+        Err(Error::NotFound(_))
+    ));
+    sqlx::raw_sql("DROP POLICY revoked_actor ON runs")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(client.run_results(context, run).await.is_ok());
+    let unscoped: i64 = sqlx::query_scalar("SELECT count(*) FROM runs")
+        .fetch_one(&client.control)
+        .await
+        .unwrap();
+    assert_eq!(unscoped, 0);
+    // Cancellation releases caller context and does not poison the shared connection.
+    let mut lock = execution.begin().await.unwrap();
+    sqlx::query("LOCK TABLE run_shard_summaries IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            client.run_results(context, run)
+        )
+        .await
+        .is_err()
+    );
+    lock.rollback().await.unwrap();
+    assert!(matches!(
+        client.run_results(wrong, run).await,
+        Err(Error::NotFound(_))
+    ));
+    assert!(client.run_results(context, run).await.is_ok());
+    sqlx::query("DELETE FROM run_shard_summaries WHERE run_id=$1")
+        .bind(run)
+        .execute(&execution)
+        .await
+        .unwrap();
+    let partial = client.run_results(context, run).await.unwrap();
+    assert_eq!(partial.summary.execution_count, 0);
+    assert_eq!(partial.summary.average_score, None);
+    assert_eq!(partial.shard_summary_count, 0);
+    assert!(!partial.summary_complete);
+    assert!(partial.scorecard.is_some());
+    // A hidden placement must fail instead of reading the control database.
+
     assert!(matches!(
         client
             .run_status(
@@ -355,6 +495,10 @@ async fn routed_status_requires_explicit_protected_execution_binding(pool: PgPoo
         client.run_status(context, run).await,
         Err(Error::Dependency(_))
     ));
+    assert!(matches!(
+        client.run_results(context, run).await,
+        Err(Error::Dependency(_))
+    ));
     sqlx::raw_sql("ALTER TABLE database_placements DISABLE ROW LEVEL SECURITY")
         .execute(&pool)
         .await
@@ -376,8 +520,13 @@ async fn routed_status_requires_explicit_protected_execution_binding(pool: PgPoo
             .is_err()
     );
     drop(connection);
-    client.control.close().await;
+    // An unavailable execution connection is an error, never a partial success.
     execution_pool.close().await;
+    assert!(matches!(
+        client.run_results(context, run).await,
+        Err(Error::Dependency(_))
+    ));
+    client.control.close().await;
     for db in [&pool, &execution] {
         sqlx::raw_sql(&format!("DROP OWNED BY {role}"))
             .execute(db)

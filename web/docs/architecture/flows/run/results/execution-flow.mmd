@@ -16,16 +16,18 @@ sequenceDiagram
     activate Vigilo
 
     Vigilo->>Vigilo: Validate run id
+    Vigilo->>Vigilo: Call typed results operation
     Vigilo->>ControlDB: Load run
     ControlDB-->>Vigilo: Run record
     Vigilo->>ControlDB: Resolve readable execution routes
     ControlDB-->>Vigilo: Run-shard database aliases
     Vigilo->>ExecutionDB: Load published summaries in one batch per database
     ExecutionDB-->>Vigilo: Settlement counts, missing/unresolved counts, and retained scores
-    Vigilo->>Vigilo: Merge routed summaries in shard order
+    Vigilo->>ControlDB: Read published scorecard
+    Vigilo->>Vigilo: Merge summaries in shard order; return typed counts and coverage
 
     alt Results loaded
-        Vigilo->>Vigilo: Build summary-only payload
+        Vigilo->>Vigilo: Format typed result into summary-only CLI payload
         Vigilo-->>User: Success response
     else Run or summary lookup fails
         Vigilo-->>User: Results error

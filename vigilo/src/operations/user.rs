@@ -1,4 +1,4 @@
-//! Restricted status reads with shared pools and transaction-owned identity.
+//! Restricted status and results-summary reads with shared pools and transaction-owned identity.
 //!
 //! The embedding host supplies credentials and identities. Pools are bound to a
 //! fixed database role, reused across callers, and never fall back to standalone
@@ -52,6 +52,8 @@ pub struct UserClient {
     control_alias: String,
     execution: Arc<BTreeMap<String, PgPool>>,
 }
+type ReadRoute = (i16, String, Option<String>, Option<String>);
+
 impl UserClient {
     pub(super) fn from_fixed_pools(
         control: PgPool,
@@ -136,11 +138,71 @@ impl UserClient {
             projection.creation_progress = Some(creation);
             return Ok(RunStatus::from(&projection));
         }
-        let routes:Vec<(i16,String,Option<String>,Option<String>)>=sqlx::query_as("SELECT s.run_shard,s.database_alias,d.role,d.status FROM shard_placements s LEFT JOIN database_placements d ON d.alias=s.database_alias WHERE s.run_id=$1 ORDER BY s.run_shard")
-            .bind(run_id).fetch_all(&mut *tx).await?;
+        let routes = Self::read_routes(&mut tx, run_id).await?;
         tx.commit().await?;
+        let summaries = self.read_summaries(context, run_id, &routes).await?;
+        let mut projection = run_status::RunStatusProjection::from_control_run(run);
+        projection.execution_route_count = routes.len();
+        projection.shard_summary_count = summaries.len();
+        if !summaries.is_empty() {
+            projection.live_progress = run_status::combine_run_shard_progress(&summaries);
+        }
+        Ok(RunStatus::from(&projection))
+    }
+    /// Summary inspection rechecks current caller authority; no cached status or
+    /// system resource handle can bypass these protected reads.
+    pub async fn run_results(
+        &self,
+        context: UserContext,
+        run_id: Uuid,
+    ) -> Result<super::RunResults, Error> {
+        self.read_results(context, run_id)
+            .await
+            .map_err(|error| match error.downcast::<Error>() {
+                Ok(error) => error,
+                Err(error) => Error::Dependency(error),
+            })
+    }
+
+    async fn read_results(
+        &self,
+        context: UserContext,
+        run_id: Uuid,
+    ) -> anyhow::Result<super::RunResults> {
+        let mut tx = scope::begin(&self.control, context, run_id).await?;
+        let run = runs::select_run_by_id(&mut *tx, run_id)
+            .await?
+            .ok_or(Error::NotFound(run_id))?;
+        let routes = Self::read_routes(&mut tx, run_id).await?;
+        let scorecard =
+            crate::db::workflows::run_results::select_run_scorecard(&mut *tx, run_id).await?;
+        tx.commit().await?;
+        let summaries = self.read_summaries(context, run_id, &routes).await?;
+        let projection =
+            crate::db::workflows::run_results::project_results(routes.len(), summaries);
+        Ok(super::RunResults::from_projection(
+            &run, projection, scorecard,
+        ))
+    }
+
+    async fn read_routes(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        run_id: Uuid,
+    ) -> anyhow::Result<Vec<ReadRoute>> {
+        Ok(sqlx::query_as("SELECT s.run_shard,s.database_alias,d.role,d.status FROM shard_placements s LEFT JOIN database_placements d ON d.alias=s.database_alias WHERE s.run_id=$1 ORDER BY s.run_shard")
+            .bind(run_id).fetch_all(&mut **tx).await?)
+    }
+
+    /// Commit control reads before remote I/O. The exact fixed pool and current
+    /// caller context are reused once per physical placement, never per shard.
+    async fn read_summaries(
+        &self,
+        context: UserContext,
+        run_id: Uuid,
+        routes: &[ReadRoute],
+    ) -> anyhow::Result<Vec<run_shard_summary::RunShardSummary>> {
         let mut grouped: BTreeMap<String, Vec<i16>> = BTreeMap::new();
-        for (shard, alias, role, status) in &routes {
+        for (shard, alias, role, status) in routes {
             anyhow::ensure!(
                 matches!(role.as_deref(), Some("shard" | "control_and_shard"))
                     && matches!(status.as_deref(), Some("active" | "draining")),
@@ -165,13 +227,7 @@ impl UserClient {
             );
             tx.commit().await?;
         }
-        let mut projection = run_status::RunStatusProjection::from_control_run(run);
-        projection.execution_route_count = routes.len();
-        projection.shard_summary_count = summaries.len();
-        if !summaries.is_empty() {
-            projection.live_progress = run_status::combine_run_shard_progress(&summaries);
-        }
-        Ok(RunStatus::from(&projection))
+        Ok(summaries)
     }
 }
 

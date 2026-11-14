@@ -966,34 +966,58 @@ mod tests {
 
     #[test]
     fn run_results_payload_is_summary_only() {
-        let run = run_with_status("completed", "fail");
+        let mut run = run_with_status("completed", "fail");
+        run.config_snapshot = json!({"secret": "configuration-only"});
         let summary = RunResultsSummary {
             execution_count: 10,
             aggregate_count: 8,
             passed_execution_count: 5,
             failed_execution_count: 3,
-            error_execution_count: 0,
-            skipped_execution_count: 0,
+            error_execution_count: 1,
+            skipped_execution_count: 2,
             missing_aggregate_count: 2,
             evaluator_result_count: 24,
             blocking_failure_count: 3,
             average_score: Some(0.72),
             min_score: Some(0.2),
             max_score: Some(1.0),
-            ..Default::default()
+            planned_chunk_count: 4,
+            settled_chunk_count: 3,
+            sealed_shard_count: 1,
+            missing_execution_count: 2,
+            unresolved_execution_count: 1,
         };
-        let payload = results::run_results_payload(&run, &summary, None);
-
-        assert_eq!(payload["meta"]["summary_only"], json!(true));
-        assert!(payload["data"]["executions"].is_null());
-        assert_eq!(payload["data"]["results"]["execution_count"], json!(10));
-        assert_eq!(
-            payload["data"]["results"]["missing_aggregate_count"],
-            json!(2)
+        let typed = crate::operations::RunResults::from_projection(
+            &run,
+            crate::db::workflows::run_results::RunResultsProjection {
+                summary,
+                execution_route_count: 2,
+                shard_summary_count: 1,
+            },
+            Some(json!({"gates": []})),
         );
+        assert!(!typed.summary_complete);
+        let value = serde_json::to_value(&typed).unwrap();
+        assert!(!value.to_string().contains("configuration-only"));
+        assert!(value["details"].get("config_snapshot").is_none());
+        assert!(value.get("attempts").is_none());
+        assert!(value.get("evaluator_diagnostics").is_none());
+        let payload = results::run_results_payload(&typed);
         assert_eq!(
-            payload["data"]["results"]["status_counts"]["failed"],
-            json!(3)
+            payload,
+            json!({"data":{
+            "run": {"run_id":run.id,"run_key":run.run_key,"status":run.status,"gate_status":run.gate_status,
+                "expected_execution_count":run.expected_execution_count,"terminal_execution_count":run.terminal_execution_count,
+                "passed_execution_count":run.passed_execution_count,"failed_execution_count":run.failed_execution_count,
+                "errored_execution_count":run.errored_execution_count,"summary":run.summary,"error_message":run.error_message,
+                "created_at":run.created_at,"completed_at":run.completed_at,"updated_at":run.updated_at},
+            "results":{"execution_count":10,"aggregate_count":8,"missing_aggregate_count":2,
+                "missing_execution_count":2,"unresolved_execution_count":1,"planned_chunk_count":4,
+                "settled_chunk_count":3,"sealed_shard_count":1,
+                "status_counts":{"passed":5,"failed":3,"error":1,"skipped":2},
+                "score":{"average":0.72,"min":0.2,"max":1.0},"evaluator_result_count":24,
+                "blocking_failure_count":3,"scorecard":{"gates":[]}}
+        },"meta":{"summary_only":true}})
         );
     }
 

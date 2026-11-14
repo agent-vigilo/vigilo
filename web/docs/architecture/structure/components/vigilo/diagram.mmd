@@ -15,14 +15,14 @@ flowchart TD
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
     LibraryHost["Rust host<br/>Caller-owned runtime and presentation"]:::actor
-    StatusOperations["Typed status operation<br/>Shared lazy pools; no output state"]:::component
+    StatusOperations["Typed inspection operations<br/>Status and results; scoped shared pools; no output state"]:::component
     HostedRuntime["Hosted runtime<br/>Validated fixed roles and injected resources"]:::component
     LibraryHost --> HostedRuntime
     HostedRuntime --> StatusOperations
     HostedRuntime -->|"Calls shared cycles in process"| Coordinator
     HostedRuntime -->|"Calls shared worker services in process"| Worker
     LibraryHost --> StatusOperations
-    CliRouter -->|status| StatusOperations
+    CliRouter -->|status/results| StatusOperations
     StatusOperations --> RunQueries
 
     %% components
@@ -92,7 +92,7 @@ flowchart TD
     CliRouter -->|"Runs setup commands using"| SetupManager
     CliRouter -->|"Runs evaluator commands using"| EvaluatorRegistry
     CliRouter -->|"Runs run commands using"| RunPlanner
-    CliRouter -->|"Runs inspection and placement administration using"| RunQueries
+    CliRouter -->|"Runs export and placement administration using"| RunQueries
     CliRouter -->|"Starts and runs service mode using"| CoordinatorFacade
     CliRouter -->|"Starts and runs service mode using"| WorkerFacade
 
@@ -110,7 +110,7 @@ flowchart TD
     RunValidator -->|"Checks evaluator metadata under command context in <br> <small>[SQL/TCP]</small>"| Database
     RunPersistence -->|"Scopes preparation checkpoints and exact acceptance before system admission <br> <small>[SQL/TCP]</small>"| Database
     RunQueries -->|"Reads and updates run state in <br> <small>[SQL/TCP]</small>"| Database
-    RunQueries -->|"Writes formatted results using"| OutputRenderer
+    RunQueries -->|"Formats CLI export/admin output using"| OutputRenderer
 
     CoordinatorFacade -->|"Runs loops and one-shot cycles with"| ServiceRunner
     WorkerFacade -->|"Runs loops and one-shot cycles with"| ServiceRunner
