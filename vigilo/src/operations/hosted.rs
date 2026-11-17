@@ -142,6 +142,20 @@ struct Inner {
 #[derive(Clone)]
 pub struct HostedRuntime(Arc<Inner>);
 impl HostedRuntime {
+    /// Bind registry operations at the trusted root; derive a caller handle only
+    /// after host authentication. Registry policy and HTTP credentials stay external.
+    pub async fn evaluators(
+        &self,
+        namespace: &str,
+        options: super::evaluators::Options,
+    ) -> Result<super::evaluators::EvaluatorService, Error> {
+        self.0
+            .databases
+            .user_client()
+            .evaluators(namespace, options)
+            .await
+    }
+
     /// Bind nonsecret upload storage at the trusted host root, then derive a
     /// caller handle from the returned service after authenticating each request.
     pub fn datasets(&self, storage_toml: &str) -> Result<super::datasets::DatasetService, Error> {

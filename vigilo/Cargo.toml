@@ -92,3 +92,8 @@ required-features = ["agent-http-services"]
 name = "evaluator_http_services"
 path = "tests/evaluator_http_services.rs"
 required-features = ["evaluator-http-services"]
+
+[[test]]
+name = "evaluator_operations_services"
+path = "tests/evaluator_operations_services.rs"
+required-features = ["evaluator-http-services"]

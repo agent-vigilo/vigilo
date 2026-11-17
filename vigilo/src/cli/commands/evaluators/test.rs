@@ -1,92 +1,41 @@
-//! Evaluator test command implementation.
-//!
-//! Runs one registry evaluator against canonical evaluator `input` JSON and
-//! returns the evaluator's native measurement and diagnostics. Disabled or removed
-//! evaluators cannot be tested, and test input must match the host-side
-//! evaluator execution contract.
-
+//! Local test CLI input/output; library operations own bounded isolated execution.
+//! Input files are trusted CLI paths; the public test operation never opens paths.
 use super::*;
-
 pub(super) async fn exec(
     context: Context,
     evaluator: String,
     input: Option<String>,
     input_file: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    info!("testing evaluator {}", evaluator);
-
-    let db = context.dbr().await?.control().await?;
-    let out = context.out().await?;
-    let wasm = context.wasm().await?;
-    let evaluator = parse_fully_qualified_evaluator(&evaluator)?;
-
-    let evaluator_record = evaluators::select_evaluator(
-        db,
-        &evaluator.namespace,
-        &evaluator.name,
-        &evaluator.version,
-    )
-    .await?
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "evaluator not found: {}/{}:{}",
-            evaluator.namespace,
-            evaluator.name,
-            evaluator.version,
-        )
-    })?;
-
-    match evaluator_record.state {
-        EvaluatorState::Disabled | EvaluatorState::Removed => {
-            anyhow::bail!(
-                "evaluator {}/{}:{} cannot be tested while in state '{}'",
-                evaluator_record.namespace,
-                evaluator_record.name,
-                evaluator_record.version,
-                serde_json::to_string(&evaluator_record.state)?.trim_matches('"'),
-            );
-        }
-        _ => {}
-    }
-
-    let input_raw = match (input, input_file) {
+    use std::io::Read;
+    let raw = match (input, input_file) {
         (Some(raw), None) => raw,
-        (None, Some(path)) => fs::read_to_string(path)?,
+        (None, Some(path)) => {
+            let file = fs::File::open(path)?;
+            anyhow::ensure!(
+                file.metadata()?.is_file(),
+                "test input must be a regular file"
+            );
+            let mut raw = String::new();
+            file.take(32 * 1024 * 1024 + 1).read_to_string(&mut raw)?;
+            raw
+        }
         _ => anyhow::bail!("exactly one of --input or --input-file must be provided"),
     };
-
-    let parsed_input = crate::contracts::evaluator::test_input::decode_input(&input_raw)?;
-
-    let abi = crate::contracts::evaluator_abi::EvaluatorAbiIdentity {
-        package: evaluator_record
-            .interface_name
-            .rsplit_once('/')
-            .map(|(package, _)| package.to_string())
-            .ok_or_else(|| anyhow::anyhow!("evaluator has no verified ABI package"))?,
-        world: evaluator_record.wit_world.clone(),
-        interface: evaluator_record
-            .interface_name
-            .rsplit_once('/')
-            .map(|(_, interface)| interface.to_string())
-            .ok_or_else(|| anyhow::anyhow!("evaluator has no verified ABI interface"))?,
-        version: evaluator_record.interface_version.clone(),
-        contract_hash: evaluator_record.abi_contract_hash.clone(),
-        adapter: evaluator_record.abi_adapter.clone(),
-    };
-    let evaluation_output =
-        wasm.test_evaluator(&evaluator_record.wasm_bytes, &abi, parsed_input)?;
-
-    let payload = json!({
-        "data": {
-            "namespace": evaluator_record.namespace,
-            "name": evaluator_record.name,
-            "version": evaluator_record.version,
-            "state": evaluator_record.state,
-            "output": evaluation_output,
-        }
-    });
-
-    out.write_value(&payload)?;
-
+    let input = crate::operations::evaluators::TestInput::from_json(&raw)?;
+    let out = context.out().await?;
+    let client = crate::operations::evaluators::EvaluatorClient::operator(
+        context.clone(),
+        DEFAULT_NAMESPACE,
+    )
+    .await?;
+    let result = client
+        .test(
+            &crate::operations::evaluators::EvaluatorId::parse(&evaluator)?,
+            input,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+    out.write_value(&json!({"data":result}))?;
     Ok(())
 }

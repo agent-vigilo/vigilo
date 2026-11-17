@@ -57,7 +57,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p vigilo --locked --features blob-storage-services --test blob_storage_services --test dataset_ingestion_services -- -D warnings
       - run: cargo clippy -p vigilo --locked --features agent-http-services --test agent_http_services -- -D warnings
-      - run: cargo clippy -p vigilo --locked --features evaluator-http-services --test evaluator_http_services -- -D warnings
+      - run: cargo clippy -p vigilo --locked --features evaluator-http-services --test evaluator_http_services --test evaluator_operations_services -- -D warnings
 
   unit-tests:
     name: Unit and Contract Tests (${{ matrix.os }})
@@ -340,6 +340,11 @@ jobs:
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
           --features evaluator-http-services --test evaluator_http_services
+      - name: Verify public evaluator registry and test authority with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features evaluator-http-services --test evaluator_operations_services
+          -- --nocapture
       - name: Generate end-to-end coverage report
         run: >-
           cargo llvm-cov report

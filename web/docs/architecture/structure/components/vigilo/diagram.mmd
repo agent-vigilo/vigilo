@@ -105,6 +105,8 @@ flowchart TD
 
     CliRouter -->|"Creates portable archives locally using"| EvaluatorPreparer
     EvaluatorPreparer -->|"Writes verified portable packages to"| EvaluatorPackages
+    LibraryHost -->|"Caller-bound registry and isolated test operations"| EvaluatorRegistry
+    HostedRuntime -->|"Fixed registry role and injected test authority"| EvaluatorRegistry
     EvaluatorRegistry -->|"Prepares packages with"| EvaluatorPreparer
     EvaluatorPackages -->|"Provides manifests and Wasm artifacts to"| EvaluatorPreparer
     EvaluatorRegistry -->|"Reads from and writes to <br> <small>[SQL/TCP]</small>"| Database

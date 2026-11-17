@@ -102,7 +102,7 @@ pub(crate) fn load(path: &Path) -> anyhow::Result<Option<PackageInput>> {
         }
         (manifest, read_file(&path.join(WASM), MAX_WASM)?)
     } else {
-        read_archive(path)?
+        return load_archive(open_archive(path)?).map(Some);
     };
     verify(&manifest, wasm).map(Some)
 }
@@ -133,13 +133,29 @@ fn read_bounded(reader: impl Read, limit: u64) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn read_archive(path: &Path) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+fn open_archive(path: &Path) -> anyhow::Result<fs::File> {
     let file = fs::File::open(path)?;
     ensure!(
         file.metadata()?.is_file() && file.metadata()?.len() <= MAX_ARCHIVE,
         "archive exceeds byte limit or is not a regular file"
     );
-    let decoder = MultiGzDecoder::new(file.take(MAX_ARCHIVE + 1));
+    Ok(file)
+}
+
+#[cfg(test)]
+fn read_archive(path: &Path) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    archive_members(open_archive(path)?)
+}
+
+/// Verify a bounded portable archive supplied by a host, without opening paths.
+/// The compressed stream and expanded members have independent byte ceilings.
+pub(crate) fn load_archive(reader: impl Read) -> anyhow::Result<PackageInput> {
+    let (manifest, wasm) = archive_members(reader)?;
+    verify(&manifest, wasm)
+}
+
+fn archive_members(reader: impl Read) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let decoder = MultiGzDecoder::new(reader.take(MAX_ARCHIVE + 1));
     let mut archive = tar::Archive::new(decoder.take(MAX_ARCHIVE + 1));
     let mut manifest = None;
     let mut wasm = None;
@@ -175,6 +191,10 @@ fn read_archive(path: &Path) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
         );
     }
     ensure!(reader.limit() > 0, "expanded archive exceeds byte limit");
+    ensure!(
+        reader.get_ref().get_ref().limit() > 0,
+        "compressed archive exceeds byte limit"
+    );
     Ok((
         manifest.context("missing Vigilo.toml")?,
         wasm.context("missing evaluator.wasm")?,

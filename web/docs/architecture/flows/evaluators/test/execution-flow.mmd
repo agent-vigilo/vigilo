@@ -1,37 +1,28 @@
----
-config:
-  flowchart:
-    nodeSpacing: 150
-    rankSpacing: 80
-  themeVariables:
-    edgeLabelBackground: 'transparent'
----
 sequenceDiagram
-    actor User
-    participant Vigilo
-    participant DB as Evaluators DB
-    participant WASM as Wasm Runtime
-
-    User->>Vigilo: vigilo evaluator test
-    activate Vigilo
-
-    Vigilo->>Vigilo: Parse evaluator identifier
-    Vigilo->>DB: Select evaluator by identity
-
-    alt Evaluator found and testable
-        DB-->>Vigilo: Evaluator record
-        Vigilo->>Vigilo: Read and parse test input
-        Vigilo->>WASM: Verify stored ABI and dispatch its adapter with input
-        WASM-->>Vigilo: Evaluation output
-        Vigilo->>Vigilo: Build native measurement and diagnostics payload
-        Vigilo-->>User: Success response
-    else Evaluator missing
-        DB-->>Vigilo: No evaluator record
-        Vigilo-->>User: Not found error
-    else Evaluator cannot run
-        Vigilo-->>User: State error
-    else Input or execution fails
-        Vigilo-->>User: Test error
+    actor Interface as CLI or embedding host
+    participant Ops as Shared evaluator operations
+    participant DB as Scoped registry
+    participant WASM as Blocking Wasm runtime
+    participant Host as Optional test authority resolver
+    participant HTTP as Core bounded HTTP session
+    Interface->>Ops: Bounded canonical input and evaluator identity
+    Ops->>DB: Read current accessible artifact and state
+    DB-->>Ops: Exact metadata and bounded Wasm bytes
+    Note over Ops,DB: Commit and release connection before external work
+    Ops->>Ops: Check state and artifact digest
+    Ops->>WASM: Compile exact supported ABI under shared admission
+    alt Host authority configured
+        Ops->>Host: Verified caller, fresh test ID, evaluator ID and digest
+        Host-->>Ops: Exact request-bound policy and credentials
+    else Default / CLI
+        Note over Ops: HTTP remains unavailable
     end
-
-    deactivate Vigilo
+    Ops->>WASM: Execute with immutable optional authority
+    opt Evaluator requests HTTP under host authority
+        WASM->>HTTP: Request within Wasm deadline
+        HTTP->>HTTP: Authorize destination/address, resolve credentials, enforce budgets
+        HTTP-->>WASM: Bounded response or explicit error
+    end
+    WASM-->>Ops: Native measurement/abstention and diagnostics
+    Ops->>Ops: Verify returned evaluator identity
+    Ops-->>Interface: Typed result; interface owns formatting

@@ -32,8 +32,13 @@ sequenceDiagram
     Vigilo->>DB: Check evaluator hash uniqueness
     DB-->>Vigilo: Hash available
 
-    Vigilo->>DB: Insert Wasm, artifact hash, contract hash, and adapter id
-    DB-->>Vigilo: Saved
+    Vigilo->>DB: Insert immutable artifact; never overwrite on conflict
+    alt Insert succeeded
+        DB-->>Vigilo: Saved
+    else Concurrent conflict
+        Vigilo->>DB: Re-read exact version and compare digest
+        DB-->>Vigilo: Exact replay or immutable conflict
+    end
 
     Vigilo-->>User: Success response
     end

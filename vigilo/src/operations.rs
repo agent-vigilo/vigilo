@@ -22,6 +22,7 @@ pub use control::{
     ExecutionControl,
 };
 pub mod datasets;
+pub mod evaluators;
 pub mod export;
 pub mod resources;
 pub(crate) mod results;
@@ -99,6 +100,9 @@ pub enum Error {
     /// A dataset upload is absent or not visible to the current caller.
     #[error("dataset upload '{0}' was not found")]
     DatasetNotFound(Uuid),
+    /// An evaluator is absent or not visible to the caller.
+    #[error("evaluator '{0}' was not found")]
+    EvaluatorNotFound(String),
     /// Database or routing failure. The source is for trusted diagnostics only;
     /// interfaces must not serialize its chain as a user response.
     #[error("operation dependency failed")]

@@ -19,6 +19,11 @@ import decisionFlowDiagram from './decision-flow.mmd';
 
 How `vigilo evaluator search` queries evaluator summaries and returns a structured result payload.
 
+Search reads metadata-only pages under independent row and byte limits. The CLI
+retains its summary fields and requested limit; it follows logical continuation
+positions when the byte budget requires another page. See the
+[library operations](../#library-operations) for limits and cursor semantics.
+
 ## Execution Flow
 
 <Mermaid value={executionFlowDiagram} />

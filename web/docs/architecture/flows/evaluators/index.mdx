@@ -15,7 +15,7 @@ keywords:
 
 Command flows for publishing, validating, and operating evaluator artifacts.
 
-These flows cover the CLI paths that manage evaluator versions before they are selected by a run. They focus on artifact validation, registry reads and writes, state changes, and local test execution.
+These flows cover shared library operations and their CLI adapters for evaluator versions before run selection. They focus on artifact validation, registry reads and writes, state changes, and local test execution.
 
 Each command page includes:
 
@@ -29,3 +29,57 @@ Each command page includes:
 - [Show](./show/) loads one evaluator record for inspection.
 - [Test](./test/) validates an evaluator against local input without publishing it.
 - [Set state](./set-state/) updates an evaluator version state used by run selection.
+
+
+## Library Operations
+
+`operations::Client::evaluators(namespace, Options)` binds an authorized operator’s
+publication namespace and shared runtime limits. `prepare_package` accepts an
+asynchronous archive reader, verifies the package and returns a sealed artifact;
+`publish` consumes it and returns metadata plus an explicit reuse flag. Input never
+selects a server filesystem path. Archives are bounded to 66 MiB, manifests to
+1 MiB and Wasm to 64 MiB. Preparation uses private scratch and one shared
+preparation slot, retained until publication or artifact drop. Compilation runs on
+a blocking thread; no database transaction spans input receipt or compilation.
+
+`EvaluatorService::for_namespace` derives another trusted publication binding
+while sharing runtime limits, admission and fixed pools. Keep the root service
+at the host boundary and derive caller handles after authentication.
+
+A namespace is a logical artifact address, not evidence of ownership. CLI
+publication uses `vigilo`. Embedding hosts supply an authorized namespace at
+trusted construction; they own publisher authorization. Immutable identifiers use
+`<namespace>/<name>:<version>` and are bounded to 4 KiB. A returned evaluator identity must match its
+registry address; shared consumption references the same version and digest
+without copying or relabelling its bytes.
+
+`inspect` returns metadata without Wasm. `search` returns a bounded page ordered
+by name ascending and version descending, using the registry’s text ordering.
+`PageLimits` defaults to 10 rows and 8 MiB; rows are capped at 20. A cursor contains
+only a filter-bound logical position. It conveys no access grant and each page
+uses current caller authority. A descriptor too large for an empty page fails
+explicitly. CLI search fills its requested result count through bounded pages;
+CLI list walks pages without downloading artifact bytes.
+
+`set_state` preserves artifact identity. Removed versions remain terminal;
+republication of identical bytes preserves their existing state and metadata.
+State reasons are bounded to 64 KiB. Ordinary publication performs the existing
+identity lookup, content lookup and insert; exact replay needs only the identity
+lookup. A concurrent insertion conflict is reconciled by reading the exact version,
+without overwriting bytes or adding queries to the ordinary successful path.
+
+## Embedded Caller Boundary
+
+`UserClient::evaluators(namespace, Options)` and
+`HostedRuntime::evaluators(namespace, Options)` construct trusted registry
+services; `user(UserContext)` derives caller-bound operation handles that share
+fixed-role pools. Construction verifies independent registry row protection and
+rejects bypass/owner roles. Deployment policies own access decisions. Actor context
+is installed inside each short transaction, with no connection retained during
+Wasm or HTTP. Hosted operations pay one context statement per transaction;
+standalone operations keep their existing autocommit query budgets.
+
+Authentication, namespace ownership and secret management remain with the host.
+Neither a prepared package nor a discovery cursor grants permission. Native
+measurements, abstentions and diagnostics remain separate from profile
+normalization, aggregation and release gates.

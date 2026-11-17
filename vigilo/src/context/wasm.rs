@@ -798,33 +798,7 @@ impl Wasm {
         profile: String,
     ) -> anyhow::Result<Component> {
         if let Some(package) = crate::evaluator_package::load(&package_path)? {
-            let embedded = read_embedded_package_metadata(&package.wasm)?.ok_or_else(|| {
-                anyhow::anyhow!("portable artifact must contain vigilo.package metadata")
-            })?;
-            anyhow::ensure!(
-                embedded.name == package.name && embedded.version == package.version,
-                "embedded vigilo.package identity mismatch"
-            );
-            let prepared = self.compile_evaluator(&package.wasm, &package.abi)?;
-            let serialized = prepared.serialize()?;
-            return Ok(Component {
-                name: package.name,
-                version: package.version,
-                description: package.description,
-                tags: package.tags,
-                metadata: package.metadata,
-                interface_name: format!("{}/{}", package.abi.package, package.abi.interface),
-                interface_version: package.abi.version.clone(),
-                wit_world: package.abi.world.clone(),
-                abi: package.abi,
-                runtime: WASM_RUNTIME_NAME.into(),
-                runtime_version: WASM_RUNTIME_VERSION.into(),
-                runtime_fingerprint: self.fingerprint.clone(),
-                wasm_hash: blake3::hash(&package.wasm).to_hex().to_string(),
-                wasm_bytes: package.wasm,
-                component: prepared,
-                serialized,
-            });
+            return self.prepare_portable(package);
         }
         let manifest = read_manifest(&package_path)?;
         let manifest_profile = manifest.get_profile(&profile)?;
@@ -908,6 +882,41 @@ impl Wasm {
         })
     }
 
+    /// Compile already verified portable input using the same embedded identity
+    /// checks as the CLI path. Published Wasm bytes remain unchanged.
+    pub(crate) fn prepare_portable(
+        &self,
+        package: crate::evaluator_package::PackageInput,
+    ) -> anyhow::Result<Component> {
+        let embedded = read_embedded_package_metadata(&package.wasm)?.ok_or_else(|| {
+            anyhow::anyhow!("portable artifact must contain vigilo.package metadata")
+        })?;
+        anyhow::ensure!(
+            embedded.name == package.name && embedded.version == package.version,
+            "embedded vigilo.package identity mismatch"
+        );
+        let prepared = self.compile_evaluator(&package.wasm, &package.abi)?;
+        let serialized = prepared.serialize()?;
+        Ok(Component {
+            name: package.name,
+            version: package.version,
+            description: package.description,
+            tags: package.tags,
+            metadata: package.metadata,
+            interface_name: format!("{}/{}", package.abi.package, package.abi.interface),
+            interface_version: package.abi.version.clone(),
+            wit_world: package.abi.world.clone(),
+            abi: package.abi,
+            runtime: WASM_RUNTIME_NAME.into(),
+            runtime_version: WASM_RUNTIME_VERSION.into(),
+            runtime_fingerprint: self.fingerprint.clone(),
+            wasm_hash: blake3::hash(&package.wasm).to_hex().to_string(),
+            wasm_bytes: package.wasm,
+            component: prepared,
+            serialized,
+        })
+    }
+
     /// Compile evaluator wasm bytes into a component for registry caching.
     pub fn compile_evaluator(
         &self,
@@ -915,17 +924,6 @@ impl Wasm {
         identity: &EvaluatorAbiIdentity,
     ) -> anyhow::Result<PreparedEvaluator> {
         PreparedEvaluator::compile(self, wasm_bytes, identity)
-    }
-
-    /// Run evaluator in test mode.
-    pub fn test_evaluator(
-        &self,
-        wasm_bytes: &[u8],
-        abi: &EvaluatorAbiIdentity,
-        input: EvaluatorInput,
-    ) -> anyhow::Result<EvaluatorOutput> {
-        let evaluator = self.compile_evaluator(wasm_bytes, abi)?;
-        self.test_evaluator_component(&evaluator, input)
     }
 
     /// Run evaluator in test mode using a prepared component and adapter.
@@ -1175,6 +1173,18 @@ mod tests {
         assert_eq!(component.wasm_bytes, bytes);
         assert_eq!(component.wasm_hash, blake3::hash(&bytes).to_hex().as_str());
         assert_eq!(component.abi, abi);
+        let from_reader = runtime
+            .prepare_portable(
+                crate::evaluator_package::load_archive(
+                    fs::File::open(dir.path().join("good.tar.gz")).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(from_reader.wasm_bytes, component.wasm_bytes);
+        assert_eq!(from_reader.wasm_hash, component.wasm_hash);
+        assert_eq!(from_reader.abi, component.abi);
+
         for (label, wasm, name) in [
             ("missing", raw, "sentiment-basic-en"),
             ("identity", bytes, "different-name"),

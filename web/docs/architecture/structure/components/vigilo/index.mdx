@@ -209,3 +209,14 @@ protections, including direct partition grants. Pools are shared by credential
 domain, not created per caller. Neither reader exposes a SQL executor or borrows
 runtime service authority. See [Export](/docs/architecture/flows/run/export) for
 collection boundaries, byte limits and live continuation semantics.
+
+
+## Evaluator Operations
+
+`operations::evaluators` shares registry publication, metadata discovery,
+inspection, state changes and isolated testing with the CLI. Trusted roots bind
+publication namespaces and optional HTTP test authority; caller handles retain
+current row-policy context on fixed pools. Portable imports accept bounded readers,
+not request-selected host paths. Shared immutable artifact identity remains
+separate from host access policy. See the [evaluator operations](/docs/architecture/flows/evaluators/)
+and [test boundary](/docs/architecture/flows/evaluators/test/) for limits and lifecycle.

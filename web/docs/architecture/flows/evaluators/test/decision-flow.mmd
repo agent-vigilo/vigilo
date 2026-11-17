@@ -1,66 +1,19 @@
----
-config:
-  flowchart:
-    nodeSpacing: 150
-    rankSpacing: 80
-  themeVariables:
-    edgeLabelBackground: 'transparent'
----
 flowchart TD
-    Start([vigilo evaluator test])
-
-    Identifier{Fully qualified identifier?}
-    Lookup[Lookup evaluator by identity]
-    Found{Evaluator exists?}
-    State{Evaluator can be tested?}
-    InputSource{Input source valid?}
-    ReadInput[Read input payload]
-    ParseInput{Input JSON valid?}
-    Execute[Execute evaluator Wasm]
-    Normalize[Normalize evaluator output]
-    Payload[Build result payload]
-
-    Success([Success response])
-
-    IdentifierFail([Identifier format error])
-    NotFoundFail([Evaluator not found error])
-    LookupFail([Database lookup error])
-    StateFail([Evaluator state error])
-    InputSourceFail([Input source error])
-    InputReadFail([Input read error])
-    InputJsonFail([Input JSON error])
-    ExecutionFail([Evaluator execution error])
-
-    Start --> Identifier
-
-    Identifier -- No --> IdentifierFail
-    Identifier -- Yes --> Lookup
-
-    Lookup --> Found
-    Lookup -. Lookup fails .-> LookupFail
-
-    Found -- No --> NotFoundFail
-    Found -- Yes --> State
-
-    State -- No --> StateFail
-    State -- Yes --> InputSource
-
-    InputSource -- No --> InputSourceFail
-    InputSource -- Yes --> ReadInput
-
-    ReadInput --> ParseInput
-    ReadInput -. Read fails .-> InputReadFail
-
-    ParseInput -- No --> InputJsonFail
-    ParseInput -- Yes --> Execute
-
-    Execute --> Normalize
-    Execute -. Execution fails .-> ExecutionFail
-
-    Normalize --> Payload
-    Payload --> Success
-
-    class Start command
-    class Success success
-    class Identifier,Lookup,Found,State,InputSource,ReadInput,ParseInput,Execute,Normalize,Payload system
-    class IdentifierFail,NotFoundFail,LookupFail,StateFail,InputSourceFail,InputReadFail,InputJsonFail,ExecutionFail error
+    start["CLI or library test"] --> input{"Bounded valid test input?"}
+    input -->|No| fail["Explicit test error"]
+    input -->|Yes| read["Scoped artifact read; release database connection"]
+    read --> allowed{"Accessible and testable state?"}
+    allowed -->|No| fail
+    allowed -->|Yes| verify{"Digest and exact supported ABI valid?"}
+    verify -->|No| fail
+    verify -->|Yes| configured{"Host test resolver configured?"}
+    configured -->|No| offline["HTTP unavailable"]
+    configured -->|Yes| authority{"Matching authority before deadline?"}
+    authority -->|No| fail
+    authority -->|Yes| online["Core HTTP session with immutable rules and budgets"]
+    online --> execute["Blocking Wasm execution under shared admission"]
+    offline --> execute
+    execute --> identity{"Returned identity matches registry?"}
+    identity -->|No| fail
+    identity -->|Yes| output["Return native output; no scoring normalization"]
+    execute -->|"Cancellation, trap or deadline"| fail

@@ -2,7 +2,7 @@
 title: Test
 sidebar_label: Test
 sidebar_position: 4
-description: Flow diagrams for testing a local evaluator artifact before publishing it to Agent Vigilo.
+description: Bounded local execution of published evaluators with explicit host-owned HTTP authority.
 keywords:
   - vigilo evaluator test
   - evaluator test flow
@@ -18,6 +18,35 @@ import decisionFlowDiagram from './decision-flow.mmd';
 # Test
 
 How `vigilo evaluator test` loads a published evaluator, runs it against canonical input, and returns evaluation results.
+
+`EvaluatorClient::test` receives an `EvaluatorId`, sealed `TestInput` and a
+cancellation token. `TestInput::from_json` uses the canonical evaluator fixture
+contract and caps total input at 32 MiB; explicit UTF-8 response fixtures retain
+their 4 MiB body limit. Disabled and removed versions are rejected. Core verifies
+the stored artifact digest and exact supported ABI before host authority is
+requested, then executes on a blocking thread under shared Wasm admission.
+
+Tests deny HTTP by default, including the CLI. An embedding host can inject
+`TestResolver` through trusted `Options`. Core supplies a read-only `TestRequest`
+containing the verified caller, fresh test UUID, evaluator UUID and artifact
+digest. `TestAuthority::new` binds the reply to that exact request and supplies
+immutable destination rules and a host-owned `Credentials` implementation.
+A test has no accepted run, and no run identity is fabricated for authorization.
+Input JSON cannot install grants, select credentials or create live body handles.
+
+Core applies its existing destination/address checks and request, response, time
+and call budgets. Credential resolution happens after destination approval, under
+the same request budget. Authority resolution has a ten-second deadline and shared
+admission; denial never falls back to environment or file credentials. Returned
+HTTP statuses remain evaluator input to interpret, including refusal/error bodies.
+Core injects credentials only into outbound headers; it does not add them to
+evaluator input or test-result fields.
+
+Dropping or cancelling a test stops pending host/HTTP work. Blocking compilation
+and Wasm retain their admission permits until they finish; an executing component
+is bounded by its fuel and runtime deadline. Cancellation does not undo committed
+publication or registry state changes. Test results contain native evaluator
+output, without profile normalization or release-gate decisions.
 
 ## Execution Flow
 

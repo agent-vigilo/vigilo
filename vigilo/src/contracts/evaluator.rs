@@ -139,39 +139,39 @@ pub(crate) struct AgentTraceEvent {
 
 /// Canonical output returned by a single evaluator invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EvaluatorOutput {
+pub struct EvaluatorOutput {
     /// Stable machine identity for the evaluator that produced this payload.
-    pub(crate) evaluator: EvaluatorIdentity,
+    pub evaluator: EvaluatorIdentity,
 
     /// The invocation's single primary measurement, or an explicit abstention.
-    pub(crate) outcome: EvaluatorOutcome,
+    pub outcome: EvaluatorOutcome,
 
     /// Diagnostic evidence that cannot affect scoring or release policy directly.
     #[serde(default)]
-    pub(crate) diagnostics: Vec<DiagnosticFinding>,
+    pub diagnostics: Vec<DiagnosticFinding>,
 
     /// Optional evaluator-level metadata, diagnostics, timing, or trace context.
     ///
     /// This field is intentionally unstructured to allow evaluator-specific payloads.
     #[serde(default)]
-    pub(crate) metadata: Value,
+    pub metadata: Value,
 }
 
 /// Canonical evaluator identity included in every evaluator output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EvaluatorIdentity {
+pub struct EvaluatorIdentity {
     /// Logical namespace for evaluator ownership/grouping.
-    pub(crate) namespace: String,
+    pub namespace: String,
     /// Evaluator package name within a namespace.
-    pub(crate) name: String,
+    pub name: String,
     /// Evaluator package version that produced the output.
-    pub(crate) version: String,
+    pub version: String,
 
     /// Optional content hash of the evaluator artifact (for strict reproducibility).
-    pub(crate) content_hash: Option<String>,
+    pub content_hash: Option<String>,
 
     /// Optional declared contract version implemented by this evaluator.
-    pub(crate) interface_version: Option<String>,
+    pub interface_version: Option<String>,
 }
 
 /// Structured error intentionally returned by an evaluator component.
@@ -196,7 +196,7 @@ impl std::error::Error for EvaluatorReportedError {}
 /// Primary result of a successful evaluator invocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub(crate) enum EvaluatorOutcome {
+pub enum EvaluatorOutcome {
     /// The evaluator produced exactly one measurement.
     Completed(Measurement),
     /// The evaluator intentionally could not measure this input.
@@ -205,28 +205,28 @@ pub(crate) enum EvaluatorOutcome {
 
 /// Explanation for an intentional evaluator abstention.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Abstention {
+pub struct Abstention {
     /// Stable machine-readable category.
-    pub(crate) category: String,
+    pub category: String,
     /// Optional operator-facing explanation.
-    pub(crate) reason: Option<String>,
+    pub reason: Option<String>,
 }
 
 /// Non-authoritative diagnostic evidence emitted by an evaluator.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct DiagnosticFinding {
+pub struct DiagnosticFinding {
     /// Impact of the diagnostic observation.
-    pub(crate) severity: Severity,
+    pub severity: Severity,
     /// Stable machine-readable category.
-    pub(crate) category: String,
+    pub category: String,
     /// Optional operator-facing explanation.
-    pub(crate) reason: Option<String>,
+    pub reason: Option<String>,
     /// Structured evidence used for debugging and auditability.
     #[serde(default)]
-    pub(crate) evidence: Value,
+    pub evidence: Value,
     /// Labels used for indexing and reporting.
     #[serde(default)]
-    pub(crate) tags: Vec<String>,
+    pub tags: Vec<String>,
 }
 
 /// Host-derived status after applying binding normalization and threshold policy.
@@ -246,7 +246,7 @@ pub(crate) enum EvaluationStatus {
 /// Severity scale used to qualify impact when a finding is relevant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Severity {
+pub enum Severity {
     /// No impact or not applicable.
     None,
     /// Minor impact.
@@ -262,7 +262,7 @@ pub(crate) enum Severity {
 /// Evaluator-native primary measurement. Interpretation belongs to the host profile.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum Measurement {
+pub enum Measurement {
     /// Boolean measurement.
     Binary { value: bool },
     /// Raw numeric observation with an optional unit identifier.

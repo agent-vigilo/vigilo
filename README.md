@@ -127,7 +127,17 @@ cargo build -p http-request-fixture --locked --target wasm32-wasip2 --release
 cargo test -p vigilo --locked --features evaluator-http-services --test evaluator_http_services
 ```
 
-CI includes these transport tests in the end-to-end coverage report.
+The public evaluator-operation tier also requires disposable PostgreSQL and the
+existing sentiment and HTTP Wasm fixtures:
+
+```bash
+cargo build -p sentiment-basic-en -p http-request-fixture --locked --target wasm32-wasip2 --release
+cargo test -p vigilo --locked --features evaluator-http-services --test evaluator_operations_services -- --nocapture
+```
+
+It verifies immutable publication, caller-bound registry access and test-specific
+HTTP policy/credentials through the public library. CI includes these transport
+and operation tests in the end-to-end coverage report and the same 80% gate.
 
 Use the database connection settings from `.github/workflows/build.yaml` for
 `DATABASE_URL`; direct fixture SQL needs the same explicit connection defaults as
@@ -185,6 +195,7 @@ cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services -
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features agent-http-services --test agent_http_services
 cargo llvm-cov --no-report -p vigilo --locked --features evaluator-http-services --test evaluator_http_services
+cargo llvm-cov --no-report -p vigilo --locked --features evaluator-http-services --test evaluator_operations_services
 cargo llvm-cov --no-report -p vigilo --locked --lib -- --ignored --nocapture --test-threads=4
 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_routing -- --nocapture
 VIGILO_E2E_MULTI_DATABASE=1 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e -- --nocapture

@@ -143,24 +143,3 @@ pub(crate) struct Evaluator {
     /// Time this evaluator row was last updated.
     pub(crate) updated_at: DateTime<Utc>,
 }
-
-/// Lightweight evaluator projection used by discovery/listing flows.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub(crate) struct EvaluatorSummary {
-    /// Registry namespace that owns the evaluator.
-    pub(crate) namespace: String,
-    /// Evaluator name within the namespace.
-    pub(crate) name: String,
-    /// Semver or project-defined version string.
-    pub(crate) version: String,
-    /// Human-readable evaluator description.
-    pub(crate) description: Option<String>,
-    /// JSON tag array or object used for discovery.
-    pub(crate) tags: serde_json::Value,
-    /// Additional registry metadata carried without schema-specific columns.
-    pub(crate) metadata: serde_json::Value,
-    /// Current evaluator lifecycle state.
-    pub(crate) state: EvaluatorState,
-    /// Optional operator-supplied reason for the current state.
-    pub(crate) state_reason: Option<String>,
-}

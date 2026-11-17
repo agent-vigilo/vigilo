@@ -175,3 +175,43 @@ fn directory_members_must_be_regular_files_and_invalid_writes_leave_no_artifact(
     assert!(!output.exists());
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
 }
+
+#[test]
+fn host_reader_uses_the_same_exact_archive_and_integrity_contract_as_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("portable.tar.gz");
+    write(&path, input()).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let file = load(&path).unwrap().unwrap();
+    let reader = load_archive(bytes.as_slice()).unwrap();
+    assert_eq!(reader.name, file.name);
+    assert_eq!(reader.version, file.version);
+    assert_eq!(reader.wasm, file.wasm);
+    assert_eq!(reader.abi, file.abi);
+    assert_eq!(reader.description, file.description);
+    assert_eq!(reader.tags, file.tags);
+    assert_eq!(reader.metadata, file.metadata);
+    for end in [0, 4, bytes.len() / 2, bytes.len() - 1] {
+        assert!(
+            load_archive(&bytes[..end]).is_err(),
+            "accepted truncated reader at {end}"
+        );
+    }
+    assert!(load_archive(archive(&[("../outside", b"", b'0')], None).as_slice()).is_err());
+    assert!(load_archive(archive(&[(WASM, b"", b'0')], Some(MAX_WASM + 1)).as_slice()).is_err());
+    let mut corrupt = bytes.clone();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 1;
+    assert!(load_archive(corrupt.as_slice()).is_err());
+    let (manifest, mut wasm) = read_archive(&path).unwrap();
+    wasm.push(1);
+    assert!(
+        load_archive(archive(&[(MANIFEST, &manifest, b'0'), (WASM, &wasm, b'0')], None).as_slice())
+            .is_err()
+    );
+    assert_eq!(
+        fs::read_dir(directory.path()).unwrap().count(),
+        1,
+        "reader parsing creates no files"
+    );
+}
