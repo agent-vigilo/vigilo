@@ -1,0 +1,18 @@
+flowchart TD
+    Start([Library export page]) --> Input{Collection, limits and cursor valid?}
+    Input -- No --> Error([Error; no successful page])
+    Input -- Yes --> Authority[Use fixed ordinary or sensitive reader credentials]
+    Authority --> Catalog[Read visible run and live routes with current caller context]
+    Catalog --> Visible{Run and required placements accessible?}
+    Visible -- No --> Error
+    Visible -- Yes --> Read[Commit control transaction; one bounded statement per route group]
+    Read --> Oversized{First record exceeds empty-page budget?}
+    Oversized -- Yes --> Error
+    Oversized -- No --> Append[Decode fitting prefix and validate actual encoded size]
+    Append --> Full{Page limit or lookahead reached?}
+    Full -- Yes --> Page([Return page and continuation])
+    Full -- No --> More{More route groups?}
+    More -- Yes --> Read
+    More -- No --> Done([Return final page without continuation])
+    Read -. Admission or database failure .-> Error
+    Append -. Decoding failure or first record cannot fit .-> Error

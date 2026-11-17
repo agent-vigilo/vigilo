@@ -1,0 +1,23 @@
+sequenceDiagram
+    actor Host
+    participant Reader as Export reader
+    participant Control as Control DB
+    participant Execution as Execution DB
+    Note over Host,Execution: New connections validate fixed credentials and optional trusted policy functions by database alias
+    Host->>Host: Authenticate and authorize operation
+    Host->>Reader: Collection, limits, optional cursor, caller context
+    Reader->>Reader: Validate collection, budgets and cursor binding
+    Reader->>Control: Short caller-scoped transaction: visible run and live routes
+    Control-->>Reader: Readable placements
+    Note over Reader,Control: Commit before remote reads
+    loop Participating route groups, within page budget
+        Reader->>Execution: One caller-scoped statement: admit key/size prefix, then fetch fitting bodies
+        Execution-->>Reader: Bounded metadata and selected records from one snapshot
+        Reader->>Reader: Validate encoding; commit caller context transaction
+    end
+    alt Successful page
+        Reader-->>Host: Typed records and optional continuation
+    else Authorization, route, size or database failure
+        Reader-->>Host: Error; no successful partial page
+    end
+    Note over Host,Reader: Each subsequent page rechecks current authority and routing
