@@ -92,10 +92,9 @@ mod tests {
         crate::db::test_support::seed_run_owner(&pool, run_id).await;
         let dataset_id = Uuid::now_v7();
         let dataset_version_id = Uuid::now_v7();
-        let profile = serde_yaml::from_str::<serde_json::Value>(include_str!(
-            "../../../../example/profile.yaml"
-        ))
-        .unwrap();
+        let profile =
+            serde_yaml::from_str::<serde_json::Value>(crate::contracts::run::PROFILE_FIXTURE)
+                .unwrap();
         let execution_plan = EvaluatorExecutionPlan::new(
             "aggregation-hash".to_string(),
             vec![ResolvedEvaluator {

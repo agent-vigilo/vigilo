@@ -72,6 +72,10 @@ collection pinned when resuming a specific installation.
 
 ### Releasing A Collection
 
+Automatic `vigilo setup` requires a published compatible collection. Publish that
+collection before the crate release that uses it. `--skip-evaluators` selects
+database-only setup.
+
 Maintainers run the **Release Core Evaluators** workflow independently of CLI
 releases. It tests and builds core evaluator crates, creates validated portable
 packages, and compares them with the latest published collection. Unchanged

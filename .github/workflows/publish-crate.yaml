@@ -65,6 +65,12 @@ jobs:
           esac
       - uses: dtolnay/rust-toolchain@stable
         if: steps.registry.outputs.published != 'true'
+      - name: Fetch locked build dependencies
+        if: steps.registry.outputs.published != 'true'
+        run: cargo fetch --locked
+      - name: Verify the packaged crate outside the workspace
+        if: steps.registry.outputs.published != 'true'
+        run: python3 scripts/releases/verify_package.py
       - name: Publish to crates.io
         if: steps.registry.outputs.published != 'true'
         env:

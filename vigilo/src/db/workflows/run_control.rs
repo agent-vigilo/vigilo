@@ -196,9 +196,11 @@ pub(crate) async fn deliver(
 async fn apply(pool: &PgPool, delivery: &Delivery) -> anyhow::Result<bool> {
     let mut tx = pool.begin().await?;
     // The fixed lock statement follows scope installation in the same submission.
+    // A non-key lock serializes control changes while allowing finishing results
+    // to check their parent FK before releasing the chunk that delivery needs.
     // Only canonical UUIDs enter this SQL; arbitrary fields remain bound below.
     let sql = format!(
-        "{}SELECT control_revision,execution_control FROM runs WHERE tenant_id='{}'::uuid AND id='{}'::uuid FOR UPDATE",
+        "{}SELECT control_revision,execution_control FROM runs WHERE tenant_id='{}'::uuid AND id='{}'::uuid FOR NO KEY UPDATE",
         crate::db::scope::system_settings(delivery.tenant_id, delivery.run_id),
         delivery.tenant_id,
         delivery.run_id,

@@ -207,10 +207,8 @@ impl Fixture {
             .unwrap();
         drop(prepared);
         let mut payload = canonical_json(
-            &serde_yaml::from_str::<serde_json::Value>(include_str!(
-                "../../../../../example/profile.yaml"
-            ))
-            .unwrap(),
+            &serde_yaml::from_str::<serde_json::Value>(crate::contracts::run::PROFILE_FIXTURE)
+                .unwrap(),
         );
         let gate = payload["scorecard"]["gates"][0].clone();
         payload["scorecard"]["gates"] = serde_json::Value::Array(

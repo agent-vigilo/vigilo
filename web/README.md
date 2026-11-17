@@ -5,6 +5,10 @@ documentation source of truth. Pages live in `docs/`; architecture diagram sourc
 live beside their pages as `.mmd` files. Shared glossary definitions live in
 `src/data/glossary.ts`.
 
+Downloadable case-storage examples live in `../vigilo/fixtures/examples/case-storage/`
+and are served at `/examples/case-storage/`. The crate's contract tests use these
+same packaged files; keep a single copy of each example.
+
 ## Development
 
 From the repository root, use Node.js 24 and the checked-in npm lockfile:

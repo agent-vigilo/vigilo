@@ -17,7 +17,7 @@ async fn cli_plan_recovers_process_death_freezes_inputs_and_never_dispatches() -
     tokio::fs::write(&config, &owner).await?;
     let namespace = format!("plan-fixture-{}", Uuid::now_v7());
     let evaluator = Uuid::now_v7();
-    let mut profile: Value = serde_yaml::from_str(include_str!("../../../example/profile.yaml"))?;
+    let mut profile: Value = serde_yaml::from_str(include_str!("../fixtures/run-profile.yaml"))?;
     profile["case_groups"][0]["evaluators"][0]["ref"] = json!(format!("{namespace}/score:1.0.0"));
     profile["agent"]["http"]["url"] = json!("http://127.0.0.1:1");
     tokio::fs::write(&profile_file, serde_json::to_vec(&profile)?).await?;

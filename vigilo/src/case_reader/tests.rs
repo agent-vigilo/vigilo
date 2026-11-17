@@ -268,7 +268,7 @@ impl Fixture {
             },
         );
         let profile: serde_json::Value =
-            serde_yaml::from_str(include_str!("../../../example/profile.yaml")).unwrap();
+            serde_yaml::from_str(crate::contracts::run::PROFILE_FIXTURE).unwrap();
         let execution =
             crate::contracts::evaluator_abi::EvaluatorExecutionPlan::new("1".repeat(64), vec![]);
         let profile_hash =

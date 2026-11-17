@@ -157,6 +157,16 @@ futures and host resolver implementations across run, export, dataset, evaluator
 and daemon interfaces. These service-free checks construct and drop I/O futures;
 the named integration tiers verify live authority, persistence and execution.
 
+The crate release workflow also verifies the actual package outside the checkout,
+including its library/binary tests and operation doctests. With Python 3.12+, run:
+
+```bash
+cargo fetch --locked
+python3 scripts/releases/verify_package.py --allow-dirty
+```
+
+The verification step runs offline after dependency preparation and does not publish.
+
 The end-to-end tier runs `multi_database_routing` and `multi_database_e2e`
 separately because they require the complete distributed dependency set. The
 workflow builds the evaluator Wasm and supplies the required database,

@@ -4,6 +4,10 @@
 //! `vigilo run validate`. They are intentionally transport-focused contracts used
 //! for parsing and validation before orchestration/runtime execution logic.
 
+/// Shared contract-test input, packaged independently of repository examples.
+#[cfg(test)]
+pub(crate) const PROFILE_FIXTURE: &str = include_str!("../../tests/fixtures/run-profile.yaml");
+
 use std::collections::BTreeMap;
 
 use serde::{

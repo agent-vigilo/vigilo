@@ -16,15 +16,13 @@ use super::{
     *,
 };
 
-const BATCH: &[u8] = include_bytes!("../../../../web/static/examples/case-storage/cases.jsonl");
-const SOURCE: &[u8] =
-    include_bytes!("../../../../web/static/examples/case-storage/source-fields.json");
-const INDEX: &[u8] =
-    include_bytes!("../../../../web/static/examples/case-storage/batch-index.json");
+const BATCH: &[u8] = include_bytes!("../../../fixtures/examples/case-storage/cases.jsonl");
+const SOURCE: &[u8] = include_bytes!("../../../fixtures/examples/case-storage/source-fields.json");
+const INDEX: &[u8] = include_bytes!("../../../fixtures/examples/case-storage/batch-index.json");
 const MANIFEST: &[u8] =
-    include_bytes!("../../../../web/static/examples/case-storage/dataset-manifest.json");
+    include_bytes!("../../../fixtures/examples/case-storage/dataset-manifest.json");
 const REFERENCE: &[u8] =
-    include_bytes!("../../../../web/static/examples/case-storage/dataset-reference.json");
+    include_bytes!("../../../fixtures/examples/case-storage/dataset-reference.json");
 
 fn reference(schema: StorageFormat, bytes: &[u8]) -> ObjectRef {
     ObjectRef::for_bytes(
@@ -789,8 +787,7 @@ fn run_roots_validate_shard_totals_and_checked_integer_bounds() {
 
 #[test]
 fn run_configuration_is_bounded_and_keeps_cases_outside_snapshot() {
-    let profile: Value =
-        serde_yaml::from_str(include_str!("../../../../example/profile.yaml")).unwrap();
+    let profile: Value = serde_yaml::from_str(crate::contracts::run::PROFILE_FIXTURE).unwrap();
     let plan = crate::contracts::evaluator_abi::EvaluatorExecutionPlan::new("0".repeat(64), vec![]);
     let configuration = RunConfiguration {
         schema: StorageFormat::RunConfiguration,

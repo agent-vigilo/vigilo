@@ -8,6 +8,7 @@ const config: Config = {
   title: 'Agent Vigilo',
   tagline: 'Distributed Evaluation and Deployment Gating for Generative AI Systems',
   favicon: 'img/favicon.svg',
+  staticDirectories: ['static', '../vigilo/fixtures'],
   headTags: [
     {
       tagName: 'link',

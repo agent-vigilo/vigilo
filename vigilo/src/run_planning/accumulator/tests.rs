@@ -9,7 +9,7 @@ use crate::{
     models::run_chunk::RunChunkDraft,
 };
 fn profile() -> RunProfile {
-    serde_yaml::from_str(include_str!("../../../../example/profile.yaml")).unwrap()
+    serde_yaml::from_str(crate::contracts::run::PROFILE_FIXTURE).unwrap()
 }
 fn record(ordinal: i32) -> CaseRecord {
     let source = json!({"id":Uuid::from_u128(ordinal as u128+1),"task_type":"classification","tags":if ordinal%2==0{vec!["selected"]}else{vec![]},"input":{"text":"hello"}});

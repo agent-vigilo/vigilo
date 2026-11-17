@@ -552,3 +552,80 @@ mod scope_tests;
 
 #[path = "revocation_scope_tests.rs"]
 mod revocation_scope_tests;
+
+/// A finishing result must pass its parent FK while control waits on its chunk.
+/// Otherwise parent/chunk lock inversion aborts the worker and delays quiescence.
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn control_delivery_allows_finishing_result_foreign_keys(pool: PgPool) {
+    use std::time::Duration;
+
+    for state in [ExecutionControl::Paused, ExecutionControl::Revoked] {
+        let (run, _) = seed(&pool).await;
+        let execution = Uuid::now_v7();
+        let attempt = Uuid::now_v7();
+        sqlx::query("INSERT INTO executions(id,run_id,run_shard,chunk_id,case_id,case_hash,profile_group_id,task_type,evaluation_profile_id,evaluation_profile_version) VALUES($1,$2,0,$2,$1,'fixture','default','classification','fixture','1')")
+            .bind(execution).bind(run).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO execution_attempts(id,execution_id,run_id,run_shard,attempt_no) VALUES($1,$2,$3,0,1)")
+            .bind(attempt).bind(execution).bind(run).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE run_chunks SET status='leased',lease_token=gen_random_uuid(),leased_until=clock_timestamp()+interval '60 seconds' WHERE run_id=$1")
+            .bind(run).execute(&pool).await.unwrap();
+        let mut worker = pool.begin().await.unwrap();
+        let worker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *worker)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM run_chunks WHERE run_id=$1 FOR UPDATE")
+            .bind(run)
+            .execute(&mut *worker)
+            .await
+            .unwrap();
+        let control_pool = pool.clone();
+        let mut control =
+            tokio::spawn(async move { apply(&control_pool, &delivery(run, 1, state)).await });
+        let waiting = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE 'UPDATE run_chunks SET execution_control%')")
+                    .bind(worker_pid).fetch_one(&pool).await.unwrap();
+                if blocked { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await;
+        sqlx::query("SET LOCAL lock_timeout='500ms'")
+            .execute(&mut *worker)
+            .await
+            .unwrap();
+        let result = sqlx::query("INSERT INTO evaluator_results(run_id,run_shard,execution_id,attempt_id,binding_id,evaluator_id,evaluator_version,evaluator_profile_id,evaluator_profile_version,dimension,outcome,error_code,error_message,normalization_policy_hash,pass_threshold) VALUES($1,0,$2,$3,'fixture',$2,'1','fixture','1','quality','error','fixture','retained','fixture',0.5)")
+            .bind(run).bind(execution).bind(attempt).execute(&mut *worker).await;
+        if result.is_ok() {
+            worker.commit().await.unwrap();
+        } else {
+            worker.rollback().await.unwrap();
+        }
+        let applied = tokio::time::timeout(Duration::from_secs(5), &mut control).await;
+        if applied.is_err() {
+            control.abort();
+            let _ = control.await;
+        }
+        assert!(waiting.is_ok(), "control never reached the owned chunk");
+        assert!(
+            result.is_ok(),
+            "finishing result was blocked by control: {result:?}"
+        );
+        assert!(
+            !applied.unwrap().unwrap().unwrap(),
+            "live lease was incorrectly reported quiescent"
+        );
+        let retained: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM evaluator_results WHERE run_id=$1 AND error_message='retained'",
+        )
+        .bind(run)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, 1);
+        let current: (ExecutionControl,i64,bool) = sqlx::query_as("SELECT execution_control,control_revision,lease_token IS NOT NULL FROM run_chunks WHERE run_id=$1")
+            .bind(run).fetch_one(&pool).await.unwrap();
+        assert_eq!(current, (state, 1, true));
+    }
+}

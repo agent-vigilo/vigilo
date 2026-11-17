@@ -55,6 +55,8 @@ from overwriting a newer decision. Newly seeded chunks inherit their run control
 shard destinations reconcile control after copying and before opening admission.
 
 Each delivery applies its claimed work identity to the execution transaction.
+A non-key run-row lock serializes control changes while allowing finishing results
+to validate their parent foreign keys and release their chunk locks.
 Quiescence reads, acknowledgments and retry updates use the same identity in their
 own transactions. Control connections are released before remote I/O; revisions
 and claim tokens fence delayed acknowledgments and retries.

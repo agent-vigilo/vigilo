@@ -805,7 +805,7 @@ mod tests {
     #[test]
     fn aggregation_policy_hash_includes_all_binding_policy() {
         let mut profile: RunProfile =
-            serde_yaml::from_str(include_str!("../../../../example/profile.yaml")).unwrap();
+            serde_yaml::from_str(crate::contracts::run::PROFILE_FIXTURE).unwrap();
         let required_hash = compute_aggregation_policy_hash(&profile).unwrap();
         let binding = &mut profile.case_groups[0].evaluators[0];
         binding.required = false;

@@ -1,0 +1,100 @@
+# Shared deterministic input for contract and persistence tests.
+# Runnable deployment examples are maintained independently under example/.
+profile_id: qwen_sentiment_release
+profile_version: 1.0.0
+description: Example profile that evaluates a local llama.cpp-backed Qwen sentiment agent.
+
+defaults:
+  max_attempts: 2
+  request_timeout_secs: 120
+  # Hard blocking findings can fail the execution even when aggregate_score is high.
+  fail_on_any_blocking_failure: true
+  # Overall score gate for the total execution aggregate_score.
+  min_execution_score: 0.85
+
+persistence:
+  mode: full
+  persist_raw_outputs: failures_only
+  persist_evaluator_evidence: true
+
+# Run-level gates are evaluated after all shard scorecards are merged.
+scorecard:
+  gates:
+    - id: quality_release
+      dimension: quality
+      case_group: sentiment_classification
+      min_mean_score: 0.85
+      min_coverage: 1.0
+      max_error_rate: 0.0
+      max_abstention_rate: 0.0
+
+agent:
+  provider: llama.cpp
+  response:
+    schema_version: 1.0.0
+    interpretation:
+      format: json
+      mapping:
+        items:
+          - mode: single
+            item:
+              type: message
+              content:
+                - media_type: text/plain
+                  source:
+                    representation: inline_text
+                    selection:
+                      pointer: /choices/0/message/content
+  name: qwen2.5-0.5b-instruct
+  version: q4_k_m
+  model: qwen2.5-0.5b-instruct-q4_k_m.gguf
+  prompt_config_id: qwen-sentiment-text
+  prompt_config_version: 1.0.0
+  http:
+    method: POST
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
+    timeout_secs: 120
+  config:
+    request_format: openai_compatible_chat_completions
+    temperature: 0.0
+    max_tokens: 96
+    system_prompt: |
+      Rewrite the user message as a short English sentence preserving its sentiment.
+      Return only the rewritten sentence, without JSON or commentary.
+
+case_groups:
+  - id: sentiment_classification
+    description: Evaluates sentiment classification responses from the local agent.
+    applies_to:
+      task_type: classification
+
+    evaluators:
+      - id: sentiment_score
+        ref: vigilo/sentiment-basic-en:0.1.0
+        # Required bindings must return one valid measurement before aggregation.
+        required: true
+        # Profile-owned aggregation bucket.
+        dimension: quality
+        # This example uses the overall score gate rather than a hard blocker.
+        blocking: false
+        # Total contribution of this evaluator inside the quality dimension.
+        weight: 1.0
+        normalization:
+          method: ordinal
+          values:
+            positive: 1.0
+            neutral: 0.5
+            negative: 0.0
+        # Host-owned judgment threshold; evaluators do not pass or fail releases.
+        pass_threshold: 0.5
+        config:
+          mode: example
+
+    aggregation:
+      dimensions:
+        quality:
+          method: weighted_mean
+          # Failed host judgments in this dimension are not hard blockers.
+          blocking: false
+          # Quality contributes to the total execution aggregate_score.
+          weight: 1.0
