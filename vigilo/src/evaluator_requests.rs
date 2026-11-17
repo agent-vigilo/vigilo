@@ -1,5 +1,9 @@
 //! Worker-owned evaluator HTTP configuration, credentials and synchronous ABI bridge.
 //!
+//! Supports authorized requests made by evaluators, including Model-as-a-Judge
+//! implementations. This is separate from Direct Probe target invocation: the
+//! evaluator owns provider payload interpretation and returns a measurement.
+//!
 //! Operators bind verified evaluator IDs and exact destinations to credential names.
 //! Each invocation freezes those bindings, caches secrets only until expiry, and
 //! owns cancellation. The async transport runs on the caller's runtime while Wasm

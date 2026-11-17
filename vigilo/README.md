@@ -58,6 +58,7 @@ The caller owns its runtime and presentation. See the
 
 ## Explore
 
+- [Harnesses and evaluators](https://agentvigilo.com/docs/glossary#harnesses-and-evaluators)
 - [CLI reference](https://agentvigilo.com/docs/guides/cli-reference)
 - [Create evaluators](https://agentvigilo.com/docs/guides/creating-evaluators)
 - [Publish evaluators](https://agentvigilo.com/docs/guides/publishing)

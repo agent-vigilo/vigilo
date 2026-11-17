@@ -64,7 +64,7 @@ sequenceDiagram
                 Vigilo->>WASM: Warm evaluator components
                 WASM-->>Vigilo: Warmup result
                 Vigilo->>Queue: Hold delivery unacked while chunk is owned
-                opt Agent invocation
+                opt Direct Probe harness invocation
                     Vigilo->>Vigilo: Validate profile byte limits against worker ceilings
                     opt Profile references a credential
                         Vigilo->>Credentials: Resolve trusted binding with runtime IDs and destination
@@ -88,7 +88,7 @@ sequenceDiagram
                     else Requirements satisfied
                         Vigilo->>WASM: Dispatch pinned ABI adapter evaluate
                         WASM->>Vigilo: Bounded read-resource calls when needed
-                        opt Evaluator requests HTTP
+                        opt Evaluator requests HTTP (including Model-as-a-Judge)
                             WASM->>Vigilo: send-http-request
                             Vigilo->>Vigilo: Authorize snapshot, acquire permit, resolve bound credential
                             Vigilo->>Vigilo: Pin approved DNS addresses, execute within shared time and byte budgets

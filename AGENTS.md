@@ -31,6 +31,10 @@ This file records Vigilo-specific constraints that are easy to miss. A nearer
   semantic meaning from field names, content, or familiar formats. Define defaults
   and fallback behavior explicitly; failed configured behavior must not silently
   switch to another interpretation.
+- Use the [canonical glossary](web/src/data/glossary.ts) for harness vocabulary
+  (Direct Probe, Delegated Trial) and evaluator vocabulary (Deterministic / Code
+  Scorer, Model-as-a-Judge). Completion delivery is independent of harness type;
+  performance/test harness terminology remains separate.
 - Keep evaluator interface vocabulary as `input` and `output`. Preserve the
   strict evaluator identifier format `<namespace>/<name>:<version>`.
 - Treat `vigilo/wit/evaluator/v1.0.0/evaluator.wit` as the sole pre-release source of

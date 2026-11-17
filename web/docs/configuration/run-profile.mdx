@@ -198,6 +198,15 @@ ceiling fails before HTTP invocation. Run validation cannot determine every work
 local ceiling. See [runtime limits](./runtime-limits.mdx#agent-http-bodies) for flags,
 defaults, and failure behavior.
 
+### Harness boundary
+
+`agent.http` configures the
+<GlossaryTerm term="direct-probe">Direct Probe (Direct Execution of Target Agent)</GlossaryTerm>
+harness. Evaluator bindings select the scorers that measure its evidence. Harness
+and evaluator types are independent, and neither selects a completion-delivery
+protocol. <GlossaryTerm term="delegated-trial">Delegated Trial (Harness-Orchestrated Session)</GlossaryTerm>
+is not a selectable execution mode in this profile.
+
 ### Invocation boundary
 
 Each attempt receives one complete, bounded HTTP response within its configured

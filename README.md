@@ -25,11 +25,19 @@ It focuses on the parts of AI evaluation that become hard as systems grow: idemp
 - **Ship versioned evaluators**: publish WASI Preview 2 WebAssembly evaluators with strict WIT contracts.
 - **Protect the runtime**: Wasmtime fuel, memory, timeout, log, and concurrency limits isolate evaluator execution.
 - **Avoid lost events**: durable outbox ledger plus hot delivery queue, RabbitMQ publisher confirms, and idempotency keys.
-- **Gate deployments**: turn evaluator measurements and host-owned profile policy into dimension scores, total aggregate scores, and reproducible release decisions.
+- **Gate deployments**: turn evaluator measurements and host-owned profile policy into dimension scores, total aggregate scores, and auditable release decisions.
+
+## Harnesses And Evaluators
+
+The **Direct Probe (Direct Execution of Target Agent)** harness invokes the target
+and captures evidence. **Deterministic (Code Scorer)** and **Model-as-a-Judge**
+evaluators measure evidence; host policy owns normalization and release gates.
+See the [canonical vocabulary](https://agentvigilo.com/docs/glossary#harnesses-and-evaluators)
+for session ownership, evaluator types and completion-delivery boundaries.
 
 ## How Results Are Calculated
 
-Each evaluator invocation returns one measurement or abstention plus optional diagnostics. The profile binding owns normalization, threshold, dimension, weight, requiredness, and blocking policy. Missing, errored, abstained, duplicated, or invalid required output produces an errored execution aggregate with no score. An execution passes when completeness is satisfied, `aggregate_score >= min_execution_score`, and no host-derived blocking result fails.
+Each evaluator invocation returns one measurement or abstention plus optional diagnostics. The profile binding owns normalization, threshold, dimension, weight, requiredness, and blocking policy. Missing, errored, abstained, duplicated, or invalid required output produces an errored execution aggregate with no score. An execution passes when completeness is satisfied, `aggregate_score >= min_execution_score`, and the configured blocking policy permits it.
 
 Run scorecard gates enforce dimension or evaluator thresholds across the full run, including configured case-group and tag slices. Shards publish bounded rollups; the coordinator merges those rollups and persists the authoritative scorecard without scanning execution rows centrally.
 

@@ -7,6 +7,11 @@ Guide: [Creating Evaluators](https://agentvigilo.com/docs/guides/creating-evalua
 Scoped guidance: `evaluators/AGENTS.md`
 
 Each evaluator is sourced as an independent Rust library crate.
+**Deterministic (Code Scorer)** and **Model-as-a-Judge** describe evaluator types;
+both implement the same `input`/`output` ABI. The harness obtains target evidence,
+and host policy normalizes measurements and applies gates. The bundled sentiment
+evaluator is a Code Scorer. See the
+[canonical vocabulary](https://agentvigilo.com/docs/glossary#harnesses-and-evaluators).
 
 ## Build Instructions
 

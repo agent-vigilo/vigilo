@@ -1,4 +1,7 @@
-//! Worker-side client for invoking the configured agent endpoint.
+//! Direct Probe (Direct Execution of Target Agent) harness transport.
+//!
+//! Invokes the target interface and captures evidence; it does not launch the
+//! target process or score its response. Evaluators measure the captured evidence.
 //!
 //! This module owns request-format adaptation, HTTP transport, and response
 //! capture without inferring response semantics. It returns bounded

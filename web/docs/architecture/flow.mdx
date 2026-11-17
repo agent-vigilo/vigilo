@@ -19,6 +19,23 @@ results, and publishes gate decisions after exact settlement.
 
 ---
 
+## Harness And Evaluator Boundary
+
+The worker uses a <GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm>
+harness to invoke the configured target and capture evidence. Evaluators consume
+that evidence and return measurements or abstentions; host policy owns
+normalization, aggregation and gates.
+
+A <GlossaryTerm term="code-scorer">Deterministic (Code Scorer)</GlossaryTerm>
+measures through repeatable code. A
+<GlossaryTerm term="model-as-a-judge">Model-as-a-Judge</GlossaryTerm> obtains a
+model assessment through permitted evaluator HTTP and interprets it in evaluator
+code. Both use the same versioned `input`/`output` ABI. The target invocation and
+a judge request have different ownership and permissions even when both use HTTP.
+
+The [glossary](/docs/glossary#harnesses-and-evaluators) defines session ownership
+and separates harness type from synchronous or asynchronous completion.
+
 ## Overview
 
 At a high level, the system follows a fan-out / fan-in pattern:

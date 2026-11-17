@@ -7,6 +7,11 @@ Use this crate as a single-evaluator template. See
 
 Shared evaluator guidance: `evaluators/AGENTS.md`
 
+This evaluator is a **Deterministic (Code Scorer)**: identical declared evidence
+and configuration produce the same lexicon measurement. The harness obtains target
+evidence; this evaluator measures it. Host policy owns normalization and gates.
+See the [component vocabulary](https://agentvigilo.com/docs/glossary#harnesses-and-evaluators).
+
 ## Input
 
 The evaluator consumes explicitly mapped `text/plain` message parts in

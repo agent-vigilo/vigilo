@@ -1,5 +1,9 @@
 //! Execution processing workflow.
 //!
+//! The Direct Probe harness obtains target evidence before evaluator execution.
+//! Code Scorers and Model-as-a-Judge implementations share the same evaluator
+//! boundary; host policy owns normalization, aggregation and gates.
+//!
 //! This module owns the worker-side path from a leased dataset case to persisted
 //! evaluator results, execution aggregate, and terminal execution transition.
 //! It also owns evaluator runtime lookup and single-flight component loading so

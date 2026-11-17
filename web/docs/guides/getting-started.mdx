@@ -27,6 +27,20 @@ Instead of a one-off script that prints a score, Vigilo gives you a system for p
 - **Execution is distributed.** Coordinators create chunk-ready outbox event records that are published through RabbitMQ; workers claim the identified chunks, call the agent target, run evaluators, and persist normalized results.
 - **The CLI is automation-friendly.** Commands return structured output, support quiet mode, and expose watch/status/results/export flows for CI and agentic clients.
 
+## Harnesses And Evaluators
+
+The <GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm> harness invokes
+your target agent and captures evidence. An
+<GlossaryTerm term="evaluator">evaluator</GlossaryTerm> measures that evidence.
+The bundled sentiment evaluator is a
+<GlossaryTerm term="code-scorer">Deterministic (Code Scorer)</GlossaryTerm>.
+<GlossaryTerm term="model-as-a-judge">Model-as-a-Judge</GlossaryTerm> evaluators
+use model assessments through authorized host requests; a judge is not bundled.
+Both return measurements to the same host-owned scoring and gate policy.
+
+See the [canonical vocabulary](/docs/glossary#harnesses-and-evaluators) for
+harness and evaluator definitions, including the session-orchestration boundary.
+
 ## The Mental Model
 
 ```text

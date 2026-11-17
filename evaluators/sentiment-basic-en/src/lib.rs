@@ -1,4 +1,6 @@
-//! English lexicon sentiment over explicitly mapped text message content.
+//! Deterministic (Code Scorer) for English lexicon sentiment over mapped text.
+//! The harness obtains evidence; this evaluator returns an ordinal measurement,
+//! leaving normalization and release gates to host policy.
 //! The evaluator never substitutes the case prompt, guesses JSON fields, or scores
 //! tool arguments. Resource-backed text is read through bounded host capabilities.
 wit_bindgen::generate!({
