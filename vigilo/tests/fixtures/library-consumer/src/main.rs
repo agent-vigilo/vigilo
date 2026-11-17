@@ -1,4 +1,5 @@
 //! Independent package proving the supported library boundary without CLI or SQL.
+mod surface;
 use vigilo::operations::{
     Client,
     Config,
@@ -48,6 +49,7 @@ fn main() {
             "0198f36d-f7db-7d90-998c-d60d498dd980".parse().unwrap(),
         )
         .unwrap();
+        surface::check(&client, &restricted, context);
         drop(restricted.run_results(context, run_id));
         drop(restricted.run_status(
             context,

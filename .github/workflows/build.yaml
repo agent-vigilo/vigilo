@@ -45,6 +45,7 @@ jobs:
         with:
           components: rustfmt
       - run: cargo +nightly fmt --all -- --check
+      - run: cargo +nightly fmt --manifest-path vigilo/tests/fixtures/library-consumer/Cargo.toml -- --check
 
   clippy:
     name: Clippy
@@ -93,6 +94,8 @@ jobs:
           cargo run --manifest-path vigilo/tests/fixtures/library-consumer/Cargo.toml --offline
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      - name: Verify sealed operation proofs
+        run: cargo test -p vigilo --locked --doc operations
       - name: Run service-free tests with coverage
         if: matrix.coverage
         run: >-

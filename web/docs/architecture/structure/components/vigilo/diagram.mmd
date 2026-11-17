@@ -97,6 +97,8 @@ flowchart TD
     CliRouter -->|"Runs setup commands using"| SetupManager
     CliRouter -->|"Runs evaluator commands using"| EvaluatorRegistry
     CliRouter -->|"Runs run commands using"| RunPlanner
+    LibraryHost -->|"RunClient prepares and accepts immutable work"| RunPlanner
+    HostedRuntime -->|"Caller-bound preparation and acceptance"| RunPlanner
     CliRouter -->|"Runs export and placement administration using"| RunQueries
     CliRouter -->|"Starts and runs service mode using"| CoordinatorFacade
     CliRouter -->|"Starts and runs service mode using"| WorkerFacade

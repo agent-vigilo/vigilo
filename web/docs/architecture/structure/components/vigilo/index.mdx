@@ -66,6 +66,31 @@ and results-summary output. Other commands call private library workflows. CLI a
 adapters share orchestration and worker cycles. Neither pools nor persistence
 records are part of the public operation API.
 
+## Operation boundary
+
+The public `operations` module returns typed values for interface adapters:
+
+| Operation | Library entry point |
+| --- | --- |
+| Run preparation and acceptance | `RunClient` |
+| Status, summary and execution control | `Client` and caller-bound `HostedUser` |
+| Bounded ordinary and sensitive exports | `export::ExportClient` and `export::SensitiveExportClient` |
+| Dataset upload, resume and cleanup | `datasets::DatasetClient` |
+| Evaluator discovery, publication, state and tests | `evaluators::EvaluatorClient` |
+| Coordinator and worker execution | Handles from `HostedRuntime` |
+
+Prepared runs, datasets and evaluator packages are sealed verification results;
+interfaces cannot deserialize them from a request body. Preparation validates the
+input and returns the proof consumed by acceptance or publication. Public async
+operations return `Send` futures for use on the host's executor. The host owns
+request authentication, authorization and response formatting; operation errors
+have safe display text, while dependency error chains are trusted diagnostics.
+
+Setup, database placement administration, source compilation and local authoring
+commands are operator CLI tools. They share private library workflows without
+exposing database executors or CLI parser types as application operations.
+`vigilo::cli::run` is the process entry adapter, not the embedding API.
+
 ## Hosted runtime
 
 `operations::HostedRuntime::new(HostedConfig)` validates the supplied fixed database

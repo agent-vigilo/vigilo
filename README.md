@@ -152,7 +152,10 @@ integration tier so the command remains complete.
 
 The independent library consumer fixture lives in `vigilo/tests/fixtures/library-consumer`.
 CI seeds its lockfile from the workspace lockfile and builds it as a separate package
-using only the supported public API.
+using only the supported public API. It checks typed operation results, `Send`
+futures and host resolver implementations across run, export, dataset, evaluator
+and daemon interfaces. These service-free checks construct and drop I/O futures;
+the named integration tiers verify live authority, persistence and execution.
 
 The end-to-end tier runs `multi_database_routing` and `multi_database_e2e`
 separately because they require the complete distributed dependency set. The

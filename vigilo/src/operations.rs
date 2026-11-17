@@ -7,6 +7,25 @@
 //! an authorized operator. Restricted reads use explicit trusted caller context
 //! and fixed-role pools; authentication and database policy installation belong to
 //! the embedding host.
+//!
+//! Preparation returns sealed, verified work rather than deserializable request
+//! objects. Interfaces pass ordinary input to the preparation methods; they cannot
+//! reconstruct the resulting proofs from user JSON.
+//!
+//! ```compile_fail
+//! use vigilo::operations::PreparedRun;
+//! let _: PreparedRun = serde_json::from_str("{}").unwrap();
+//! ```
+//!
+//! ```compile_fail
+//! use vigilo::operations::datasets::PreparedDataset;
+//! let _: PreparedDataset = serde_json::from_str("{}").unwrap();
+//! ```
+//!
+//! ```compile_fail
+//! use vigilo::operations::evaluators::PreparedPackage;
+//! let _: PreparedPackage = serde_json::from_str("{}").unwrap();
+//! ```
 
 pub(crate) mod cancellation;
 pub(crate) mod control;
