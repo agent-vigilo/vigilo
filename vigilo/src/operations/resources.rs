@@ -216,8 +216,8 @@ pub struct Credential {
 
 /// Short-lived S3 signing material. Deliberately lacks Debug/Serialize. The SDK
 /// refreshes it through the same request-bound resolver; no ambient chain is used.
-pub struct StorageCredentials {
-    pub request: Request,
+pub struct StorageCredentials<R = Request> {
+    pub request: R,
     pub authentication: StorageAuthentication,
     pub expires_at: SystemTime,
 }
@@ -233,6 +233,67 @@ pub enum StorageAuthentication {
     },
 }
 
+/// Storage activity authenticated against an upload's current ledger authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DatasetStoragePurpose {
+    Upload,
+    Cleanup,
+}
+
+/// Core-verified upload identity. No run ID or accepted-plan identity is invented
+/// for dataset operations. The host authorizes credentials for this exact request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatasetRequest {
+    caller: UserContext,
+    upload_id: Uuid,
+    binding_hash: String,
+    purpose: DatasetStoragePurpose,
+}
+impl DatasetRequest {
+    pub(crate) fn new(
+        caller: UserContext,
+        upload_id: Uuid,
+        binding_hash: String,
+        purpose: DatasetStoragePurpose,
+    ) -> Self {
+        Self {
+            caller,
+            upload_id,
+            binding_hash,
+            purpose,
+        }
+    }
+    pub fn caller(&self) -> UserContext {
+        self.caller
+    }
+    pub fn upload_id(&self) -> Uuid {
+        self.upload_id
+    }
+    pub fn binding_hash(&self) -> &str {
+        &self.binding_hash
+    }
+    pub fn purpose(&self) -> DatasetStoragePurpose {
+        self.purpose
+    }
+    /// Check the host's expected nonsecret owner configuration using core's
+    /// canonical binding identity. This performs no I/O or credential lookup.
+    pub fn validate_storage_binding(&self, storage_toml: &str) -> Result<(), Error> {
+        if storage_toml.len() > 64 * 1024 {
+            return Err(Error::Invalid);
+        }
+        let owner: OwnerConfig = toml::from_str(storage_toml).map_err(|_| Error::Invalid)?;
+        owner
+            .validate(&Default::default())
+            .map_err(|_| Error::Invalid)?;
+        owner.validate_injected().map_err(|_| Error::Invalid)?;
+        if owner.binding_hash().map_err(|_| Error::Invalid)? != self.binding_hash {
+            return Err(Error::Invalid);
+        }
+        Ok(())
+    }
+}
+
 /// Host-owned dependency boundary, shared across workers. Implementations must
 /// authorize the exact supplied context and avoid returning another request's
 /// cached reply. Defaults deny credentials; no environment or local file fallback
@@ -243,6 +304,14 @@ pub trait Resolver: Send + Sync {
         Box::pin(async { Err(Error::Denied) })
     }
     fn storage_credentials(&self, _request: Request) -> Resolution<'_, StorageCredentials> {
+        Box::pin(async { Err(Error::Denied) })
+    }
+    /// Supply upload/cleanup signing material after verifying the exact caller,
+    /// upload and pinned namespace. Default denial never selects ambient credentials.
+    fn dataset_storage_credentials(
+        &self,
+        _request: DatasetRequest,
+    ) -> Resolution<'_, StorageCredentials<DatasetRequest>> {
         Box::pin(async { Err(Error::Denied) })
     }
 }

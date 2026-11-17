@@ -12,7 +12,6 @@ use anyhow::{
     Result,
     ensure,
 };
-use sqlx::PgPool;
 use tokio::{
     io::{
         AsyncReadExt,
@@ -35,6 +34,7 @@ use crate::{
     },
     db::workflows::dataset_upload::{
         self as ledger,
+        access::Access,
         batches as checkpoint,
     },
 };
@@ -62,7 +62,7 @@ struct Pending {
 
 /// One ingestion owns one bounded metadata group and reuses its prepared spool.
 pub(super) struct Uploader<'a> {
-    db: &'a PgPool,
+    db: Access<'a>,
     store: &'a dyn BlobStorage,
     upload: &'a Upload,
     lease: Lease,
@@ -75,7 +75,7 @@ pub(super) struct Uploader<'a> {
 
 impl<'a> Uploader<'a> {
     pub(super) fn new(
-        db: &'a PgPool,
+        db: impl Into<Access<'a>>,
         store: &'a dyn BlobStorage,
         upload: &'a Upload,
         lease: Lease,
@@ -83,7 +83,7 @@ impl<'a> Uploader<'a> {
         cancel: &'a CancellationToken,
     ) -> Self {
         Self {
-            db,
+            db: db.into(),
             store,
             upload,
             lease,
@@ -240,7 +240,12 @@ impl ReadLease {
             next_renewal: Instant::now(),
         }
     }
-    pub(super) async fn budget(&mut self, db: &PgPool, lease: Lease) -> Result<Budget> {
+    pub(super) async fn budget<'b>(
+        &mut self,
+        db: impl Into<Access<'b>> + Send,
+        lease: Lease,
+    ) -> Result<Budget> {
+        let db = db.into();
         let budget = Budget::standard();
         let now = Instant::now();
         if now >= self.next_renewal {

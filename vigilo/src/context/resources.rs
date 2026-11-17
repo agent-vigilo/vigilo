@@ -29,12 +29,35 @@ use crate::{
     },
     contracts::case_storage::FormatLimits,
     operations::resources::{
+        DatasetRequest,
         Request,
         Resolver,
     },
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bind write/cleanup signing to a verified dataset row without resolving a
+/// fabricated run. Credential callbacks retain the same bounds and redaction.
+pub(crate) fn dataset_owner(
+    owner: &OwnerConfig,
+    resolver: Arc<dyn Resolver>,
+    permits: Arc<tokio::sync::Semaphore>,
+    request: DatasetRequest,
+) -> Result<OwnerConfig> {
+    owner.validate_injected()?;
+    ensure!(
+        owner.binding_hash()? == request.binding_hash(),
+        "dataset storage binding changed"
+    );
+    owner
+        .clone()
+        .with_credentials(SharedCredentialsProvider::new(StorageProvider {
+            resolver,
+            permits,
+            request: StorageRequest::Dataset(request),
+        }))
+}
 
 /// Runtime-wide host admission with request-local immutable identity.
 #[derive(Clone)]
@@ -56,8 +79,18 @@ impl Default for Configuration {
 #[derive(Clone)]
 struct StorageProvider {
     resolver: Arc<dyn Resolver>,
-    request: Request,
+    request: StorageRequest,
     permits: Arc<tokio::sync::Semaphore>,
+}
+#[derive(Clone)]
+enum StorageRequest {
+    Run(Request),
+    Dataset(DatasetRequest),
+}
+impl From<Request> for StorageRequest {
+    fn from(request: Request) -> Self {
+        Self::Run(request)
+    }
 }
 impl std::fmt::Debug for StorageProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -78,21 +111,40 @@ impl ProvideCredentials for StorageProvider {
                     .acquire()
                     .await
                     .map_err(|_| crate::operations::resources::Error::Unavailable)?;
-                self.resolver
-                    .storage_credentials(self.request.clone())
-                    .await
+                match &self.request {
+                    StorageRequest::Run(request) => {
+                        let value = self.resolver.storage_credentials(request.clone()).await?;
+                        Ok::<_, crate::operations::resources::Error>((
+                            value.request == *request,
+                            value.authentication,
+                            value.expires_at,
+                        ))
+                    }
+                    StorageRequest::Dataset(request) => {
+                        let value = self
+                            .resolver
+                            .dataset_storage_credentials(request.clone())
+                            .await?;
+                        Ok::<_, crate::operations::resources::Error>((
+                            value.request == *request,
+                            value.authentication,
+                            value.expires_at,
+                        ))
+                    }
+                }
             })
             .await
             .map_err(|_| invalid())?
             .map_err(|_| invalid())?;
+            let (matches, authentication, expires_at) = value;
             let crate::operations::resources::StorageAuthentication::S3 {
                 access_key,
                 secret_key,
                 session_token,
-            } = value.authentication;
+            } = authentication;
             let secret_valid = |value: &str| !value.is_empty() && value.len() <= 16_384;
-            if value.request != self.request
-                || value.expires_at <= std::time::SystemTime::now()
+            if !matches
+                || expires_at <= std::time::SystemTime::now()
                 || !secret_valid(&access_key)
                 || !secret_valid(&secret_key)
                 || session_token.as_deref().is_some_and(|v| !secret_valid(v))
@@ -103,7 +155,7 @@ impl ProvideCredentials for StorageProvider {
                 access_key,
                 secret_key,
                 session_token,
-                Some(value.expires_at),
+                Some(expires_at),
                 "host-resolver",
             ))
         })
@@ -138,6 +190,15 @@ impl Services {
 }
 
 impl Context {
+    pub(crate) fn dataset_permits(&self) -> Arc<tokio::sync::Semaphore> {
+        self.4.permits.clone()
+    }
+    pub(crate) fn dataset_resolver(&self) -> Result<Arc<dyn Resolver>> {
+        self.4
+            .resolver
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("host resource resolver is not configured"))
+    }
     pub(crate) fn resource_services(&self) -> Services {
         Services {
             credentials: self.2.clone(),
@@ -193,7 +254,7 @@ impl Context {
             .owner
             .with_credentials(SharedCredentialsProvider::new(StorageProvider {
                 resolver: resolver.clone(),
-                request: request.clone(),
+                request: request.clone().into(),
                 permits: self.4.permits.clone(),
             }))?;
         let mut context = self.clone();

@@ -400,7 +400,7 @@ async fn storage_renewal_is_request_bound_expiring_redacted_and_has_no_fallback(
     let host = Arc::new(Host::default());
     let provider = StorageProvider {
         resolver: host.clone(),
-        request: request(1, 'a'),
+        request: request(1, 'a').into(),
         permits: Arc::new(tokio::sync::Semaphore::new(1)),
     };
     let first = provider.provide_credentials().await.unwrap();
@@ -569,7 +569,7 @@ async fn resolver_timeouts_are_bounded_and_release_admission() {
     let cancel = CancellationToken::new();
     let storage = StorageProvider {
         resolver: host.clone(),
-        request: resources.clone(),
+        request: resources.clone().into(),
         permits: Arc::new(tokio::sync::Semaphore::new(1)),
     };
     let headers = Default::default();
@@ -699,4 +699,128 @@ async fn injected_credentials_require_https_unless_loopback_is_explicit() {
         4,
         "ineligible origins must not resolve credentials"
     );
+}
+
+struct DatasetHost {
+    mode: AtomicUsize,
+    calls: AtomicUsize,
+}
+impl Resolver for DatasetHost {
+    fn bindings(&self, _: Request) -> Resolution<'_, Bindings> {
+        Box::pin(async { Err(Error::Denied) })
+    }
+    fn dataset_storage_credentials(
+        &self,
+        request: DatasetRequest,
+    ) -> Resolution<'_, StorageCredentials<DatasetRequest>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            request.validate_storage_binding(OWNER)?;
+            let mode = self.mode.load(Ordering::SeqCst);
+            if mode == 7 {
+                return Err(Error::Denied);
+            }
+            if mode == 8 {
+                return std::future::pending().await;
+            }
+            let mut reply = request.clone();
+            match mode {
+                1 => {
+                    reply = DatasetRequest::new(
+                        request.caller(),
+                        Uuid::from_u128(99),
+                        request.binding_hash().into(),
+                        request.purpose(),
+                    )
+                }
+                2 => {
+                    reply = DatasetRequest::new(
+                        crate::operations::UserContext::new(
+                            Uuid::from_u128(98),
+                            Uuid::from_u128(97),
+                        )
+                        .unwrap(),
+                        request.upload_id(),
+                        request.binding_hash().into(),
+                        request.purpose(),
+                    )
+                }
+                3 => {
+                    reply = DatasetRequest::new(
+                        request.caller(),
+                        request.upload_id(),
+                        "f".repeat(64),
+                        request.purpose(),
+                    )
+                }
+                4 => {
+                    reply = DatasetRequest::new(
+                        request.caller(),
+                        request.upload_id(),
+                        request.binding_hash().into(),
+                        crate::operations::resources::DatasetStoragePurpose::Cleanup,
+                    )
+                }
+                _ => {}
+            }
+            Ok(StorageCredentials {
+                request: reply,
+                authentication: StorageAuthentication::S3 {
+                    access_key: "access".into(),
+                    secret_key: if mode == 6 {
+                        String::new()
+                    } else {
+                        "secret".into()
+                    },
+                    session_token: None,
+                },
+                expires_at: if mode == 5 {
+                    std::time::UNIX_EPOCH
+                } else {
+                    std::time::SystemTime::now() + std::time::Duration::from_secs(60)
+                },
+            })
+        })
+    }
+}
+#[tokio::test]
+async fn dataset_signing_is_upload_scoped_expiring_and_never_uses_run_resolution() {
+    let owner: OwnerConfig = toml::from_str(OWNER).unwrap();
+    let request = DatasetRequest::new(
+        crate::operations::UserContext::new(Uuid::from_u128(1), Uuid::from_u128(2)).unwrap(),
+        Uuid::from_u128(3),
+        owner.binding_hash().unwrap(),
+        crate::operations::resources::DatasetStoragePurpose::Upload,
+    );
+    assert!(
+        request
+            .validate_storage_binding(&OWNER.replace("isolated", "different"))
+            .is_err()
+    );
+    let host = Arc::new(DatasetHost {
+        mode: AtomicUsize::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let provider = StorageProvider {
+        resolver: host.clone(),
+        request: StorageRequest::Dataset(request),
+        permits: Arc::new(tokio::sync::Semaphore::new(1)),
+    };
+    assert_eq!(format!("{provider:?}"), "HostStorageCredentials");
+    assert!(provider.fallback_on_interrupt().is_none());
+    assert!(provider.provide_credentials().await.is_ok());
+    for mode in 1..=7 {
+        host.mode.store(mode, Ordering::SeqCst);
+        assert!(
+            provider.provide_credentials().await.is_err(),
+            "must reject mismatched/expired/invalid/denied reply {mode}"
+        );
+    }
+    assert_eq!(host.calls.load(Ordering::SeqCst), 8);
+    host.mode.store(8, Ordering::SeqCst);
+    assert!(
+        provider.provide_credentials().await.is_err(),
+        "pending host request is bounded by the existing resolution deadline"
+    );
+    assert!(provider.permits.try_acquire().is_ok());
 }

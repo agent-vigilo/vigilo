@@ -6,11 +6,7 @@
 //! Credentials live in a separate owner-config file through environment names.
 use std::path::PathBuf;
 
-use anyhow::{
-    Context as _,
-    Result,
-    ensure,
-};
+use anyhow::Result;
 use async_trait::async_trait;
 use clap::{
     Args,
@@ -25,14 +21,13 @@ use crate::{
     cli::Executable,
     context::Context,
     contracts::case_storage::FormatLimits,
-    dataset_ingestion::{
-        self as ingestion,
-        input::{
-            InputFormat,
-            prepare,
-        },
-    },
+    dataset_ingestion::input::InputFormat,
     db::workflows::dataset_upload as ledger,
+    operations::datasets::{
+        DatasetClient,
+        PreparedDataset,
+        workflow,
+    },
 };
 
 #[derive(Debug, Args)]
@@ -106,7 +101,8 @@ async fn exec(operation: Operation, context: Context, cancel: &CancellationToken
     let output = context.out().await?;
     match operation {
         Operation::Status { upload_id } => {
-            output.write_value(&json!({"data":ledger::load(db,upload_id).await?,"catalog":ledger::catalog(db,upload_id).await?}))?;
+            let (row, catalog) = workflow::inspect(db.into(), upload_id).await?;
+            output.write_value(&json!({"data":row,"catalog":catalog}))?;
         }
         Operation::Abort { upload_id } => {
             ledger::abort(db, upload_id).await?;
@@ -122,24 +118,9 @@ async fn exec(operation: Operation, context: Context, cancel: &CancellationToken
             limit,
         } => {
             let owner = owner(&storage_config)?;
-            let upload = ledger::load(db, upload_id).await?;
-            ensure!(
-                owner.alias() == upload.storage_alias
-                    && owner.binding_hash()? == upload.binding_hash,
-                "storage owner binding changed"
-            );
-            let lease = ledger::claim(db, upload_id, true).await?;
-            let result = async {
-                let store = ingestion::connect(db, &upload, lease, &owner, true, cancel).await?;
-                ingestion::cleanup(db, store.as_ref(), lease, i64::from(limit), cancel).await
-            }
-            .await;
-            let release = ledger::release(db, lease).await;
-            let complete = result?;
-            release?;
-            output.write_value(
-                &json!({"data":{"upload_id":upload_id,"cleanup_complete":complete}}),
-            )?;
+            let client = DatasetClient::operator(db.clone(), owner);
+            let result = client.cleanup(upload_id, limit, cancel).await?;
+            output.write_value(&json!({"data":result}))?;
         }
         Operation::Upload {
             source,
@@ -154,8 +135,11 @@ async fn exec(operation: Operation, context: Context, cancel: &CancellationToken
             upload(db, output, source, upload_id, limits, cancel).await?;
         }
         Operation::Resume { upload_id, source } => {
-            let row = ledger::load(db, upload_id).await?;
-            upload(db, output, source, Some(upload_id), row.limits.0, cancel).await?;
+            let client = DatasetClient::operator(db.clone(), owner(&source.storage_config)?);
+            let result = client
+                .resume_file(upload_id, source.input_file, source.input_format, cancel)
+                .await?;
+            write_publication(output, &result)?;
         }
     }
     Ok(())
@@ -170,55 +154,22 @@ async fn upload(
 ) -> Result<()> {
     let owner = owner(&source.storage_config)?;
     owner.validate(&limits)?;
-    let prepared = prepare(source.input_file, source.input_format, limits, cancel).await?;
-    let binding = owner.binding_hash()?;
-    if upload_id.is_none()
-        && let Some(catalog) = ledger::reusable(
-            db,
-            owner.alias(),
-            &binding,
-            &prepared.identity,
-            &prepared.limits,
-        )
-        .await?
-    {
-        output.write_value(&json!({"data":catalog,"meta":{"reused":true}}))?;
-        return Ok(());
-    }
-    let id = upload_id.unwrap_or_else(Uuid::now_v7);
-    let result = async {
-        let row = ledger::begin(
-            db,
-            id,
-            owner.alias(),
-            &binding,
-            &prepared.identity,
-            &prepared.limits,
-        )
-        .await?;
-        if row.status == "finalized" {
-            return ledger::catalog(db, id)
-                .await?
-                .context("finalized upload has no catalog reference");
-        }
-        let lease = ledger::claim(db, id, false).await?;
-        let result = async {
-            let store = ingestion::connect(db, &row, lease, &owner, false, cancel).await?;
-            ingestion::ingest(db, store.as_ref(), &row, lease, &prepared, cancel).await
-        }
-        .await;
-        let release = ledger::release(db, lease).await;
-        let catalog = result?;
-        release?;
-        Ok(catalog)
-    }
-    .await
-    .context(format!(
-        "dataset upload {id}; resume using this upload ID and the original input"
-    ))?;
-    output.write_value(
-        &json!({"data":result,"meta":{"case_count":prepared.identity.case_count,"reused":false}}),
-    )?;
+    let prepared =
+        PreparedDataset::file(source.input_file, source.input_format, limits, cancel).await?;
+    let client = DatasetClient::operator(db.clone(), owner);
+    let result = client.upload_inner(prepared, upload_id, cancel).await?;
+    write_publication(output, &result)
+}
+fn write_publication(
+    output: &crate::context::output::Buffer,
+    result: &crate::operations::datasets::workflow::Published,
+) -> Result<()> {
+    let value = if result.reused {
+        json!({"data":result.catalog,"meta":{"reused":true}})
+    } else {
+        json!({"data":result.catalog,"meta":{"case_count":result.identity.case_count,"reused":false}})
+    };
+    output.write_value(&value)?;
     Ok(())
 }
 

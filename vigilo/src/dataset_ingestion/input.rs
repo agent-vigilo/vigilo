@@ -91,13 +91,71 @@ pub(crate) async fn prepare(
     cancel: &CancellationToken,
 ) -> Result<Prepared> {
     limits.validate()?;
+    let reservation = reserve(cancel).await?;
+    prepared(path, format, limits, cancel, reservation, None).await
+}
+
+async fn reserve(cancel: &CancellationToken) -> Result<OwnedSemaphorePermit> {
     let pool = PREPARATION
         .get_or_init(|| Arc::new(Semaphore::new(1)))
         .clone();
-    let reservation = tokio::select! {biased;_=cancel.cancelled()=>anyhow::bail!("dataset preparation cancelled"),permit=pool.acquire_owned()=>permit?};
+    Ok(
+        tokio::select! {biased;_=cancel.cancelled()=>anyhow::bail!("dataset preparation cancelled"),permit=pool.acquire_owned()=>permit?},
+    )
+}
+
+/// Receive one admitted stream into private bounded scratch space before using
+/// the same parser/sorter as file inputs. No caller path is accepted or opened.
+pub(crate) async fn prepare_reader<R: tokio::io::AsyncRead + Unpin + Send>(
+    reader: R,
+    format: InputFormat,
+    limits: FormatLimits,
+    cancel: &CancellationToken,
+) -> Result<Prepared> {
+    use tokio::io::AsyncReadExt;
+    limits.validate()?;
+    let reservation = reserve(cancel).await?;
+    let source = tempfile::NamedTempFile::new()?;
+    let mut file = tokio::fs::File::from_std(source.reopen()?);
+    let cap = match format {
+        InputFormat::Jsonl => SOURCE_CAP,
+        _ => DOCUMENT_CAP,
+    };
+    let mut reader = reader.take(cap + 1);
+    let length = tokio::select! {biased;
+        _=cancel.cancelled()=>anyhow::bail!("dataset preparation cancelled"),
+        copied=tokio::io::copy(&mut reader,&mut file)=>copied?,
+    };
+    ensure!(
+        length <= cap,
+        "dataset source exceeds input format size limit"
+    );
+    use tokio::io::AsyncWriteExt;
+    file.flush().await?;
+    drop(file);
+    prepared(
+        source.path().to_owned(),
+        format,
+        limits,
+        cancel,
+        reservation,
+        Some(source),
+    )
+    .await
+}
+
+async fn prepared(
+    path: std::path::PathBuf,
+    format: InputFormat,
+    limits: FormatLimits,
+    cancel: &CancellationToken,
+    reservation: OwnedSemaphorePermit,
+    source: Option<tempfile::NamedTempFile>,
+) -> Result<Prepared> {
     let token = cancel.child_token();
     let _cancel_on_drop = token.clone().drop_guard();
     let (output, reservation) = tokio::task::spawn_blocking(move || {
+        let _source = source;
         prepare_sync(&path, format, limits, &token).map(|o| (o, reservation))
     })
     .await??;

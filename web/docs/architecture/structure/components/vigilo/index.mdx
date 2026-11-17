@@ -54,6 +54,13 @@ commits approval and reports progress without borrowing scheduler authority.
 No preparation or acceptance transaction spans blob I/O, and pooled connections
 retain no request settings after commit, rollback or cancellation.
 
+`Client::datasets` and caller-bound dataset services share bounded preparation,
+upload, resume and exact cleanup. Typed dataset status and abort operations
+reuse the same ledger protocol. Hosts supply admitted readers and pinned storage
+bindings; the CLI supplies regular files and formats its operator JSON. See
+[dataset ingestion](/docs/architecture/case-storage/ingestion/) for resource budgets
+and the upload-specific signing contract.
+
 The CLI uses the same typed operations for creation, cancellation, status/watch
 and results-summary output. Other commands call private library workflows. CLI and hosted daemon
 adapters share orchestration and worker cycles. Neither pools nor persistence

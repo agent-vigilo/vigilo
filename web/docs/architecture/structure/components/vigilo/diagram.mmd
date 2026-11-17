@@ -80,6 +80,8 @@ flowchart TD
 
     CliRouter -->|"Uploads, resumes and cleans datasets"| DatasetIngestion
     DatasetIngestion -->|"Persists compact ownership and progress"| Database
+    LibraryHost -->|"Caller-bound dataset operations"| DatasetIngestion
+    HostedRuntime -->|"Fixed user pools and injected signing"| DatasetIngestion
     DatasetIngestion --> BlobAdapter
     RunPlanner -->|"Verifies datasets and publishes bounded plan files"| BlobAdapter
     BlobAdapter --> ObjectStorage

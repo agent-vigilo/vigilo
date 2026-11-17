@@ -21,6 +21,7 @@ pub use control::{
     ControlOutcome,
     ExecutionControl,
 };
+pub mod datasets;
 pub mod export;
 pub mod resources;
 pub(crate) mod results;
@@ -95,6 +96,9 @@ pub enum Error {
     /// The requested run does not exist in the accessible store.
     #[error("run '{0}' was not found")]
     NotFound(Uuid),
+    /// A dataset upload is absent or not visible to the current caller.
+    #[error("dataset upload '{0}' was not found")]
+    DatasetNotFound(Uuid),
     /// Database or routing failure. The source is for trusted diagnostics only;
     /// interfaces must not serialize its chain as a user response.
     #[error("operation dependency failed")]

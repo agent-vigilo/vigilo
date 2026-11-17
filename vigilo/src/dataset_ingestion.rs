@@ -12,7 +12,6 @@ use anyhow::{
     Result,
     ensure,
 };
-use sqlx::PgPool;
 use tokio::io::{
     AsyncBufReadExt,
     AsyncReadExt,
@@ -36,6 +35,7 @@ use crate::{
         Lease,
         Object,
         Upload,
+        access::Access,
     },
 };
 
@@ -91,14 +91,15 @@ pub(crate) fn reference(
 
 /// Persist ownership of connection probes before the adapter can issue a PUT.
 /// Old probes are reconciled exactly after acquiring the new generation.
-pub(crate) async fn connect(
-    db: &PgPool,
+pub(crate) async fn connect<'a>(
+    db: impl Into<Access<'a>> + Send,
     upload: &Upload,
     lease: Lease,
     owner: &OwnerConfig,
     cleanup: bool,
     cancel: &CancellationToken,
 ) -> Result<Box<dyn BlobStorage>> {
+    let db = db.into();
     ensure!(
         owner.alias() == upload.storage_alias && owner.binding_hash()? == upload.binding_hash,
         "storage configuration no longer resolves the recorded owner"
@@ -163,7 +164,7 @@ pub(crate) async fn read_bytes(
 /// Register/replay one deterministic object. Acknowledged batch writes are skipped;
 /// metadata is verified on replay and all batches are read in finalization.
 async fn put(
-    db: &PgPool,
+    db: Access<'_>,
     store: &dyn BlobStorage,
     lease: Lease,
     object: &Object,
@@ -188,14 +189,15 @@ async fn put(
     Ok(())
 }
 
-pub(crate) async fn ingest(
-    db: &PgPool,
+pub(crate) async fn ingest<'a>(
+    db: impl Into<Access<'a>> + Send,
     store: &dyn BlobStorage,
     upload: &Upload,
     lease: Lease,
     prepared: &Prepared,
     cancel: &CancellationToken,
 ) -> Result<Catalog> {
+    let db = db.into();
     ensure!(
         prepared.identity == upload.identity.0 && prepared.limits == upload.limits.0,
         "resume source or batching changed"
@@ -345,7 +347,7 @@ pub(crate) async fn ingest(
 /// Build one level at a time from bounded SQL pages. Only one encoded page and
 /// its child references are resident; tree height and fanout remain admitted limits.
 async fn build_index(
-    db: &PgPool,
+    db: Access<'_>,
     store: &dyn BlobStorage,
     upload: &Upload,
     lease: Lease,
@@ -412,7 +414,7 @@ async fn build_index(
     anyhow::bail!("dataset exceeds admitted index height")
 }
 async fn index_page(
-    db: &PgPool,
+    db: Access<'_>,
     store: &dyn BlobStorage,
     upload: &Upload,
     lease: Lease,
@@ -451,13 +453,14 @@ async fn index_page(
 
 /// One exact-key cleanup page per invocation. The authority check follows creation
 /// of the monotonic storage budget, so stale paused cleanup cannot race publication.
-pub(crate) async fn cleanup(
-    db: &PgPool,
+pub(crate) async fn cleanup<'a>(
+    db: impl Into<Access<'a>> + Send,
     store: &dyn BlobStorage,
     lease: Lease,
     limit: i64,
     cancel: &CancellationToken,
 ) -> Result<bool> {
+    let db = db.into();
     for object in ledger::pending_cleanup(db, lease.id, false, limit).await? {
         let budget = Budget::standard();
         ledger::renew(db, lease, true).await?;

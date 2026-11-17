@@ -142,6 +142,17 @@ struct Inner {
 #[derive(Clone)]
 pub struct HostedRuntime(Arc<Inner>);
 impl HostedRuntime {
+    /// Bind nonsecret upload storage at the trusted host root, then derive a
+    /// caller handle from the returned service after authenticating each request.
+    pub fn datasets(&self, storage_toml: &str) -> Result<super::datasets::DatasetService, Error> {
+        let resolver = self.0.user.dataset_resolver().map_err(Error::Dependency)?;
+        Ok(self
+            .0
+            .databases
+            .user_client()
+            .datasets(storage_toml, resolver)?
+            .with_permits(self.0.user.dataset_permits()))
+    }
     /// Validate nonsecret limits first, then open/revalidate every fixed pool.
     /// Broker connections and Wasm compilation stay lazy. Failure returns no
     /// usable runtime and does not close independently held pool clones.
@@ -255,6 +266,12 @@ pub struct HostedUser {
     control: Context,
 }
 impl HostedUser {
+    pub async fn dataset_status(&self, id: Uuid) -> Result<super::datasets::DatasetStatus, Error> {
+        self.status.dataset_status(self.context, id).await
+    }
+    pub async fn abort_dataset_upload(&self, id: Uuid) -> Result<super::datasets::Aborted, Error> {
+        self.status.abort_dataset_upload(self.context, id).await
+    }
     pub fn runs(&self) -> &RunClient {
         &self.runs
     }
