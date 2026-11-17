@@ -48,9 +48,9 @@ pub struct UserConfig {
 /// install authorization policy. Each connection must satisfy the role/policy guard.
 #[derive(Clone)]
 pub struct UserClient {
-    control: PgPool,
-    control_alias: String,
-    execution: Arc<BTreeMap<String, PgPool>>,
+    pub(super) control: PgPool,
+    pub(super) control_alias: String,
+    pub(super) execution: Arc<BTreeMap<String, PgPool>>,
 }
 type ReadRoute = (i16, String, Option<String>, Option<String>);
 
@@ -70,6 +70,24 @@ impl UserClient {
     /// Creates lazy fixed-role pools inside the host's Tokio runtime. Deployment
     /// validation occurs before the first protected query on each connection.
     pub fn new(config: UserConfig) -> Result<Self, Error> {
+        Self::configured(config, None, BTreeMap::new())
+    }
+
+    pub(super) fn new_export(
+        config: UserConfig,
+        sensitive: bool,
+        functions: BTreeMap<String, Vec<String>>,
+    ) -> Result<Self, Error> {
+        Self::configured(config, Some(sensitive), functions)
+    }
+
+    /// Copies export trust per fixed alias into connection guards. Ordinary
+    /// status/summary construction supplies no export trust and keeps its guards.
+    fn configured(
+        config: UserConfig,
+        export: Option<bool>,
+        functions: BTreeMap<String, Vec<String>>,
+    ) -> Result<Self, Error> {
         // Reuse the standalone configuration validation without opening its pools.
         super::Client::new(config.control.clone())?;
         if config.database_role.trim().is_empty()
@@ -84,27 +102,59 @@ impl UserClient {
                 "invalid fixed database bindings",
             ));
         }
-        let pool = |uri: &str| -> Result<PgPool, Error> {
+        if functions.iter().any(|(alias, functions)| {
+            (alias != &config.control.control_database_alias
+                && !config.execution_databases.contains_key(alias))
+                || functions.len() > 64
+                || functions.iter().any(|f| {
+                    f.is_empty()
+                        || f.len() > 1024
+                        || f.trim() != f
+                        || f.chars().any(char::is_control)
+                })
+                || functions
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    != functions.len()
+        }) {
+            return Err(Error::InvalidConfiguration(
+                "invalid trusted policy function bindings",
+            ));
+        }
+        let pool = |alias: &str, uri: &str| -> Result<PgPool, Error> {
             let options: PgConnectOptions = uri
                 .parse()
                 .map_err(|_| Error::InvalidConfiguration("invalid PostgreSQL connection string"))?;
             let role = config.database_role.clone();
+            let functions = Arc::new(functions.get(alias).cloned().unwrap_or_default());
             Ok(PgPoolOptions::new()
                 .max_connections(config.control.max_connections)
                 .acquire_timeout(config.control.acquire_timeout)
                 .after_connect(move |connection, _| {
                     let role = role.clone();
-                    Box::pin(async move { scope::validate_connection(connection, &role).await })
+                    let functions = functions.clone();
+                    Box::pin(async move {
+                        scope::validate_connection(connection, &role).await?;
+                        if let Some(sensitive) = export {
+                            super::export::validate_connection(connection, sensitive, &functions)
+                                .await?;
+                        }
+                        Ok(())
+                    })
                 })
                 .connect_lazy_with(options))
         };
-        let control = pool(&config.control.database_url)?;
+        let control = pool(
+            &config.control.control_database_alias,
+            &config.control.database_url,
+        )?;
         let mut execution = BTreeMap::new();
         for (alias, uri) in &config.execution_databases {
             if alias.is_empty() || alias.trim() != alias {
                 return Err(Error::InvalidConfiguration("invalid placement alias"));
             }
-            execution.insert(alias.clone(), pool(uri)?);
+            execution.insert(alias.clone(), pool(alias, uri)?);
         }
         Ok(Self {
             control,

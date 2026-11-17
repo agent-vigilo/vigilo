@@ -1338,12 +1338,18 @@ impl DatabaseRouter {
             shard_placements::list_shard_placements_for_run(db, run_id).await?
         };
         let mut routed = Vec::with_capacity(placements.len());
-
+        // Validate each physical alias live once for this read operation. Logical
+        // shards sharing a placement do not require duplicate catalog round trips.
+        // No validation survives this call; subsequent pages recheck availability.
+        let mut validated: BTreeMap<String, PgPool> = BTreeMap::new();
         for placement in placements {
-            let pool = self
-                .execution_database(&placement.database_alias)
-                .await?
-                .clone();
+            let pool = if let Some(pool) = validated.get(&placement.database_alias) {
+                pool.clone()
+            } else {
+                let pool = self.execution_database(&placement.database_alias).await?;
+                validated.insert(placement.database_alias.clone(), pool.clone());
+                pool
+            };
             debug!(
                 run_id = %run_id,
                 run_shard = placement.run_shard,

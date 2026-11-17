@@ -5,6 +5,7 @@
 //! workflows for multi-table operations that need transactional or concurrency
 //! semantics.
 
+pub(crate) mod bounded_read;
 pub(crate) mod migrations;
 pub(crate) mod shard_write_fence;
 pub(crate) mod tables;

@@ -21,6 +21,9 @@ flowchart TD
     HostedRuntime --> StatusOperations
     HostedRuntime -->|"Calls shared cycles in process"| Coordinator
     HostedRuntime -->|"Calls shared worker services in process"| Worker
+    ExportReaders["Bounded export operations<br/>Separate ordinary/content/diagnostic access; fixed read-only pools"]:::component
+    LibraryHost --> ExportReaders
+    ExportReaders --> RunQueries
     LibraryHost --> StatusOperations
     CliRouter -->|status/results| StatusOperations
     StatusOperations --> RunQueries

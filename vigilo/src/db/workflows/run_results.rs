@@ -70,6 +70,7 @@ pub(crate) fn project_results(
 }
 
 /// Reads and combines shard-local result summaries for a run.
+#[cfg(test)]
 pub(crate) async fn select_run_results_summary(
     database_router: &database::DatabaseRouter,
     run_id: Uuid,
@@ -87,10 +88,19 @@ pub(crate) async fn select_run_results_projection(
     let routes = database_router
         .execution_read_routes_for_run(run_id)
         .await?;
+    select_results_from_routes(run_id, &routes).await
+}
+
+/// Reuses the export header's already validated routes. No route or authority
+/// snapshot is cached across independent operations or public page requests.
+pub(crate) async fn select_results_from_routes(
+    run_id: Uuid,
+    routes: &[(i16, String, sqlx::PgPool)],
+) -> anyhow::Result<RunResultsProjection> {
     let mut summaries = Vec::with_capacity(routes.len());
 
     let mut by_database = BTreeMap::new();
-    for (run_shard, alias, db) in &routes {
+    for (run_shard, alias, db) in routes {
         by_database
             .entry(alias)
             .or_insert_with(|| (db, Vec::new()))

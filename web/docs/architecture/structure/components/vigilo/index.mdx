@@ -190,3 +190,15 @@ The embedding host supplies trusted identity and installs database access policy
 - [Container view](../../containers)
 - [Coordinator components](../coordinator)
 - [Worker components](../worker)
+
+## Export readers
+
+`Client::export_page` exposes bounded typed collection reads for standalone
+operators. Dedicated `operations::export::ExportClient` and
+`SensitiveExportClient` retain separate fixed read-only credential pools for
+ordinary results versus content/diagnostics. Hosts authorize operations and supply
+current caller context; connection guards validate effective column access and row
+protections, including direct partition grants. Pools are shared by credential
+domain, not created per caller. Neither reader exposes a SQL executor or borrows
+runtime service authority. See [Export](/docs/architecture/flows/run/export) for
+collection boundaries, byte limits and live continuation semantics.

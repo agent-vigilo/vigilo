@@ -21,6 +21,7 @@ pub use control::{
     ControlOutcome,
     ExecutionControl,
 };
+pub mod export;
 pub mod resources;
 pub(crate) mod results;
 pub(crate) mod status;
@@ -166,6 +167,19 @@ impl Client {
     /// payloads. A missing run is NotFound; route failures return no partial value.
     pub async fn run_results(&self, run_id: Uuid) -> Result<RunResults, Error> {
         results::read(&self.database, run_id).await
+    }
+
+    /// Reads one live, bounded collection without retaining routing or authority
+    /// in its cursor. Standalone assumes an authorized operator, including content
+    /// and diagnostics. Dependency errors return no successful partial page.
+    pub async fn export_page(
+        &self,
+        run_id: Uuid,
+        collection: export::ExportCollection,
+        limits: export::ExportLimits,
+        cursor: Option<&export::ExportCursor>,
+    ) -> Result<export::ExportPage, Error> {
+        export::read_operator(&self.database, run_id, collection, limits, cursor).await
     }
 
     /// Durably changes execution permission. Delivery and worker quiescence are

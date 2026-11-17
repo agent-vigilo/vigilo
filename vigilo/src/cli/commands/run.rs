@@ -768,7 +768,10 @@ mod tests {
             RunProfile,
         },
         models::{
-            evaluator_result::EvaluatorResult,
+            evaluator_result::{
+                EvaluatorDiagnostic,
+                EvaluatorResult,
+            },
             execution::Execution,
             execution_aggregate::ExecutionAggregate,
             execution_attempt::ExecutionAttempt,
@@ -1335,6 +1338,54 @@ mod tests {
             payload["data"]["executions"][0]["attempts"][0]["evidence_state"],
             "authoritative"
         );
+        // Result UUIDs can repeat on another shard. JSON evidence must stay
+        // attached to its own shard even when every parent UUID is identical.
+        let mut other_execution = executions[0].clone();
+        other_execution.run_shard = 1;
+        let mut other_attempt = attempts[0].clone();
+        other_attempt.run_shard = 1;
+        let mut other_result = evaluator_results[0].clone();
+        other_result.run_shard = 1;
+        let diagnostic = EvaluatorDiagnostic {
+            id: Uuid::now_v7(),
+            run_id: run.id,
+            run_shard: 0,
+            evaluator_result_id,
+            diagnostic_index: 0,
+            severity: "low".into(),
+            category: "fixture".into(),
+            reason: None,
+            evidence: json!({"shard":0}),
+            tags: Vec::new(),
+            created_at: now,
+        };
+        let mut other_diagnostic = diagnostic.clone();
+        other_diagnostic.run_shard = 1;
+        other_diagnostic.evidence = json!({"shard":1});
+        let shared_ids = export::run_export_payload(
+            &run,
+            &summary,
+            &export::RunExportRows {
+                executions: &[executions[0].clone(), other_execution],
+                attempts: &[attempts[0].clone(), other_attempt],
+                aggregates: &[],
+                evaluator_results: &[evaluator_results[0].clone(), other_result],
+                evaluator_diagnostics: &[diagnostic, other_diagnostic],
+                scorecard: None,
+            },
+        );
+        for shard in 0..2 {
+            let rows =
+                shared_ids["data"]["executions"][shard]["attempts"][0]["evaluator_diagnostics"]
+                    .as_array()
+                    .unwrap();
+            assert_eq!(
+                rows.len(),
+                1,
+                "diagnostics crossed logical shard boundaries"
+            );
+            assert_eq!(rows[0]["run_shard"], json!(shard));
+        }
         // Preserve all artifact rows, but label unfinished and superseded evidence.
         for (execution_status, attempt_status, current, has_aggregate, expected) in [
             ("running", "completed", true, true, "partial"),

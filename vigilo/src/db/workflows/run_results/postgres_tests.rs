@@ -163,8 +163,8 @@ async fn typed_results_preserve_batched_queries_coverage_and_lifecycle(pool: PgP
     assert_eq!(value.unwrap(), first);
     assert_eq!(
         queries.len(),
-        132,
-        "standalone summary retains existing live placement checks: {queries:?}"
+        5,
+        "standalone summary validates each physical alias once: {queries:?}"
     );
     assert_eq!(
         queries
@@ -189,7 +189,7 @@ async fn typed_results_preserve_batched_queries_coverage_and_lifecycle(pool: PgP
         "typed extraction must preserve standalone SQL submissions exactly"
     );
     eprintln!(
-        "128-shard standalone results: {} SQL submissions; exact existing CLI sequence retained",
+        "128-shard standalone results: {} SQL submissions; one live validation per physical alias",
         queries.len()
     );
     for status in ["creating", "running", "failed", "cancelled", "completed"] {

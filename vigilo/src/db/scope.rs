@@ -56,10 +56,33 @@ pub(crate) async fn begin(
     run_id: Uuid,
 ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    set_user(&mut tx, context, run_id).await?;
+    Ok(tx)
+}
+
+/// A caller-scoped read-only observation. Each bounded statement admits keys
+/// and projects bodies in one snapshot; no transaction survives a public page.
+pub(crate) async fn begin_read(
+    pool: &PgPool,
+    context: UserContext,
+    run_id: Uuid,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut tx = pool
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await?;
+    set_user(&mut tx, context, run_id).await?;
+    Ok(tx)
+}
+
+async fn set_user(
+    tx: &mut Transaction<'_, Postgres>,
+    context: UserContext,
+    run_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('vigilo.tenant_id',$1,true), set_config('vigilo.actor_id',$2,true), set_config('vigilo.run_id',$3,true), set_config('vigilo.run_batch','',true)")
         .bind(context.tenant_id.to_string()).bind(context.actor_id.to_string()).bind(run_id.to_string())
-        .execute(&mut *tx).await?;
-    Ok(tx)
+        .execute(&mut **tx).await?;
+    Ok(())
 }
 
 /// Fixed transaction-local system identity. Only canonical typed UUIDs enter
@@ -171,7 +194,7 @@ pub(crate) async fn validate_connection(
             SELECT 1 FROM pg_class c JOIN pg_attribute a ON a.attrelid=c.oid
             WHERE c.relkind IN ('r','p') AND a.attname='tenant_id' AND NOT a.attisdropped
               AND (pg_has_role(current_user,c.relowner,'MEMBER') OR
-                   ((has_table_privilege(c.oid,'SELECT') OR has_table_privilege(c.oid,'INSERT') OR has_table_privilege(c.oid,'UPDATE') OR has_table_privilege(c.oid,'DELETE'))
+                   ((has_any_column_privilege(c.oid,'SELECT') OR has_any_column_privilege(c.oid,'INSERT') OR has_any_column_privilege(c.oid,'UPDATE') OR has_table_privilege(c.oid,'DELETE'))
                     AND (NOT c.relrowsecurity OR NOT EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid)))))
         FROM pg_roles r WHERE r.rolname=current_user
     "#).bind(expected_role).fetch_one(&mut *connection).await?;
