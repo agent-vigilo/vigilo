@@ -33,7 +33,7 @@ flowchart TD
     RuntimeContext["fa:fa-layer-group <br/> <b>Runtime Context Provider</b> <br/> <small>[Component: Rust]</small> <br/> <small>Lazily initializes routed database access, storage adapters, messaging, output, registry cache, and Wasm runtime clients.</small>"]:::component
     OutputRenderer["fa:fa-file-lines <br/> <b>Output Renderer</b> <br/> <small>[Component: Rust]</small> <br/> <small>Writes structured command responses as JSON or TOON.</small>"]:::component
 
-    SetupManager["fa:fa-screwdriver-wrench <br/> <b>Setup Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Applies embedded schema migrations or an explicit SQL directory validates database placement, and installs the official core evaluator collection unless skipped.</small>"]:::component
+    SetupManager["fa:fa-screwdriver-wrench <br/> <b>Setup Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Applies embedded schema migrations or an explicit SQL directory, validates database placement, and installs the official core evaluator collection unless skipped.</small>"]:::component
     EvaluatorRegistry["fa:fa-box-archive <br/> <b>Evaluator Registry Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Publishes, searches, inspects, tests, and changes evaluator registry state.</small>"]:::component
     EvaluatorPreparer["fa:fa-cubes <br/> <b>Evaluator Package Preparer</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Resolves the static ABI adapter registry, typed-links versioned components, and computes artifact metadata.</small>"]:::component
 

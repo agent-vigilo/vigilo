@@ -15,7 +15,9 @@ import contextDiagram from './diagram.mmd';
 
 # Context
 
-Describes external actors and systems interacting with the platform.
+Engineers and automation use the CLI. Rust applications embed the public library
+and call the same operations in process, supplying their own runtime and
+presentation. Both interfaces use the same durable execution workflows.
 
 <Mermaid value={contextDiagram} />
 

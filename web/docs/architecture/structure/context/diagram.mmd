@@ -12,6 +12,8 @@ flowchart TD
     AgentClient(["fa:fa-robot <br/> <b>Agentic Client</b> <br/> <small>[Software System]</small>"]):::actor
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
+    LibraryHost(["Rust Application<br/>Public library operations"]):::actor
+
     %% main system
     AgentVigilo["fa:fa-diagram-project <br/> <b>Agent Vigilo</b> <br/> <small>[Software System]</small> <br/> <small>Orchestrates distributed evaluation runs.</small>"]:::system
 
@@ -21,6 +23,7 @@ flowchart TD
     %% edges
     User & AgentClient -->|"Manages evaluators, runs <br/> and runtime services using"| AgentVigilo
     CICD -->|Creates runs and <br/> gates deployments via| AgentVigilo
+    LibraryHost -->|"Calls typed operations in process"| AgentVigilo
     AgentVigilo -->|Sends evaluation <br/> case prompts to| TargetAgent
 
     %% links

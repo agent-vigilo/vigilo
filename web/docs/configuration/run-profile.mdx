@@ -56,11 +56,12 @@ An execution passes when:
 
 - `aggregate_score >= defaults.min_execution_score`
 - evaluator completeness is satisfied
-- no host-derived blocking result fails
-- at least one scoreable binding result exists
+- when `defaults.fail_on_any_blocking_failure` is `true`, no host-derived blocking result fails
+- at least one required binding has a valid normalized score
 
 A run passes when every expected execution has an aggregate, no chunk failed or
-was cancelled, and no execution failed or errored. Check both `runs.status` for
+was cancelled, no execution failed or errored, and every configured scorecard
+gate passes. Check both `runs.status` for
 operational lifecycle and <GlossaryTerm term="gate-status">`runs.gate_status`</GlossaryTerm>
 for policy outcome; a terminal run is not necessarily a passing run.
 
@@ -196,6 +197,18 @@ uses the worker ceiling. Zero is invalid; a value above the executing worker's
 ceiling fails before HTTP invocation. Run validation cannot determine every worker's
 local ceiling. See [runtime limits](./runtime-limits.mdx#agent-http-bodies) for flags,
 defaults, and failure behavior.
+
+### Invocation boundary
+
+Each attempt receives one complete, bounded HTTP response within its configured
+deadline. The external agent owns any internal tool use, conversation or simulation
+that produces that response. Vigilo evaluates the returned evidence; it does not
+launch the agent or drive its internal turns.
+
+Callbacks and completion events are not agent response inputs. A streaming response
+is not processed incrementally as evaluator evidence. See the
+[request format reference](#request-format-support) and
+[representative response formats](#representative-response-formats) for exact scope.
 
 ### Agent invocation diagnostics
 

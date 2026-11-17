@@ -7,7 +7,7 @@ This example demonstrates a file-based run profile and dataset that target a loc
 - `profile.yaml`: Qwen sentiment evaluation profile using `agent.http`
 - `dataset.yaml`: minimal sentiment classification dataset
 
-The profile points at `http://agent_vigilo_agent:8080/v1/chat/completions`, the llama.cpp-backed agent service in `infra/dev/docker-compose.single.yml`. Workers send an OpenAI-compatible chat completions request and map the agent response into the evaluator `actual` envelope.
+The profile points at `http://agent_vigilo_agent:8080/v1/chat/completions`, the llama.cpp-backed agent service in `infra/dev/docker-compose.single.yml`. Workers send an OpenAI-compatible chat completions request and preserve the complete response body. The profile explicitly maps the answer into `input.response-evidence` for the evaluator.
 
 The example uses one `quality` dimension. Each execution must meet `defaults.min_execution_score`, then the run-level `quality_release` scorecard gate requires complete coverage, no errors or abstentions, and a mean quality score of at least `0.85`.
 

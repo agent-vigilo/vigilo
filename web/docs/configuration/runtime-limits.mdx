@@ -80,7 +80,7 @@ output settings are root options. Registry and runtime commands require a databa
 URL; `evaluator package` performs local preparation without one. `MESSAGING_URL` is accepted only by `coordinator` and `worker`.
 Wasm limits are accepted only by `worker`, `evaluator package`, `evaluator publish`, and
 `evaluator test`. Command-scoped CLI flags follow their owning command, while
-the existing environment-variable names remain compatible.
+environment variables supply the same command-specific settings.
 
 ```bash
 vigilo coordinator --messaging-url amqp://broker start

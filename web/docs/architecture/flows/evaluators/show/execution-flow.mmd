@@ -15,7 +15,7 @@ sequenceDiagram
     activate Vigilo
 
     Vigilo->>Vigilo: Parse evaluator identifier
-    Vigilo->>DB: Select bounded metadata by identity; no Wasm
+    Vigilo->>DB: Select bounded metadata by identity, no Wasm
 
     alt Evaluator found
         DB-->>Vigilo: Evaluator record

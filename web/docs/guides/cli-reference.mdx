@@ -25,6 +25,7 @@ vigilo
 |-- setup
 |-- evaluator
 |   |-- list
+|   |-- package <path> --output <archive>
 |   |-- publish <path>
 |   |-- show <evaluator>
 |   |-- search [query]
@@ -76,9 +77,6 @@ Registering a database creates a non-routable `provisioning` placement;
 the shard owns data. Draining a database stops new ownership but does not move
 existing shards; use `rebalance` to evacuate them before disabling it.
 
-The former plural evaluator command, `run test`, and `shard ...` hierarchy
-remain accepted as compatibility paths but are omitted from canonical help.
-
 ## Dataset Uploads
 
 `dataset` commands own immutable dataset upload, explicit recovery, progress, and
@@ -89,7 +87,8 @@ for input formats, storage configuration, batching, leases, and scheduler owners
 
 `run create` accepts inline/file YAML/JSON datasets or `--dataset-upload-id <id>`
 for finalized uploads. Both paths publish immutable plans and admit compact
-execution metadata before returning `pending`. Supply `--storage-config
+execution metadata. Complete admission returns `pending`; interrupted admission
+returns `creating` with recovery progress. Supply `--storage-config
 storage.toml` or set `VIGILO_STORAGE_CONFIG`; coordinators and workers use the
 same environment setting to resolve stored references.
 

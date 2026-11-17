@@ -24,7 +24,7 @@ sequenceDiagram
     Vigilo->>ExecutionDB: Load published summaries in one batch per database
     ExecutionDB-->>Vigilo: Settlement counts, missing/unresolved counts, and retained scores
     Vigilo->>ControlDB: Read published scorecard
-    Vigilo->>Vigilo: Merge summaries in shard order; return typed counts and coverage
+    Vigilo->>Vigilo: Merge summaries in shard order, return typed counts and coverage
 
     alt Results loaded
         Vigilo->>Vigilo: Format typed result into summary-only CLI payload

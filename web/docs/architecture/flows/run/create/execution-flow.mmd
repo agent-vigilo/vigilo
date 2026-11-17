@@ -5,7 +5,7 @@ sequenceDiagram
     participant Storage as Blob adapter
     participant Execution as Execution PostgreSQL
     User->>CLI: run create, profile and dataset source
-    Note over CLI,Control: Metadata transactions retain command identity; no transaction spans blob I/O
+    Note over CLI,Control: Metadata transactions retain command identity, no transaction spans blob I/O
     opt Inline or file source
         CLI->>Storage: Validate and publish immutable dataset
     end

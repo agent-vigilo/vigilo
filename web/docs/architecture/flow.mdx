@@ -140,10 +140,16 @@ The dataset `case_group` value is part of immutable case content. It is loaded f
 The worker invokes the configured agent target:
 
 - may be a single model call
-- may be a multi-step workflow
+- may run an internal multi-step workflow within the HTTP response deadline
 - is invoked through the run profile `agent.http` endpoint
 
-The worker sends run/attempt ids, the agent identity, the case input, and non-oracle case metadata. The response is mapped into the evaluator `actual` envelope before evaluators run.
+The native request contains run, execution and attempt IDs, agent identity, case
+input, and non-oracle case metadata. Chat Completions requests use `model` and
+`messages`; both formats carry the attempt correlation header. The worker preserves
+the complete response body and applies the profile
+[response mapping](/docs/configuration/run-profile#explicit-response-contracts)
+once per attempt before evaluation. Evaluators consume `input.response-evidence`;
+Vigilo does not infer an answer from familiar response fields.
 
 If the agent call fails:
 

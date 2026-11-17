@@ -13,11 +13,11 @@ sequenceDiagram
     loop Participating route groups, within page budget
         Reader->>Execution: One caller-scoped statement: admit key/size prefix, then fetch fitting bodies
         Execution-->>Reader: Bounded metadata and selected records from one snapshot
-        Reader->>Reader: Validate encoding; commit caller context transaction
+        Reader->>Reader: Validate encoding, commit caller context transaction
     end
     alt Successful page
         Reader-->>Host: Typed records and optional continuation
     else Authorization, route, size or database failure
-        Reader-->>Host: Error; no successful partial page
+        Reader-->>Host: Error, no successful partial page
     end
     Note over Host,Reader: Each subsequent page rechecks current authority and routing

@@ -1,6 +1,6 @@
 ---
 title: Vigilo Components
-description: Component diagram for Agent Vigilo CLI command handling, configuration, registry, run, and reporting boundaries.
+description: Shared Agent Vigilo library operations, CLI adapter, runtime ownership, registry, runs, and reporting boundaries.
 keywords:
   - Vigilo CLI components
   - Agent Vigilo internals
@@ -61,8 +61,9 @@ bindings; the CLI supplies regular files and formats its operator JSON. See
 [dataset ingestion](/docs/architecture/case-storage/ingestion/) for resource budgets
 and the upload-specific signing contract.
 
-The CLI uses the same typed operations for creation, cancellation, status/watch
-and results-summary output. Other commands call private library workflows. CLI and hosted daemon
+The CLI uses typed operations for creation, cancellation, status/watch,
+results summaries, datasets and evaluators. Operator setup and placement commands
+use private library workflows. CLI and hosted daemon
 adapters share orchestration and worker cycles. Neither pools nor persistence
 records are part of the public operation API.
 

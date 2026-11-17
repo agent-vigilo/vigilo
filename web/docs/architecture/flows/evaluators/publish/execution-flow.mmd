@@ -32,7 +32,7 @@ sequenceDiagram
     Vigilo->>DB: Check evaluator hash uniqueness
     DB-->>Vigilo: Hash available
 
-    Vigilo->>DB: Insert immutable artifact; never overwrite on conflict
+    Vigilo->>DB: Insert immutable artifact, never overwrite on conflict
     alt Insert succeeded
         DB-->>Vigilo: Saved
     else Concurrent conflict

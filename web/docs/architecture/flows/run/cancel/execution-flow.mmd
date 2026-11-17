@@ -16,18 +16,18 @@ sequenceDiagram
     Operator->>API: Cancel run
     API->>Control: Commit revoked revision + pending destinations
     API->>Execution: Attempt bounded revision-fenced delivery
-    Execution-->>API: Applied; live leases may remain
-    API-->>Operator: Current outcome; terminal may be false
+    Execution-->>API: Applied, live leases may remain
+    API-->>Operator: Current outcome, terminal may be false
     loop Outstanding delivery only
         Coordinator->>Control: Claim bounded pending destinations
-        Coordinator->>Execution: Bind claimed identity; apply control revision
+        Coordinator->>Execution: Bind claimed identity, apply control revision
         Worker->>Execution: Existing heartbeat observes control
-        Worker->>Worker: Stop new cases; cancel supported calls
-        Worker->>Execution: Persist safe results; release chunk lease
+        Worker->>Worker: Stop new cases, cancel supported calls
+        Worker->>Execution: Persist safe results, release chunk lease
         Execution-->>Coordinator: Applied / quiescent observations
-        Coordinator->>Control: Scope acknowledgement; match claimed revision and token
+        Coordinator->>Control: Scope acknowledgement, match claimed revision and token
     end
     Coordinator->>Control: Claim quiescent revocation and retain work identity
-    Coordinator->>Execution: Scope cleanup; settle unfinished work and receipts
-    Coordinator->>Control: Scope final summary and event; acknowledge matching revision/token
-    Note over Coordinator,Execution: A partition delays settlement; application is not a global stop.
+    Coordinator->>Execution: Scope cleanup, settle unfinished work and receipts
+    Coordinator->>Control: Scope final summary and event, acknowledge matching revision/token
+    Note over Coordinator,Execution: A partition delays settlement, application is not a global stop.

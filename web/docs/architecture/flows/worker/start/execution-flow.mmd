@@ -19,7 +19,7 @@ sequenceDiagram
 
     User->>Vigilo: vigilo worker start
     activate Vigilo
-    Note over Vigilo,ExecutionDB: Protected persistence uses transaction-local verified ownership; no transaction spans external work
+    Note over Vigilo,ExecutionDB: Protected persistence uses transaction-local verified ownership, no transaction spans external work
     Vigilo->>Vigilo: Build evaluator loader and start worker service
     Vigilo->>Vigilo: Acquire messaging circuit admission
     alt Messaging circuit is open or connection fails
@@ -37,7 +37,7 @@ sequenceDiagram
         else Delivery received
             Queue-->>Vigilo: Chunk-ready message with alias and write epoch
             Vigilo->>Vigilo: Deserialize message payload
-            Vigilo->>ExecutionDB: Verify local identity and bind scope under movement fence; validate admission/control; claim lease
+            Vigilo->>ExecutionDB: Verify local identity and bind scope under movement fence, validate admission/control, claim lease
             ExecutionDB-->>Vigilo: Claimed chunk with persisted ownership or no claim
 
             opt Route hint rejected after local identity verification
@@ -47,11 +47,11 @@ sequenceDiagram
             end
 
             alt Chunk claimed
-                Vigilo->>ExecutionDB: Extend chunk lease; observe controls through the same heartbeat
-                Note over Vigilo,ExecutionDB: Pause drains allocated batch; revocation interrupts calls; persistence stays lease-fenced
+                Vigilo->>ExecutionDB: Extend chunk lease, observe controls through the same heartbeat
+                Note over Vigilo,ExecutionDB: Pause drains allocated batch, revocation interrupts calls, persistence stays lease-fenced
                 Vigilo->>ExecutionDB: Read compact snapshot and immutable plan reference
                 ExecutionDB-->>Vigilo: Compact plan, binding and gate metadata
-                Vigilo->>Vigilo: Bind verified work to storage and credential services; fail without fallback
+                Vigilo->>Vigilo: Bind verified work to storage and credential services, fail without fallback
                 Vigilo->>Vigilo: Look up exact binding and file references in bounded byte cache
                 opt Cache miss or file over 1 MiB
                     Vigilo->>Objects: Read required configuration, plan and case files
@@ -90,13 +90,13 @@ sequenceDiagram
                         WASM->>Vigilo: Bounded read-resource calls when needed
                         opt Evaluator requests HTTP
                             WASM->>Vigilo: send-http-request
-                            Vigilo->>Vigilo: Authorize snapshot; acquire permit; resolve bound credential
-                            Vigilo->>Vigilo: Pin approved DNS addresses; execute within shared time and byte budgets
-                            Vigilo-->>WASM: Bounded HTTP response or host error; release permit
+                            Vigilo->>Vigilo: Authorize snapshot, acquire permit, resolve bound credential
+                            Vigilo->>Vigilo: Pin approved DNS addresses, execute within shared time and byte budgets
+                            Vigilo-->>WASM: Bounded HTTP response or host error, release permit
                         end
                     end
                 end
-                WASM-->>Vigilo: Evaluation outputs; release store resource handles
+                WASM-->>Vigilo: Evaluation outputs, release store resource handles
                 Vigilo->>ExecutionDB: Persist batched results and lease-guarded terminal transitions with diagnostics and shared response evidence
                 Vigilo->>ExecutionDB: Read chunk execution retry state
                 ExecutionDB-->>Vigilo: Terminal or retry-waiting chunk state

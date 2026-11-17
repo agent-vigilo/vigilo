@@ -19,8 +19,8 @@ sequenceDiagram
                 CLI->>Host: Validate portable package, compile, typed-link ABI
                 Host-->>CLI: Prepared artifact
                 CLI->>CLI: Match prepared artifact to catalog
-                CLI->>DB: Insert missing version; retain all existing versions
+                CLI->>DB: Insert missing version, retain all existing versions
             end
         end
     end
-    CLI-->>Operator: Success or contextual error; completed work retained
+    CLI-->>Operator: Success or contextual error, completed work retained
