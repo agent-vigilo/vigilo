@@ -144,9 +144,9 @@ async fn service_protocol_resolves_for_runtime_scope_without_enterprise_dependen
     let dir = tempfile::tempdir().unwrap();
     let provider = service_provider(dir.path(), &service.url).await;
     let mut p = profile(&agent.url);
-    p.agent.http.credential = Some("agent-api".into());
-    p.agent
-        .http
+    p.harness.http_mut().credential = Some("agent-api".into());
+    p.harness
+        .http_mut()
         .headers
         .insert("X-Request-Label".into(), "ordinary".into());
     let before = serde_json::to_value(&p).unwrap();
@@ -215,7 +215,7 @@ async fn standalone_injects_without_a_service_and_omits_authenticated_error_exce
     })
     .unwrap();
     let mut p = profile(&agent.url);
-    p.agent.http.credential = Some("agent-api".into());
+    p.harness.http_mut().credential = Some("agent-api".into());
     let err = invoke(&provider, &p).await.unwrap_err();
     assert!(!format!("{err:#?}").contains("agent-canary"));
     let failure = err
@@ -305,7 +305,7 @@ async fn redirects_never_forward_workload_or_agent_credentials() {
     let mut service = Server::new(200, response(&agent.url).to_string(), "", false).await;
     let provider = service_provider(dir.path(), &service.url).await;
     let mut p = profile(&agent.url);
-    p.agent.http.credential = Some("agent-api".into());
+    p.harness.http_mut().credential = Some("agent-api".into());
     assert!(invoke(&provider, &p).await.is_err());
     service.request().await;
     agent.request().await;
@@ -458,8 +458,8 @@ async fn usage_is_adapter_specific_and_correlation_cannot_be_overridden() {
         assert!(server.request().await.contains("x-vigilo-attempt-id:"));
     }
     let mut p = profile("http://127.0.0.1:1");
-    p.agent
-        .http
+    p.harness
+        .http_mut()
         .headers
         .insert("X-Vigilo-Attempt-Id".into(), "forged".into());
     let error = invoke(&Provider::default(), &p).await.unwrap_err();

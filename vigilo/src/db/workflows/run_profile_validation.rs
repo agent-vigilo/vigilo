@@ -480,44 +480,51 @@ fn collect_static_profile_config_issues(profile: &RunProfile) -> Vec<String> {
         issues.push("agent.name must not be empty".to_string());
     }
 
-    if let Some(reference) = &profile.agent.http.credential
+    if let Some(reference) = &profile.harness.http().credential
         && let Err(err) = agent_client::credentials::validate_reference(reference)
     {
         issues.push(err.to_string());
     }
 
-    if let Err(err) = reqwest::Url::parse(&profile.agent.http.url) {
-        issues.push(format!("agent.http.url is invalid: {}", err));
+    if let Err(err) = reqwest::Url::parse(&profile.harness.http().url) {
+        issues.push(format!("harness.http.url is invalid: {}", err));
     }
 
-    if let Err(err) = profile.agent.http.method.parse::<reqwest::Method>() {
+    if let Err(err) = profile.harness.http().method.parse::<reqwest::Method>() {
         issues.push(format!(
-            "agent.http.method '{}' is invalid: {}",
-            profile.agent.http.method, err
+            "harness.http.method '{}' is invalid: {}",
+            profile.harness.http().method,
+            err
         ));
     }
 
     for (name, value) in [
-        ("max_request_bytes", profile.agent.http.max_request_bytes),
-        ("max_response_bytes", profile.agent.http.max_response_bytes),
+        (
+            "max_request_bytes",
+            profile.harness.http().max_request_bytes,
+        ),
+        (
+            "max_response_bytes",
+            profile.harness.http().max_response_bytes,
+        ),
     ] {
         if value == Some(0) {
-            issues.push(format!("agent.http.{name} must be greater than zero"));
+            issues.push(format!("harness.http.{name} must be greater than zero"));
         }
     }
 
     if profile
-        .agent
-        .http
+        .harness
+        .http()
         .max_retry_after_secs
         .is_some_and(|value| {
             value == 0 || value > crate::agent_client::failure::MAX_RETRY_AFTER_SECS
         })
     {
-        issues.push("agent.http.max_retry_after_secs must be between 1 and 86400".to_string());
+        issues.push("harness.http.max_retry_after_secs must be between 1 and 86400".to_string());
     }
-    if profile.agent.http.timeout_secs == Some(0) {
-        issues.push("agent.http.timeout_secs must be greater than zero".to_string());
+    if profile.harness.http().timeout_secs == Some(0) {
+        issues.push("harness.http.timeout_secs must be greater than zero".to_string());
     }
 
     if profile.defaults.max_attempts == 0 {
@@ -702,20 +709,36 @@ mod tests {
     };
 
     #[test]
+    fn deferred_completion_is_rejected_before_run_admission() {
+        let mut profile = profile();
+        let vigilo::invocation::profile::Harness::DirectProbe { completion, .. } =
+            &mut profile.harness
+        else {
+            panic!("expected a direct probe fixture");
+        };
+        *completion = vigilo::invocation::profile::Completion::Callback {};
+        assert!(
+            super::collect_static_profile_config_issues(&profile)
+                .iter()
+                .any(|issue| issue.contains("only inline harness completion is available"))
+        );
+    }
+
+    #[test]
     fn credential_references_are_validated_without_resolving_operator_secrets() {
         let mut profile = profile();
-        profile.agent.http.credential = Some("agent-api".into());
+        profile.harness.http_mut().credential = Some("agent-api".into());
         assert!(
             !super::collect_static_profile_config_issues(&profile)
                 .iter()
                 .any(|issue| issue.contains("credential"))
         );
         assert_eq!(
-            serde_json::to_value(&profile).unwrap()["agent"]["http"]["credential"],
+            serde_json::to_value(&profile).unwrap()["harness"]["http"]["credential"],
             "agent-api"
         );
         for reference in ["", "../secret", "env:TOKEN"] {
-            profile.agent.http.credential = Some(reference.into());
+            profile.harness.http_mut().credential = Some(reference.into());
             assert!(
                 super::collect_static_profile_config_issues(&profile)
                     .iter()
@@ -749,6 +772,9 @@ mod tests {
                 model: Some("test-model".to_string()),
                 prompt_config_id: Some("test-prompt".to_string()),
                 prompt_config_version: Some("1.0.0".to_string()),
+                config: serde_json::json!({}),
+            },
+            harness: crate::invocation::profile::Harness::DirectProbe {
                 http: AgentHttpConfig {
                     credential: None,
                     url: "http://127.0.0.1:8787/v1/agent/invoke".to_string(),
@@ -759,7 +785,11 @@ mod tests {
                     max_response_bytes: None,
                     max_retry_after_secs: None,
                 },
-                config: serde_json::json!({}),
+                completion: crate::invocation::profile::Completion::Inline {},
+                capabilities: None,
+                require_executed_agent: false,
+                executed_agent_pointer: None,
+                forward_case_context: false,
             },
             case_groups: vec![CaseGroupProfile {
                 id: "classification".to_string(),
@@ -937,12 +967,12 @@ mod tests {
         let mut profile = profile();
         profile.agent.provider = " ".to_string();
         profile.agent.name = "".to_string();
-        profile.agent.http.url = "not a url".to_string();
-        profile.agent.http.method = "not a method".to_string();
-        profile.agent.http.timeout_secs = Some(0);
-        profile.agent.http.max_request_bytes = Some(0);
-        profile.agent.http.max_response_bytes = Some(0);
-        profile.agent.http.max_retry_after_secs = Some(86401);
+        profile.harness.http_mut().url = "not a url".to_string();
+        profile.harness.http_mut().method = "not a method".to_string();
+        profile.harness.http_mut().timeout_secs = Some(0);
+        profile.harness.http_mut().max_request_bytes = Some(0);
+        profile.harness.http_mut().max_response_bytes = Some(0);
+        profile.harness.http_mut().max_retry_after_secs = Some(86401);
         profile.defaults.max_attempts = 0;
         profile.defaults.min_execution_score = f64::NAN;
 
@@ -951,12 +981,12 @@ mod tests {
         for expected in [
             "agent.provider",
             "agent.name",
-            "agent.http.url",
-            "agent.http.method",
-            "agent.http.timeout_secs",
-            "agent.http.max_request_bytes",
-            "agent.http.max_response_bytes",
-            "agent.http.max_retry_after_secs",
+            "harness.http.url",
+            "harness.http.method",
+            "harness.http.timeout_secs",
+            "harness.http.max_request_bytes",
+            "harness.http.max_response_bytes",
+            "harness.http.max_retry_after_secs",
             "defaults.max_attempts",
             "defaults.min_execution_score",
         ] {

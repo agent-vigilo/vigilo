@@ -24,7 +24,7 @@ flowchart TD
     Cases[Read exact immutable bytes from bounded cache or storage; verify complete files and membership]
     Limits[Validate and serialize request within byte ceilings]
     Credentials{Credential absent or trusted resolution succeeds?}
-    Http[Direct Probe harness invokes target with authorized header and bounded response]
+    Http[Invoke configured harness, validate target identity and bound evidence]
     Permit[Acquire Wasm evaluation permits]
     Execute[Execute case evaluations in sandboxed stores]
     Persist[Persist completed results under verified ownership and lease fences; pause drains allocated batch only]

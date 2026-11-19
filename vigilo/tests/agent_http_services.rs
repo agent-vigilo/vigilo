@@ -20,7 +20,8 @@ fn profile(url: &str) -> RunProfile {
     serde_json::from_value(serde_json::json!({
         "profile_id":"test", "profile_version":"1", "description":"",
         "defaults":{"max_attempts":1,"request_timeout_secs":2,"fail_on_any_blocking_failure":true,"min_execution_score":0.5},
-        "agent":{"provider":"test","name":"test","http":{"url":url}},
+        "agent":{"provider":"test","name":"test","version":"1.0.0"},
+        "harness":{"kind":"direct_probe","http":{"url":url},"completion":{"kind":"inline"}},
         "persistence":{"mode":"full","persist_raw_outputs":"all","persist_evaluator_evidence":true},
         "case_groups":[]
     })).unwrap()
@@ -172,7 +173,7 @@ async fn oversized_request_and_profile_fail_before_connection() {
             .to_string()
             .contains("request serialization")
     );
-    p.agent.http.max_response_bytes = Some(11);
+    p.harness.http_mut().max_response_bytes = Some(11);
     let result = agent_client::invoke(
         agent_client::Services {
             resources: None,
@@ -200,7 +201,7 @@ async fn oversized_request_and_profile_fail_before_connection() {
 async fn response_timeout_remains_enforced_during_body_read() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut p = profile(&format!("http://{}", listener.local_addr().unwrap()));
-    p.agent.http.timeout_secs = Some(1);
+    p.harness.http_mut().timeout_secs = Some(1);
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut bytes = [0; 4096];
@@ -289,7 +290,7 @@ async fn failures_preserve_type_and_retry_advice_without_client_retries() {
 #[tokio::test]
 async fn credential_reference_without_provider_fails_closed() {
     let mut value = serde_json::to_value(profile("http://127.0.0.1:1")).unwrap();
-    value["agent"]["http"]["credential"] = serde_json::json!("agent-api");
+    value["harness"]["http"]["credential"] = serde_json::json!("agent-api");
     let profile = serde_json::from_value(value).unwrap();
     let err = agent_client::invoke(
         agent_client::Services {
@@ -630,7 +631,7 @@ async fn timeout_after_remote_acceptance_can_repeat_effects_with_distinct_attemp
         tokio::time::timeout(Duration::from_secs(10), async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let mut p = profile(&format!("http://{}", listener.local_addr().unwrap()));
-            p.agent.http.timeout_secs = Some(1);
+            p.harness.http_mut().timeout_secs = Some(1);
             if chat {
                 p.agent.config = json!({"request_format":"openai_compatible_chat_completions"});
             }

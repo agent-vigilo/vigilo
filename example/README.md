@@ -4,7 +4,7 @@ This example demonstrates a file-based run profile and dataset that target a loc
 
 ## Files
 
-- `profile.yaml`: Qwen sentiment evaluation profile using `agent.http`
+- `profile.yaml`: Qwen sentiment evaluation profile using `harness.http`
 - `dataset.yaml`: minimal sentiment classification dataset
 
 The profile points at `http://agent_vigilo_agent:8080/v1/chat/completions`, the llama.cpp-backed agent service in `infra/dev/docker-compose.single.yml`. Workers send an OpenAI-compatible chat completions request and preserve the complete response body. The profile explicitly maps the answer into `input.response-evidence` for the evaluator.

@@ -233,7 +233,7 @@ impl Fixture {
             &self.agent.url,
             SENTIMENT_EVALUATOR_REF,
         ))?;
-        profile["agent"]["http"]["credential"] = json!("agent-api");
+        profile["harness"]["http"]["credential"] = json!("agent-api");
         Ok(PrepareRun {
             run_id: run,
             dataset_upload_id: upload,

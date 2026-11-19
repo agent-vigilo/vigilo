@@ -25,6 +25,7 @@ pub(crate) enum Kind {
     Transport,
     BodyLimit,
     InvalidResponse,
+    RemoteFailure,
     RetryDelayExceeded,
 }
 

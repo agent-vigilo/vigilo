@@ -32,6 +32,25 @@ pub const MAX_EVIDENCE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_OUTCOME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_RECEIPT_BYTES: usize = 8 * 1024;
 pub const MAX_REFERENCE_BYTES: usize = 256;
+const MAX_EVIDENCE_CONTENT_TYPE_BYTES: usize = 1024;
+
+/// Checks a provider-specific identity at an explicitly configured JSON pointer.
+/// Callers first bound the response body under their transport policy.
+pub fn validate_reported_agent(
+    body: &[u8],
+    pointer: &crate::response::JsonPointer,
+    expected: &AgentIdentity,
+    required: bool,
+) -> Result<()> {
+    let value = parse(body, MAX_EVIDENCE_BYTES)?;
+    let Some(reported) = value.pointer(pointer.as_str()) else {
+        ensure!(!required, "executed agent is required");
+        return Ok(());
+    };
+    let reported: AgentIdentity = from_value(reported.clone())?;
+    ensure!(&reported == expected, "executed agent mismatch");
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -281,7 +300,10 @@ impl<'de> Deserialize<'de> for Evidence {
             encoding,
             body,
         } = EncodedEvidence::deserialize(input)?;
-        if content_type.trim().is_empty() || content_type.chars().any(char::is_control) {
+        if content_type.len() > MAX_EVIDENCE_CONTENT_TYPE_BYTES
+            || content_type.trim().is_empty()
+            || content_type.chars().any(char::is_control)
+        {
             return Err(D::Error::custom("invalid evidence content type"));
         }
         let bytes = match encoding {

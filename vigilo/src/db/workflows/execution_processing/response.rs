@@ -58,11 +58,11 @@ pub(crate) fn validate_limits(
         Kind,
     };
     let effective = limits
-        .resolve(&profile.agent.http)
+        .resolve(profile.harness.http())
         .map_err(|error| Failure::terminal(Kind::Configuration, error))?;
     if effective.max_response_bytes > 4 * 1024 * 1024 {
         return Err(Failure::terminal(Kind::Configuration,
-            "response evidence supports at most 4 MiB; set agent.http.max_response_bytes accordingly").into());
+            "response evidence supports at most 4 MiB; set harness.http.max_response_bytes accordingly").into());
     }
     Ok(())
 }
@@ -130,7 +130,8 @@ mod tests {
         let mut profile: RunProfile = serde_json::from_value(json!({
             "profile_id":"test","profile_version":"1","description":"",
             "defaults":{"max_attempts":1,"request_timeout_secs":2,"fail_on_any_blocking_failure":true,"min_execution_score":0.5},
-            "agent":{"provider":"test","name":"test","http":{"url":"http://localhost"},"response":{"schema_version":"1.0.0","interpretation":{"format":"json","mapping":{"items":[{"mode":"single","item":{"type":"message","content":[{"media_type":"text/plain","source":{"representation":"inline_text","selection":{"pointer":"/text"}}}]}}]}}}},
+            "harness":{"kind":"direct_probe","http":{"url":"http://localhost"},"completion":{"kind":"inline"}},
+            "agent":{"provider":"test","name":"test","version":"1.0.0","response":{"schema_version":"1.0.0","interpretation":{"format":"json","mapping":{"items":[{"mode":"single","item":{"type":"message","content":[{"media_type":"text/plain","source":{"representation":"inline_text","selection":{"pointer":"/text"}}}]}}]}}}},
             "case_groups":[]
         })).unwrap();
         let ceilings = crate::agent_client::limits::Limits {
@@ -144,11 +145,11 @@ mod tests {
                 .unwrap()
                 .retryable
         );
-        profile.agent.http.max_response_bytes = Some(4 * 1024 * 1024);
+        profile.harness.http_mut().max_response_bytes = Some(4 * 1024 * 1024);
         validate_limits(ceilings, &profile).unwrap();
-        profile.agent.http.max_response_bytes = Some(0);
+        profile.harness.http_mut().max_response_bytes = Some(0);
         assert!(validate_limits(ceilings, &profile).is_err());
-        profile.agent.http.max_response_bytes = None;
+        profile.harness.http_mut().max_response_bytes = None;
         validate_limits(Default::default(), &profile).unwrap();
         let provenance = Provenance {
             run_id: uuid::Uuid::new_v4(),

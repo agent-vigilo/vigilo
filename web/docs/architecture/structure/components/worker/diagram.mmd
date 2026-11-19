@@ -29,7 +29,7 @@ flowchart TD
     CaseBatchLoader["fa:fa-table-list <br/> <b>Case Batch Loader</b> <br/> <small>[Component: Rust / Storage Adapter]</small> <br/> <small>Verifies immutable configuration and assigned case files within byte budgets.</small>"]:::component
 
     ExecutionProcessor["fa:fa-list-check <br/> <b>Execution Processing Workflow</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Allocates due attempts under a shared run-state guard, skips retry waits, and runs chunk cases with bounded parallelism.</small>"]:::component
-    AgentClient["fa:fa-brain <br/> <b>Direct Probe Harness Transport</b> <br/> <small>[Component: Rust / HTTP]</small> <br/> <small>Sends correlated case requests, captures original response bytes and bounded invocation diagnostics.</small>"]:::component
+    AgentClient["fa:fa-brain <br/> <b>Inline Harness Transport</b> <br/> <small>[Component: Rust / HTTP]</small> <br/> <small>Invokes Direct Probe or Delegated Trial, validates target identity and captures bounded evidence.</small>"]:::component
     WasmSemaphore["fa:fa-gauge-high <br/> <b>Wasm Evaluation Semaphore</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Caps active evaluator invocations across the worker process.</small>"]:::component
     EvaluatorExecutor["fa:fa-microchip <br/> <b>Evaluator Runtime Executor</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Runs Code Scorers and Model-as-a-Judge implementations through the same ABI and fresh-store limits.</small>"]:::component
     CompletenessAggregator["fa:fa-list-check <br/> <b>Completeness & Aggregation</b> <br/> <small>[Component: Rust]</small> <br/> <small>Verifies required evaluator scores before calculating authoritative dimension and aggregate scores.</small>"]:::component
@@ -69,6 +69,7 @@ flowchart TD
     Database[("<b>Database Placements</b> <br/> <small>[Container: PostgreSQL]</small> <br/> <small>Store control evaluator metadata plus routed execution chunks, attempts, results, and aggregates.</small>")]:::component
     Queue[("<b>Queue</b> <br/> <small>[Container: RabbitMQ]</small> <br/> <small>Delivers run.chunk.ready broker messages to workers.</small>")]:::component
     TargetAgent["fa:fa-brain <br/> <b>Agent / AI Provider</b> <br/> <small>[External System]</small> <br/> <small>The model, agent wrapper, or HTTP endpoint being evaluated.</small>"]:::external
+    Trial["<b>Delegated Trial Harness</b><br/><small>[External System]</small>"]:::external
 
     CredentialSources["<b>Operator Secret Sources</b><br/>Environment or mounted files"]:::external
     CredentialService["<b>Credential Service</b><br/>External authorization and secret management"]:::external
@@ -113,8 +114,10 @@ flowchart TD
     InputByteCache -->|"Bounded verified reads on miss"| Objects
     MessageHandler -->|"Processes claimed case batch with"| ExecutionProcessor
 
-    ExecutionProcessor -->|"Invokes agent for chunk cases with bounded concurrency through"| AgentClient
-    AgentClient -->|"Sends case input and receives output from <br> <small>[TEXT/HTTP]</small>"| TargetAgent
+    ExecutionProcessor -->|"Invokes the configured harness with bounded concurrency through"| AgentClient
+    AgentClient -->|"Direct Probe <br> <small>[HTTP]</small>"| TargetAgent
+    AgentClient -->|"Submits case input and receives the outcome <br> <small>[HTTP]</small>"| Trial
+    Trial -->|Drives the session with| TargetAgent
     CapturedBody["<b>Original Response Bytes</b><br/>Immutable shared allocation; bounded content decoding."]:::component
     ResponseResources["<b>Response Resource Table</b><br/>Evaluator-store ownership; scoped handles and read budgets."]:::component
     AgentClient -->|"Captures complete decoded bodies"| CapturedBody

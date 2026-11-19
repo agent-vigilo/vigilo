@@ -39,6 +39,7 @@ flowchart TD
 
     %% external target
     TargetAgent["fa:fa-brain <br/> <b>Agent / AI Provider</b> <br/> <small>[External System]</small> <br/> <small>The model, agent wrapper, or API endpoint being evaluated</small>"]:::external
+    Trial["<b>Delegated Trial Harness</b><br/><small>[External System]</small>"]:::external
 
     %% edges
     User & AgentClient -->|"Manages evaluators, runs and runtime services using"| Vigilo
@@ -50,7 +51,9 @@ flowchart TD
     Coordinator -->|"Publishes routed chunk-ready broker messages to <br> <small>[JSON/AMQP]</small>"| Queue
     Queue -->|"Delivers routed chunk-ready broker messages to <br> <small>[JSON/AMQP]</small>"| Worker
     Worker -->|"Reads from <br/> and writes to <br> <small>[SQL/TCP]</small>"| Database
-    Worker -->|"Calls the configured endpoint and captures a bounded response <br> <small>[HTTP]</small>"| TargetAgent
+    Worker -->|"Direct Probe <br> <small>[HTTP]</small>"| TargetAgent
+    Worker -->|"Submits case input and receives the outcome <br> <small>[HTTP]</small>"| Trial
+    Trial -->|Drives the session with| TargetAgent
 
     Vigilo -->|Publishes verified datasets and run plans through adapters| Objects
     Coordinator -->|Reads verified plans for admission recovery| Objects

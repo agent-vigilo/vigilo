@@ -21,8 +21,10 @@ results, and publishes gate decisions after exact settlement.
 
 ## Harness And Evaluator Boundary
 
-The worker uses a <GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm>
-harness to invoke the configured target and capture evidence. Evaluators consume
+The worker uses the configured harness to obtain evidence. A
+<GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm> calls the target. A
+<GlossaryTerm term="delegated-trial">Delegated Trial</GlossaryTerm> calls the
+service that orchestrates the target session and verifies its reported target. Evaluators consume
 that evidence and return measurements or abstentions; host policy owns
 normalization, aggregation and gates.
 
@@ -158,7 +160,7 @@ The worker invokes the configured agent target:
 
 - may be a single model call
 - may run an internal multi-step workflow within the HTTP response deadline
-- is invoked through the run profile `agent.http` endpoint
+- is invoked directly or through a Delegated Trial service at `harness.http`
 
 The native request contains run, execution and attempt IDs, agent identity, case
 input, and non-oracle case metadata. Chat Completions requests use `model` and

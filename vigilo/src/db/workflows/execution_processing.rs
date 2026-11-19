@@ -1,6 +1,6 @@
 //! Execution processing workflow.
 //!
-//! The Direct Probe harness obtains target evidence before evaluator execution.
+//! The configured harness obtains target evidence before evaluator execution.
 //! Code Scorers and Model-as-a-Judge implementations share the same evaluator
 //! boundary; host policy owns normalization, aggregation and gates.
 //!
@@ -2044,10 +2044,13 @@ mod tests {
                 response: None,
                 provider: "example".to_string(),
                 name: "agent".to_string(),
-                version: None,
+                version: Some("1.0.0".into()),
                 model: None,
                 prompt_config_id: None,
                 prompt_config_version: None,
+                config: json!({}),
+            },
+            harness: crate::invocation::profile::Harness::DirectProbe {
                 http: AgentHttpConfig {
                     credential: None,
                     url: "http://127.0.0.1:8787/v1/agent/invoke".to_string(),
@@ -2058,7 +2061,11 @@ mod tests {
                     max_response_bytes: None,
                     max_retry_after_secs: None,
                 },
-                config: json!({}),
+                completion: crate::invocation::profile::Completion::Inline {},
+                capabilities: None,
+                require_executed_agent: false,
+                executed_agent_pointer: None,
+                forward_case_context: false,
             },
             case_groups: groups,
         }

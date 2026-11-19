@@ -224,6 +224,8 @@ fn evidence_enforces_decoded_and_envelope_byte_limits() {
     };
     assert_eq!(evidence.bytes, "é".as_bytes());
     let mut body = bytes(&doc);
+    doc["evidence"]["content_type"] = json!("x".repeat(1025));
+    assert!(Outcome::decode(&bytes(&doc), id(), &agent(), false).is_err());
     body.resize(MAX_OUTCOME_BYTES + 1, b' ');
     assert!(Outcome::decode(&body, id(), &agent(), false).is_err());
 }
@@ -247,4 +249,20 @@ fn failed_outcomes_and_cancellation_reject_untrusted_fields() {
     Cancellation::decode(&bytes(&cancel), 8192).unwrap();
     cancel["provider_reference"] = json!("x".repeat(257));
     assert!(Cancellation::decode(&bytes(&cancel), 8192).is_err());
+}
+
+#[test]
+fn provider_reported_identity_is_only_read_from_the_explicit_pointer() {
+    let pointer = crate::response::JsonPointer::new("/reported".into()).unwrap();
+    let check = |body: &Value, required| {
+        super::wire::validate_reported_agent(&bytes(body), &pointer, &agent(), required)
+    };
+    let elsewhere = json!({"executed_agent":agent()});
+    assert!(check(&elsewhere, false).is_ok());
+    assert!(check(&elsewhere, true).is_err());
+    assert!(check(&json!({"reported":agent()}), true).is_ok());
+    assert!(check(&json!({"reported":null}), false).is_err());
+    let mut stale = agent();
+    stale.version = "2.0.0".into();
+    assert!(check(&json!({"reported":stale}), false).is_err());
 }

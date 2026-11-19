@@ -31,7 +31,7 @@ impl Limits {
             let value = requested.unwrap_or(ceiling);
             anyhow::ensure!(
                 value > 0 && value <= ceiling,
-                "agent.http.{name} must be between 1 and worker ceiling {ceiling}"
+                "harness.http.{name} must be between 1 and worker ceiling {ceiling}"
             );
             Ok(value)
         }
@@ -91,7 +91,7 @@ impl Write for Body {
 }
 
 /// Serialize directly into a bounded buffer rather than allocating then checking.
-pub(crate) fn serialize(value: &serde_json::Value, limit: u64) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn serialize(value: &impl serde::Serialize, limit: u64) -> anyhow::Result<Vec<u8>> {
     let mut body = Body::new(limit);
     serde_json::to_writer(&mut body, value)
         .map_err(|err| anyhow::anyhow!("agent HTTP request serialization failed: {err}"))?;

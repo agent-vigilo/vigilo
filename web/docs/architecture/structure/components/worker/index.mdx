@@ -19,9 +19,10 @@ The trusted library host obtains `operations::Worker` from a validated
 path and service caches. The host owns cancellation and task joining; shutdown
 drains admitted chunks, and dropped work stops its lease heartbeat.
 
-The worker separates the <GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm>
-harness, which obtains target evidence, from evaluator execution, which measures
-it. <GlossaryTerm term="code-scorer">Code Scorers</GlossaryTerm> and
+The worker obtains target evidence through
+<GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm> or
+<GlossaryTerm term="delegated-trial">Delegated Trial</GlossaryTerm>. It verifies
+the reported target identity before passing evidence to evaluators. <GlossaryTerm term="code-scorer">Code Scorers</GlossaryTerm> and
 <GlossaryTerm term="model-as-a-judge">Model-as-a-Judge</GlossaryTerm> implementations
 share the evaluator ABI and resource limits. Judge calls use evaluator-specific
 HTTP permissions; they are separate from the harness call to the target.

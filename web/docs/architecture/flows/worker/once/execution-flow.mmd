@@ -14,7 +14,7 @@ sequenceDiagram
     participant Objects as Object Storage
     participant ExecutionDB as Execution DB
     participant Credentials as Credential Provider
-    participant Agent as Agent Target
+    participant Agent as Direct Target or Delegated Trial Service
     participant WASM as Wasm Runtime
 
     User->>Vigilo: vigilo worker once
@@ -66,7 +66,7 @@ sequenceDiagram
                 Vigilo->>WASM: Warm evaluator components
                 WASM-->>Vigilo: Warmup result
                 Vigilo->>Queue: Hold delivery unacked while chunk is owned
-                opt Direct Probe harness invocation
+                opt Inline harness invocation
                     Vigilo->>Vigilo: Validate profile byte limits against worker ceilings
                     opt Profile references a credential
                         Vigilo->>Credentials: Resolve trusted binding with runtime IDs and destination
@@ -74,7 +74,7 @@ sequenceDiagram
                     end
                     alt Request and credential validation succeed
                         Vigilo->>Agent: Invoke bounded request with attempt correlation and authorized credential
-                        Agent-->>Vigilo: Response headers and encoded body
+                        Agent-->>Vigilo: Response headers and encoded body, native trial outcomes include executed agent
                         Vigilo->>Vigilo: Capture decoded original bytes under size and deadline limits
                         Vigilo->>Vigilo: Map once and pack retained evidence with exact provenance
                         Vigilo->>Vigilo: Retain status, HTTP latency, supported usage and Retry-After

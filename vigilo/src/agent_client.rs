@@ -1,4 +1,4 @@
-//! Direct Probe (Direct Execution of Target Agent) harness transport.
+//! HTTP transport for inline Direct Probe and Delegated Trial.
 //!
 //! Invokes the target interface and captures evidence; it does not launch the
 //! target process or score its response. Evaluators measure the captured evidence.
@@ -60,6 +60,18 @@ use serde_json::{
     json,
 };
 use uuid::Uuid;
+use vigilo::invocation::{
+    profile::{
+        AgentIdentity,
+        Harness,
+    },
+    wire::{
+        self,
+        CaseInput,
+        Outcome,
+        Submission,
+    },
+};
 
 use crate::contracts::{
     evaluator::{
@@ -75,7 +87,8 @@ const REQUEST_FORMAT_OPENAI_COMPATIBLE_CHAT_COMPLETIONS: &str =
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentRequestFormat {
-    /// Agent Vigilo's native request envelope for custom agent endpoints.
+    Native,
+    /// The Vigilo case request format for custom agent endpoints.
     ///
     /// This is the default when `agent.config.request_format` is absent. The
     /// payload carries Vigilo execution metadata and case input, but not the
@@ -93,6 +106,13 @@ enum AgentRequestFormat {
 
 impl AgentRequestFormat {
     fn from_profile(run_profile: &RunProfile) -> anyhow::Result<Self> {
+        if matches!(run_profile.harness, Harness::DelegatedTrial { .. }) {
+            anyhow::ensure!(
+                run_profile.agent.config.get("request_format").is_none(),
+                "delegated_trial uses the native invocation contract"
+            );
+            return Ok(Self::Native);
+        }
         let Some(format_value) = run_profile.agent.config.get("request_format") else {
             return Ok(Self::VigiloCase);
         };
@@ -101,12 +121,13 @@ impl AgentRequestFormat {
         };
 
         match format {
+            "native" => Ok(Self::Native),
             REQUEST_FORMAT_VIGILO_CASE => Ok(Self::VigiloCase),
             REQUEST_FORMAT_OPENAI_COMPATIBLE_CHAT_COMPLETIONS => {
                 Ok(Self::OpenAiCompatibleChatCompletions)
             }
             other => anyhow::bail!(
-                "unsupported agent.config.request_format '{}'; expected '{}' or '{}'",
+                "unsupported agent.config.request_format '{}'; expected 'native', '{}' or '{}'",
                 other,
                 REQUEST_FORMAT_VIGILO_CASE,
                 REQUEST_FORMAT_OPENAI_COMPATIBLE_CHAT_COMPLETIONS
@@ -116,12 +137,51 @@ impl AgentRequestFormat {
 }
 
 pub(crate) fn validate_request_format(run_profile: &RunProfile) -> anyhow::Result<()> {
+    requested_agent(run_profile)?;
+    anyhow::ensure!(
+        run_profile.harness.is_inline(),
+        "only inline harness completion is available"
+    );
+    run_profile.harness.validate(false)?;
     if let Some(response) = &run_profile.agent.response
         && let vigilo::response::Interpretation::Json { mapping } = &response.interpretation
     {
         mapping.validate().map_err(anyhow::Error::msg)?;
     }
-    AgentRequestFormat::from_profile(run_profile).map(|_| ())
+    let format = AgentRequestFormat::from_profile(run_profile)?;
+    if let Harness::DirectProbe {
+        require_executed_agent,
+        executed_agent_pointer,
+        ..
+    } = &run_profile.harness
+    {
+        if format == AgentRequestFormat::Native {
+            anyhow::ensure!(
+                executed_agent_pointer.is_none(),
+                "native outcomes have a fixed executed_agent field"
+            );
+        } else {
+            anyhow::ensure!(
+                !require_executed_agent || executed_agent_pointer.is_some(),
+                "required executed_agent needs an explicit response pointer"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn requested_agent(profile: &RunProfile) -> anyhow::Result<AgentIdentity> {
+    let agent = &profile.agent;
+    let identity = AgentIdentity {
+        provider: agent.provider.clone(),
+        name: agent.name.clone(),
+        version: agent
+            .version
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("agent.version is required"))?,
+    };
+    identity.validate()?;
+    Ok(identity)
 }
 
 fn build_request_body(
@@ -132,6 +192,7 @@ fn build_request_body(
     test_case: &TestCase,
 ) -> anyhow::Result<Value> {
     match AgentRequestFormat::from_profile(run_profile)? {
+        AgentRequestFormat::Native => anyhow::bail!("native request requires a deadline"),
         AgentRequestFormat::VigiloCase => Ok(build_vigilo_case_request_body(
             run_id,
             execution_id,
@@ -336,7 +397,7 @@ pub(crate) async fn invoke(
         run_id,
         execution_id,
         attempt_id,
-        &run_profile.agent.http.url,
+        &run_profile.harness.http().url,
     );
     let result = invoke_inner(
         services,
@@ -374,7 +435,8 @@ async fn invoke_inner(
 ) -> anyhow::Result<AgentOutput> {
     validate_request_format(run_profile)
         .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
-    let http = &run_profile.agent.http;
+    let http = run_profile.harness.http();
+    let format = AgentRequestFormat::from_profile(run_profile)?;
     if http
         .headers
         .keys()
@@ -396,7 +458,7 @@ async fn invoke_inner(
     if max_retry_after == 0 || max_retry_after > failure::MAX_RETRY_AFTER_SECS {
         return Err(Failure::terminal(
             Kind::Configuration,
-            "agent.http.max_retry_after_secs must be between 1 and 86400",
+            "harness.http.max_retry_after_secs must be between 1 and 86400",
         )
         .into());
     }
@@ -418,12 +480,38 @@ async fn invoke_inner(
         )
     })?;
 
-    let request_body = build_request_body(run_id, execution_id, attempt_id, run_profile, test_case)
-        .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
     // Resolve only after the request is serialized and bounded. Credentials are
     // added to transport headers, never the profile or evaluator payload.
-    let request_body = limits::serialize(&request_body, limits.max_request_bytes)
-        .map_err(|err| Failure::terminal(Kind::BodyLimit, err))?;
+    let request_body = if format == AgentRequestFormat::Native {
+        let forward_context = match &run_profile.harness {
+            Harness::DirectProbe {
+                forward_case_context,
+                ..
+            }
+            | Harness::DelegatedTrial {
+                forward_case_context,
+                ..
+            } => *forward_case_context,
+        };
+        let submission = Submission {
+            schema_version: wire::SCHEMA_VERSION.into(),
+            invocation_id: attempt_id,
+            requested_agent: requested_agent(run_profile)?,
+            deadline_at: (chrono::Utc::now() + chrono::TimeDelta::seconds(i64::from(timeout_secs)))
+                .fixed_offset(),
+            case: CaseInput {
+                input: test_case.input.clone(),
+                context: test_case.context.clone().filter(|_| forward_context),
+            },
+            callback: None,
+        };
+        limits::serialize(&submission, limits.max_request_bytes)
+    } else {
+        let request = build_request_body(run_id, execution_id, attempt_id, run_profile, test_case)
+            .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
+        limits::serialize(&request, limits.max_request_bytes)
+    }
+    .map_err(|err| Failure::terminal(Kind::BodyLimit, err))?;
     let resolved = match http.credential.as_deref() {
         Some(reference) => Some(
             services
@@ -491,7 +579,12 @@ async fn invoke_inner(
             max_retry_after,
         )
     });
-    let captured = capture::collect(response, limits.max_response_bytes, deadline)
+    let capture_limit = if format == AgentRequestFormat::Native && status.is_success() {
+        wire::MAX_OUTCOME_BYTES as u64
+    } else {
+        limits.max_response_bytes
+    };
+    let captured = capture::collect(response, capture_limit, deadline)
         .await
         .map_err(|error| {
             if error.kind == Kind::BodyLimit {
@@ -500,26 +593,78 @@ async fn invoke_inner(
                 http_failure.clone().unwrap_or(error)
             }
         })?;
-    let bytes = captured.bytes();
     observation.finish_http();
-    // Match reqwest text decoding: strip a UTF-8 BOM and replace invalid UTF-8.
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
-    let body = String::from_utf8_lossy(bytes);
 
     if let Some(failure) = http_failure {
         return Err(if http.credential.is_some() {
             // Authenticated endpoints may echo credentials in error bodies.
             failure
         } else {
-            failure.with_excerpt(&response_body_excerpt(&body))
+            let bytes = captured.bytes();
+            let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+            failure.with_excerpt(&response_body_excerpt(&String::from_utf8_lossy(bytes)))
         }
         .into());
     }
 
-    // Usage is operational data for the explicitly selected request adapter;
-    // parsing failure never invalidates successfully delivered behavior.
-    if AgentRequestFormat::from_profile(run_profile)?
-        == AgentRequestFormat::OpenAiCompatibleChatCompletions
+    if format == AgentRequestFormat::Native {
+        let require_agent = match &run_profile.harness {
+            Harness::DelegatedTrial { .. } => true,
+            Harness::DirectProbe {
+                require_executed_agent,
+                ..
+            } => *require_executed_agent,
+        };
+        return match Outcome::decode(
+            captured.bytes(),
+            attempt_id,
+            &requested_agent(run_profile)?,
+            require_agent,
+        )
+        .map_err(|error| {
+            Failure::terminal(Kind::InvalidResponse, error).with_status(status.as_u16())
+        })? {
+            Outcome::Completed { evidence, .. } => {
+                if evidence.bytes.len() as u64 > limits.max_response_bytes {
+                    return Err(Failure::terminal(
+                        Kind::BodyLimit,
+                        "native evidence exceeds configured response limit",
+                    )
+                    .with_status(status.as_u16())
+                    .into());
+                }
+                Ok(captured_output(vigilo::response::CapturedBody::new(
+                    evidence.bytes,
+                    Some(evidence.content_type),
+                )))
+            }
+            Outcome::Failed { .. } => Err(Failure::terminal(
+                Kind::RemoteFailure,
+                "remote invocation reported failure",
+            )
+            .with_status(status.as_u16())
+            .into()),
+        };
+    }
+    if let Harness::DirectProbe {
+        executed_agent_pointer: Some(pointer),
+        require_executed_agent,
+        ..
+    } = &run_profile.harness
+    {
+        wire::validate_reported_agent(
+            captured.bytes(),
+            pointer,
+            &requested_agent(run_profile)?,
+            *require_executed_agent,
+        )
+        .map_err(|error| {
+            Failure::terminal(Kind::InvalidResponse, error).with_status(status.as_u16())
+        })?;
+    }
+
+    // Provider usage is independent of the evidence contract.
+    if format == AgentRequestFormat::OpenAiCompatibleChatCompletions
         && let Ok(value) = serde_json::from_slice::<Value>(captured.bytes())
     {
         observation.data.usage = diagnostics::chat_usage(&value);
@@ -568,10 +713,15 @@ persistence:
 agent:
   provider: example
   name: agent
-  http:
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
   config:
     request_format: unsupported
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
 case_groups: []
 "#,
         )
@@ -579,8 +729,9 @@ case_groups: []
 
         let err = validate_request_format(&profile).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("expected 'vigilo_case' or 'openai_compatible_chat_completions'")
+            err.to_string().contains(
+                "expected 'native', 'vigilo_case' or 'openai_compatible_chat_completions'"
+            )
         );
     }
 
@@ -603,10 +754,15 @@ persistence:
 agent:
   provider: example
   name: agent
-  http:
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
   config:
     request_format: 12
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
 case_groups: []
 "#,
         )
@@ -639,12 +795,17 @@ agent:
   provider: llama.cpp
   name: qwen
   model: qwen2.5-0.5b-instruct-q4_k_m.gguf
-  http:
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
   config:
     request_format: openai_compatible_chat_completions
     system_prompt: classify sentiment
     max_tokens: 64
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
 case_groups: []
 "#,
         )
@@ -698,6 +859,11 @@ persistence:
 agent:
   provider: example
   name: model
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
   http:
     url: http://localhost/invoke
 case_groups: []

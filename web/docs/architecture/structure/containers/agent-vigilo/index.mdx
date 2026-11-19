@@ -40,8 +40,8 @@ RabbitMQ <GlossaryTerm term="broker">broker</GlossaryTerm>, object storage, and 
 - The coordinator inserts outbox event records in PostgreSQL and publishes them
   as broker messages. Workers claim the chunks named by those messages before
   doing work.
-- The external agent target is outside the Vigilo trust and persistence
-  boundary. Wasm evaluators execute inside worker processes.
+- The agent target and Delegated Trial harness are external systems. Wasm
+  evaluators execute inside worker processes.
 
 ## Related
 

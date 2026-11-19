@@ -21,7 +21,8 @@ pub struct AgentIdentity {
 }
 
 impl AgentIdentity {
-    pub(super) fn validate(&self) -> Result<()> {
+    /// Checks that each part of the exact target identity has a usable value.
+    pub fn validate(&self) -> Result<()> {
         ensure!(
             [&self.provider, &self.name, &self.version]
                 .iter()
@@ -59,6 +60,7 @@ pub enum Harness {
         capabilities: Option<Capabilities>,
         #[serde(default)]
         require_executed_agent: bool,
+        executed_agent_pointer: Option<crate::response::JsonPointer>,
         #[serde(default)]
         forward_case_context: bool,
     },
@@ -72,7 +74,31 @@ pub enum Harness {
 }
 
 impl Harness {
-    fn validate(&self, callback_available: bool) -> Result<()> {
+    /// Endpoint and limits for the initial invocation request.
+    pub fn http(&self) -> &HttpEndpoint {
+        match self {
+            Self::DirectProbe { http, .. } | Self::DelegatedTrial { http, .. } => http,
+        }
+    }
+
+    /// Mutable endpoint configuration for profile builders.
+    pub fn http_mut(&mut self) -> &mut HttpEndpoint {
+        match self {
+            Self::DirectProbe { http, .. } | Self::DelegatedTrial { http, .. } => http,
+        }
+    }
+
+    /// Whether the final outcome comes back in the initial response.
+    pub fn is_inline(&self) -> bool {
+        match self {
+            Self::DirectProbe { completion, .. } | Self::DelegatedTrial { completion, .. } => {
+                matches!(completion, Completion::Inline {})
+            }
+        }
+    }
+
+    /// Checks the harness destinations and the selected completion requirements.
+    pub fn validate(&self, callback_available: bool) -> Result<()> {
         let (http, completion, capabilities) = match self {
             Self::DirectProbe {
                 http,
@@ -128,7 +154,14 @@ pub struct HttpEndpoint {
     pub url: String,
     #[serde(default = "post")]
     pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    pub timeout_secs: Option<u32>,
+    pub max_request_bytes: Option<u64>,
+    pub max_response_bytes: Option<u64>,
+    pub max_retry_after_secs: Option<u32>,
 }
 
 fn post() -> String {

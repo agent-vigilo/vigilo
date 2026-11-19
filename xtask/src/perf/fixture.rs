@@ -275,6 +275,7 @@ fn profile_value(
         "agent": {
             "provider": "vigilo-performance",
             "name": "deterministic-agent",
+            "version": "1.0.0",
             "response": {
                 "schema_version": "1.0.0",
                 "interpretation": {"format": "json", "mapping": {"items": [{
@@ -282,7 +283,11 @@ fn profile_value(
                         "media_type": "text/plain", "source": {"representation": "inline_text", "selection": {"pointer": "/text"}}
                     }]}
                 }]}}
-            },
+            }
+        },
+        "harness": {
+            "kind": "direct_probe",
+            "completion": {"kind": "inline"},
             "http": {"url": agent_url}
         },
         "case_groups": [{

@@ -85,10 +85,15 @@ agent:
   provider: llama.cpp
   name: qwen2.5-0.5b-instruct
   model: qwen2.5-0.5b-instruct-q4_k_m.gguf
-  http:
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
   config:
     request_format: openai_compatible_chat_completions
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
 case_groups: []
 ```
 
@@ -100,7 +105,8 @@ case_groups: []
 - `defaults` (object): run-level behavior defaults.
 - `persistence` (object): persistence policy controls.
 - `scorecard` (object): run-level dimension and evaluator gates.
-- `agent` (object): required worker-side target invocation configuration.
+- `agent` (object): required identity and configuration of the target.
+- `harness` (object): required harness kind, invocation endpoint and completion method.
 - `case_groups` (array): per-task evaluator and aggregation definitions.
 
 ## `defaults`
@@ -137,13 +143,13 @@ uses the same full/summary distinction.
 
 These settings affect execution/result artifact retention. Dataset case blobs and dataset-version membership remain durable so workers can execute retries and runs remain reproducible by content hash. The run profile snapshot is also retained because workers load it to invoke the configured agent and evaluators.
 
-Use `agent.http.credential` with [worker credential bindings](./agent-credentials.mdx) for authentication. Static `agent.http.headers` values are retained in the immutable run configuration and must contain only nonsecret values.
+Use `harness.http.credential` with [worker credential bindings](./agent-credentials.mdx) for authentication. Static `harness.http.headers` values are retained in the immutable run configuration and must contain only nonsecret values.
 
 ## `agent`
 
-The agent block identifies the target under evaluation and provides the HTTP endpoint workers call before running evaluators.
+The agent block identifies the target under evaluation. The harness block selects the invocation endpoint and completion method.
 
-`agent.http.credential` optionally names an operator-authorized credential binding.
+`harness.http.credential` optionally names an operator-authorized credential binding.
 The worker resolves and injects its value without storing it in the run profile.
 See [Agent Credentials](./agent-credentials.mdx) for standalone and service providers.
 
@@ -156,10 +162,6 @@ agent:
   model: qwen2.5-0.5b-instruct-q4_k_m.gguf
   prompt_config_id: qwen-sentiment-json
   prompt_config_version: 1.0.0
-  http:
-    method: POST
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
-    timeout_secs: 120
   config:
     request_format: openai_compatible_chat_completions
     temperature: 0.0
@@ -168,15 +170,22 @@ agent:
       type: json_object
     system_prompt: |
       Return only JSON with this exact shape: {"label":"<label>"}.
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    method: POST
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
+    timeout_secs: 120
 ```
 
 - `provider` (string): provider or platform for the evaluated target.
 - `name` (string): logical agent name.
-- `version` (string, optional): deployment or release version.
+- `version` (string): exact deployment or release version.
 - `model` (string, optional): provider-specific model identifier.
 - `prompt_config_id` (string, optional): prompt/config identity persisted with the run.
 - `prompt_config_version` (string, optional): prompt/config version persisted with the run.
-- `http` (object): required worker invocation endpoint.
 - `config` (object, optional): unstructured agent configuration included in invocation metadata. Set `request_format: openai_compatible_chat_completions` for OpenAI-compatible servers such as llama.cpp.
 
 Agent HTTP body limits are optional positive byte counts:
@@ -185,6 +194,11 @@ Agent HTTP body limits are optional positive byte counts:
 agent:
   provider: example
   name: agent
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
   http:
     url: http://agent:8080/invoke
     timeout_secs: 30
@@ -192,32 +206,57 @@ agent:
     max_response_bytes: 2097152
 ```
 
-These fields limit the serialized request and received response bodies. Omission
+These fields limit the serialized request and the evidence body. Omission
 uses the worker ceiling. Zero is invalid; a value above the executing worker's
 ceiling fails before HTTP invocation. Run validation cannot determine every worker's
 local ceiling. See [runtime limits](./runtime-limits.mdx#agent-http-bodies) for flags,
 defaults, and failure behavior.
 
-### Harness boundary
+## `harness`
 
-`agent.http` configures the
-<GlossaryTerm term="direct-probe">Direct Probe (Direct Execution of Target Agent)</GlossaryTerm>
-harness. Evaluator bindings select the scorers that measure its evidence. Harness
-and evaluator types are independent, and neither selects a completion-delivery
-protocol. <GlossaryTerm term="delegated-trial">Delegated Trial (Harness-Orchestrated Session)</GlossaryTerm>
-is not a selectable execution mode in this profile.
+A run binds one target agent to one evaluation harness. Case input varies by case,
+and case groups select evaluators and scoring. The harness specifies `kind`,
+`http` and an explicit `completion.kind: inline`.
 
-### Invocation boundary
+| Harness kind | HTTP endpoint and response |
+| --- | --- |
+| `direct_probe` | Invokes the target directly. Select the Vigilo case or Chat Completions request format, or set `agent.config.request_format: native` for the native invocation envelope. |
+| `delegated_trial` | Invokes a separate harness that drives a session with the requested agent and returns the final outcome in the initial HTTP response. Uses the native invocation envelope. |
 
-Each attempt receives one complete, bounded HTTP response within its configured
-deadline. The external agent owns any internal tool use, conversation or simulation
-that produces that response. Vigilo evaluates the returned evidence; it does not
-launch the agent or drive its internal turns.
+```yaml
+agent:
+  provider: acme
+  name: support-agent
+  version: "1.2.0"
 
-Callbacks and completion events are not agent response inputs. A streaming response
-is not processed incrementally as evaluator evidence. See the
-[request format reference](#request-format-support) and
-[representative response formats](#representative-response-formats) for exact scope.
+harness:
+  kind: delegated_trial
+  completion:
+    kind: inline
+  http:
+    url: https://trials.example.com/execute
+    timeout_secs: 120
+  forward_case_context: false
+```
+
+The native request includes `schema_version: "1.0.0"`, `invocation_id`,
+`requested_agent`, `deadline_at` and `case.input`. Set `forward_case_context: true`
+to include case context. The harness reports `status: completed` with an evidence
+object containing `content_type`, `encoding` (`utf8` or `base64`) and `body`, or
+`status: failed` with a structured `error`. It echoes the schema version and
+invocation ID. A successful Delegated Trial requires `executed_agent` with matching
+`provider`, `name` and `version`. Vigilo checks that identity before scoring.
+
+For Direct Probe, `require_executed_agent: true` requires the returned identity.
+With a native outcome it is read from `executed_agent`. With a provider-specific
+response, use `executed_agent_pointer` to select the identity object. Vigilo checks
+any identity selected by that pointer, including when its presence is optional.
+
+The native envelope is capped at 8 MiB. Decoded evidence is capped at 4 MiB and
+honors the worker and profile response limits. Response mapping applies to the
+decoded evidence. The configured endpoint or harness owns any internal tools,
+conversation or simulation. Each invocation returns its complete outcome within
+the HTTP deadline.
 
 ### Agent invocation diagnostics
 
@@ -265,7 +304,7 @@ transaction.
 
 ### Agent invocation failures and retries
 
-`agent.http.max_retry_after_secs` bounds accepted server retry advice. It defaults
+`harness.http.max_retry_after_secs` bounds accepted server retry advice. It defaults
 to `600`; configured values must be between `1` and `86400` seconds. It is a
 per-attempt scheduling bound, not a total run deadline. `defaults.max_attempts`
 remains the maximum number of attempts, including the initial attempt.
@@ -314,8 +353,8 @@ agent execution or remotely cancel work when an attempt expires.
 
 | Identity | Across retries of one execution | Visible to endpoint |
 | --- | --- | --- |
-| `run_id`, `execution_id` | Remain stable | Native `vigilo_case` body |
-| `attempt_id` | Changes for each allocated attempt | Native body and `X-Vigilo-Attempt-Id` header for both request formats |
+| `run_id`, `execution_id` | Remain stable | `vigilo_case` body |
+| `attempt_id` | Changes for each allocated attempt | `vigilo_case` body, native `invocation_id`, and `X-Vigilo-Attempt-Id` header |
 
 Chat Completions requests omit Vigilo execution identifiers from the body. Their
 attempt header identifies one invocation, not the logical execution. All three
@@ -329,7 +368,7 @@ not independent evaluation samples. Database ownership checks reject stale worke
 writes, but cannot undo an external action or deduplicate an agent request.
 
 Vigilo does not synthesize an `Idempotency-Key` or implement provider-specific
-remote deduplication. A custom endpoint accepting the native envelope can use
+remote deduplication. A custom endpoint accepting the Vigilo case request can use
 `run_id` plus `execution_id` within its own authenticated namespace as a logical
 key, but must define atomic acceptance, concurrent duplicate handling, payload
 conflict detection, stored-result reuse, and retention covering the entire retry
@@ -350,6 +389,7 @@ configure [explicit response mapping](#explicit-response-contracts).
 | --- | --- | --- |
 | `vigilo_case` (default) | Case input as JSON, context, tags, metadata, and execution identifiers | Sends the Vigilo envelope, not an arbitrary provider request; excludes `expected` |
 | `openai_compatible_chat_completions` | Ordered string-content messages, optional system prompt, model, and selected options | Text-only request adapter; always sends `stream: false` |
+| `native` | Case input as JSON, optional context, and the requested agent identity | Uses the [native invocation contract](#harness) for the request and final outcome |
 
 For Chat Completions, `input.messages` must be an array of objects containing only
 `role` and string `content`. Omitted `role` defaults to `user`; malformed roles,

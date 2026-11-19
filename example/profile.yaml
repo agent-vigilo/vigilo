@@ -48,10 +48,6 @@ agent:
   model: qwen2.5-0.5b-instruct-q4_k_m.gguf
   prompt_config_id: qwen-sentiment-text
   prompt_config_version: 1.0.0
-  http:
-    method: POST
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
-    timeout_secs: 120
   config:
     request_format: openai_compatible_chat_completions
     temperature: 0.0
@@ -60,6 +56,14 @@ agent:
       Rewrite the user message as a short English sentence preserving its sentiment.
       Return only the rewritten sentence, without JSON or commentary.
 
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    method: POST
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
+    timeout_secs: 120
 case_groups:
   - id: sentiment_classification
     description: Evaluates sentiment classification responses from the local agent.

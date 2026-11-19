@@ -30,7 +30,7 @@ Worker commands accept these process-local ceilings:
 | `--agent-max-response-bytes` | `VIGILO_AGENT_MAX_RESPONSE_BYTES` | 4 MiB (4,194,304 bytes) |
 
 Values must be between 1 byte and 1 GiB. A run profile can request lower limits
-through `agent.http.max_request_bytes` and `agent.http.max_response_bytes`.
+through `harness.http.max_request_bytes` and `harness.http.max_response_bytes`.
 Omitted values use the executing worker's ceilings. A worker rejects zero or
 above-ceiling overrides before sending a request; it does not silently clamp them.
 Use consistent ceilings across workers serving the same workload.

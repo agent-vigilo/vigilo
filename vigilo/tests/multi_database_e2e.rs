@@ -466,6 +466,93 @@ async fn mapping_failure_retains_original_and_fails_required_gate_without_retry(
 }
 
 #[tokio::test]
+async fn inline_harnesses_score_only_evidence_from_the_requested_target() -> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    for (kind, name, valid) in [
+        ("direct_probe", "mock-agent", true),
+        ("delegated_trial", "mock-agent", true),
+        ("delegated_trial", "different-target", false),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let profile_path = dir.path().join("profile.json");
+        let dataset_path = dir.path().join("dataset.yaml");
+        let mut profile: Value = serde_yaml::from_str(&profile_yaml(
+            "inline_harness",
+            &fixture.agent.url,
+            SENTIMENT_EVALUATOR_REF,
+        ))?;
+        profile["agent"]["name"] = json!(name);
+        profile["harness"]["kind"] = json!(kind);
+        if kind == "direct_probe" {
+            profile["agent"]["config"]["request_format"] = json!("native");
+        }
+        fs::write(&profile_path, serde_json::to_vec(&profile)?)?;
+        fs::write(&dataset_path, dataset_yaml(1, CaseMode::Passing))?;
+        let created = run_vigilo_json(
+            &fixture.config,
+            SHARD_ALIAS,
+            "single-default",
+            [
+                "run",
+                "create",
+                "--profile-file",
+                path_arg(&profile_path)?,
+                "--dataset-file",
+                path_arg(&dataset_path)?,
+            ],
+        )?;
+        let run: Uuid = created["data"]["run_id"].as_str().unwrap().parse()?;
+        let status = drive_run_to_status(
+            &fixture,
+            kind,
+            SHARD_ALIAS,
+            "single-default",
+            run,
+            "completed",
+        )
+        .await?;
+        assert_eq!(
+            status["data"]["gate_status"],
+            if valid { "pass" } else { "fail" }
+        );
+        let attempt: (String, Vec<u8>) = sqlx::query_as(
+            "SELECT status::text, response_evidence_bytes FROM execution_attempts WHERE run_id=$1",
+        )
+        .bind(run)
+        .fetch_one(&fixture.shard)
+        .await?;
+        let scores: Vec<Option<f64>> = sqlx::query_scalar(
+            "SELECT aggregate_score::double precision FROM execution_aggregates WHERE run_id=$1",
+        )
+        .bind(run)
+        .fetch_all(&fixture.shard)
+        .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM evaluator_results WHERE run_id=$1")
+                .bind(run)
+                .fetch_one(&fixture.shard)
+                .await?;
+        if valid {
+            assert_eq!(attempt.0, "completed");
+            assert_eq!(
+                attempt.1,
+                br#"{"text":"good reliable response"}good reliable response"#
+            );
+            assert_eq!(scores, [Some(1.0)]);
+            assert_eq!(count, 1);
+        } else {
+            assert_eq!(attempt.0, "failed_agent_call");
+            assert!(attempt.1.is_empty());
+            assert!(scores.iter().all(Option::is_none));
+            assert_eq!(count, 0);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_failure_completes_run_with_failed_gate() -> anyhow::Result<()> {
     let Some(fixture) = E2eFixture::setup().await? else {
         return Ok(());
@@ -1015,11 +1102,45 @@ fn unavailable_postgres_url() -> anyhow::Result<String> {
 }
 
 fn handle_agent_request(mut stream: TcpStream) -> anyhow::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buffer = [0u8; 16 * 1024];
-    let read = stream.read(&mut buffer)?;
+    let mut read = 0;
+    loop {
+        let count = stream.read(&mut buffer[read..])?;
+        anyhow::ensure!(count > 0, "incomplete mock HTTP request");
+        read += count;
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        if let Some((head, body)) = request.split_once("\r\n\r\n") {
+            let length = head
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value.trim().parse::<usize>())
+                .transpose()?
+                .unwrap_or_default();
+            if body.len() >= length {
+                break;
+            }
+        }
+    }
     let request = String::from_utf8_lossy(&buffer[..read]);
 
-    let (status, body) = if request.contains("force-agent-error") {
+    let (status, body) = if request.contains("requested_agent") {
+        use vigilo::invocation::wire::Submission;
+        let (_, body) = request
+            .split_once("\r\n\r\n")
+            .ok_or_else(|| anyhow::anyhow!("missing request body"))?;
+        let submission = Submission::decode(body.as_bytes(), buffer.len(), false)?;
+        anyhow::ensure!(submission.case.input["user_message"].is_string());
+        (
+            "HTTP/1.1 200 OK",
+            json!({
+                "schema_version":"1.0.0", "invocation_id":submission.invocation_id,
+                "status":"completed", "executed_agent":{"provider":"integration","name":"mock-agent","version":"1.0.0"},
+                "evidence":{"content_type":"application/json","encoding":"utf8","body":r#"{"text":"good reliable response"}"#}
+            }).to_string(),
+        )
+    } else if request.contains("force-agent-error") {
         (
             "HTTP/1.1 500 Internal Server Error",
             json!({"error": "forced integration agent failure"}).to_string(),
@@ -1859,6 +1980,11 @@ agent:
                     representation: inline_text
                     selection:
                       pointer: /text
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
   http:
     url: {agent_url}
 case_groups:
