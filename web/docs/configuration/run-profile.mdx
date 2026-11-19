@@ -216,7 +216,8 @@ defaults, and failure behavior.
 
 A run binds one target agent to one evaluation harness. Case input varies by case,
 and case groups select evaluators and scoring. The harness specifies `kind`,
-`http` and an explicit completion kind. Both harnesses support `inline` and `polling` in standalone.
+`http` and an explicit completion kind. The CLI runtime supports `inline` and
+`polling`. An embedded runtime with a callback issuer supports `callback`.
 
 | Harness kind | HTTP endpoint and response |
 | --- | --- |
@@ -303,6 +304,25 @@ harness:
   `invocation_id` and `provider_reference` when available. An empty HTTP 202
   acknowledges the stop request. Remote delivery has up to three attempts
   within one minute. Local settlement proceeds independently.
+
+### Callback completion
+
+Both harness kinds can use `completion.kind: callback` with the native invocation
+contract in an embedded runtime. Configure `completion.deadline_secs` to bound the
+remote work. The default is 600 seconds. Declare `capabilities.idempotent_submission`
+when the harness deduplicates retry submissions by invocation ID.
+
+The embedding application provides the HTTPS callback address and a separate,
+invocation-scoped bearer credential. The harness receives them in `callback.url`
+and `callback.token` and sends the final native outcome with the credential in
+the Authorization header. The submission's HTTP 202 receipt may omit
+`provider_reference`. A final outcome may arrive before that receipt.
+
+The application authenticates the callback and bounds the body as it reads it,
+then passes the verified invocation identity and body to the library. A retry
+with identical bytes acknowledges the stored outcome while its authority remains
+valid. Conflicting bodies and stale deliveries cannot change evidence or reopen
+an invocation. See [execution lifecycle](/docs/architecture/state/execution-lifecycle/).
 
 ### Agent invocation diagnostics
 

@@ -922,7 +922,7 @@ impl DatabaseRouter {
         Ok(ExecutionWriteRoute { hint, pool })
     }
 
-    async fn execution_database_from_hint(&self, alias: &str) -> anyhow::Result<PgPool> {
+    pub(crate) async fn execution_database_from_hint(&self, alias: &str) -> anyhow::Result<PgPool> {
         if let Some(pools) = &self.fixed_pools {
             let binding = pools
                 .get(alias)

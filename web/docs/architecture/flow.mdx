@@ -279,6 +279,12 @@ claims, deadlines, and outcomes remain on that placement. Accepted evidence
 creates one ready notification for the pending chunk, and another worker can
 score it on the original attempt. Remote cancellation follows local settlement.
 
+Callback delivery uses the same execution-shard outcome transaction. An embedding
+application authenticates the delivery and supplies the verified invocation route.
+The library accepts eligible outcomes and coalesces scoring wakeups by chunk.
+The application schedules invocation recovery and publishes ready work from the
+owning placement. See [callback completion](/docs/configuration/run-profile#callback-completion).
+
 Before finalization, the coordinator recovers expired chunk leases for running runs. Recoverable chunks are reset to `pending`, their current running attempts are marked `stale`, and they receive a recovery-scoped `run.chunk.ready` outbox event record. Chunks that exceed the recovery limit are marked `failed`.
 
 The coordinator checks a bounded number of candidates per cycle:

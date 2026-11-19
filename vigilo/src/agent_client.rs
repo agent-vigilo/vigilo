@@ -152,7 +152,7 @@ impl AgentRequestFormat {
 
 pub(crate) fn validate_request_format(run_profile: &RunProfile) -> anyhow::Result<()> {
     requested_agent(run_profile)?;
-    run_profile.harness.validate(false)?;
+    run_profile.harness.validate(true)?;
     if let Some(response) = &run_profile.agent.response
         && let vigilo::response::Interpretation::Json { mapping } = &response.interpretation
     {

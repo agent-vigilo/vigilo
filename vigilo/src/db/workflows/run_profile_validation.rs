@@ -719,11 +719,10 @@ mod tests {
         else {
             panic!("expected a direct probe fixture");
         };
-        *completion = vigilo::invocation::profile::Completion::Callback {};
-        assert!(
-            super::collect_static_profile_config_issues(&profile)
-                .iter()
-                .any(|issue| issue.contains("callback ingress is unavailable"))
+        *completion = vigilo::invocation::profile::Completion::Callback { deadline_secs: 600 };
+        assert_eq!(
+            profile.harness.validate(false).unwrap_err().to_string(),
+            "callback ingress is unavailable"
         );
     }
 

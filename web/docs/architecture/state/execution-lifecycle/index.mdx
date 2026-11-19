@@ -26,12 +26,16 @@ How executions and attempts become authoritative work records while workers proc
 - Within a claimed chunk, workers can process multiple cases concurrently; each case still receives an authoritative attempt id and attempt number.
 - New attempts record the worker id, host label, internal queue message UUID, broker message id, lease expiration, and heartbeat timestamp.
 - A new worker attempt or recovered expired chunk lease marks a previous running
-  attempt `stale`. A deferred invocation waiting on a remote endpoint holds an
-  invocation claim independently of worker leases.
+  attempt `stale`. A deferred invocation can wait without a worker lease.
+  Submission and polling use separate, short invocation claims.
 - A deferred submission moves the execution to `awaiting_agent`. Accepted
   evidence moves it to `awaiting_evaluators`. A worker claims the same attempt
   to score the saved evidence. A deadline closes the invocation, and the
   resumed attempt settles as `timed_out` without an evaluator score.
+- A verified callback can finish the invocation before its submission receipt.
+  Vigilo checks the current attempt, placement epoch, and deadline on the
+  execution shard. Acceptance commits evidence and scoring readiness together.
+  Duplicate delivery acknowledges the saved outcome without reapplying it.
 - Terminal transitions first lock the still-live chunk, then require the execution's current attempt id and attempt number to match the worker's transition. Worker-owned transitions also require a live attempt lease for that worker.
 - Completed executions require an aggregate row. Worker failure transitions upsert an error aggregate when the failure is non-retryable or the attempt budget is exhausted. Chunk settlement instead retires unfinished authority and closes existing unresolved executions without inventing an aggregate; missing executions remain absent.
 - Retryable failed attempts that still have retry budget move the execution to `retry_scheduled` with a durable `retry_after`; the next chunk pass only creates a new attempt once that timestamp is due.

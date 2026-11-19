@@ -64,7 +64,7 @@ flowchart TD
 
     Cases --> CompletionKind{Completion kind}
     CompletionKind -- Inline --> Limits
-    CompletionKind -- Polling --> ReadyEvidence{Accepted evidence ready?}
+    CompletionKind -- Deferred --> ReadyEvidence{Accepted evidence ready?}
     ReadyEvidence -- Yes --> Permit
     ReadyEvidence -- New invocation --> Submit[Commit intent and send bounded submission] --> CheckDeferred
     ReadyEvidence -- Waiting --> CheckDeferred

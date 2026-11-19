@@ -43,6 +43,7 @@ pub use control::{
 pub mod datasets;
 pub mod evaluators;
 pub mod export;
+pub mod invocations;
 pub mod resources;
 pub(crate) mod results;
 pub(crate) mod status;

@@ -81,6 +81,15 @@ impl Harness {
         }
     }
 
+    /// Completion delivery selected by the profile.
+    pub fn completion(&self) -> &Completion {
+        match self {
+            Self::DirectProbe { completion, .. } | Self::DelegatedTrial { completion, .. } => {
+                completion
+            }
+        }
+    }
+
     /// Mutable endpoint configuration for profile builders.
     pub fn http_mut(&mut self) -> &mut HttpEndpoint {
         match self {
@@ -131,8 +140,12 @@ impl Harness {
                     "polling deadline_secs must be between 1 and 86400"
                 );
             }
-            Completion::Callback {} => {
-                ensure!(callback_available, "callback ingress is unavailable")
+            Completion::Callback { deadline_secs } => {
+                ensure!(callback_available, "callback ingress is unavailable");
+                ensure!(
+                    (1..=86_400).contains(deadline_secs),
+                    "callback deadline_secs must be between 1 and 86400"
+                );
             }
         }
         if !matches!(completion, Completion::Inline {}) {
@@ -157,7 +170,10 @@ pub enum Completion {
         #[serde(default = "default_deadline")]
         deadline_secs: u32,
     },
-    Callback {},
+    Callback {
+        #[serde(default = "default_deadline")]
+        deadline_secs: u32,
+    },
 }
 
 fn default_deadline() -> u32 {

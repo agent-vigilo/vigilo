@@ -37,9 +37,11 @@ flowchart TD
     Worker --> RunGuard
     RunGuard -- Running --> Pending --> Supersede --> Running --> AttemptRunning
     AttemptRunning -- Inline --> AgentAndEvaluators
-    AttemptRunning -- Polling --> AwaitAgent[Commit intent and await remote outcome]
-    AwaitAgent -- Outcome accepted --> Awaiting
-    Awaiting --> AgentAndEvaluators
+    AttemptRunning -- Deferred --> AwaitAgent[Commit intent and await remote outcome]
+    AwaitAgent -- Poll or authenticated callback --> Accept{Current invocation and eligible?}
+    Accept -- Yes --> Awaiting
+    Accept -- Stale or conflicting --> Reject
+    Awaiting --> ScoreSaved[Score saved evidence on the same attempt] --> TerminalGuard
     AwaitAgent -- Deadline elapsed --> TimedOut
     AwaitAgent --> Cancel
     RunGuard -- Not running --> Reject
@@ -72,7 +74,7 @@ flowchart TD
 
 
     class Worker,Cancel command
-    class RunGuard,Pending,Supersede,Running,AttemptRunning,AgentAndEvaluators,TerminalGuard,AggregateGuard,Awaiting,RetryEligible,RetryScheduled,RetryDue system
+    class RunGuard,Pending,Supersede,Running,AttemptRunning,AgentAndEvaluators,TerminalGuard,AggregateGuard,Awaiting,ScoreSaved,RetryEligible,RetryScheduled,RetryDue system
     class AttemptCompleted,ExecutionCompleted success
     class AttemptAgentFail,AttemptEvalFail,ExecutionFailed,ExecutionCancelled,AttemptCancelled,TimedOut,Reject error
     class Stale component

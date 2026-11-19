@@ -40,7 +40,7 @@ use crate::contracts::run::RunProfile;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Route {
     pub http: HttpEndpoint,
-    pub status_url: String,
+    pub status_url: Option<String>,
     pub cancellation: Option<CancellationEndpoint>,
     pub deadline_secs: u32,
     pub submit_timeout_secs: u32,
@@ -71,12 +71,13 @@ impl Route {
                 ..
             } => (completion, capabilities, *forward_case_context, true),
         };
-        let Completion::Polling {
-            status_url,
-            deadline_secs,
-        } = completion
-        else {
-            return Ok(None);
+        let (status_url, deadline_secs) = match completion {
+            Completion::Inline {} => return Ok(None),
+            Completion::Polling {
+                status_url,
+                deadline_secs,
+            } => (Some(status_url.clone()), *deadline_secs),
+            Completion::Callback { deadline_secs } => (None, *deadline_secs),
         };
         let capabilities = capabilities
             .as_ref()
@@ -92,9 +93,9 @@ impl Route {
                 .timeout_secs
                 .unwrap_or(profile.defaults.request_timeout_secs),
             http,
-            status_url: status_url.clone(),
+            status_url,
             cancellation: capabilities.cancellation.clone(),
-            deadline_secs: *deadline_secs,
+            deadline_secs,
             forward_context,
             require_agent,
             deduplicates: capabilities.idempotent_submission,

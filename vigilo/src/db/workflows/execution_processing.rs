@@ -1624,6 +1624,7 @@ pub(crate) async fn process_case_batch_execution(
                     let result = crate::deferred_runtime::start_case(
                         context,
                         db,
+                        database_alias,
                         chunk,
                         run_profile,
                         attempt_id,

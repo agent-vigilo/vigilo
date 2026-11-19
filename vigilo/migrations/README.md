@@ -38,6 +38,8 @@ the final retained response packet. The shard outbox coalesces completion
 wakeups by chunk and publishes them through the existing placement dispatcher.
 Partial indexes cover due status checks, invocation deadlines, and pending
 remote cancellation on the execution placement.
+Callback submissions retain a digest of the callback binding so retries preserve
+the original credentials without persisting the bearer token.
 
 Runtime ownership and routing are documented in
 [Scale-out and shard migration](https://agentvigilo.com/docs/architecture/scaling).

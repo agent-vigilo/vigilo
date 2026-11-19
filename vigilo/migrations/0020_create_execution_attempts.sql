@@ -27,6 +27,7 @@ CREATE TABLE execution_attempts (
     invocation_requires_agent BOOLEAN NOT NULL DEFAULT false,
     invocation_evidence_limit INTEGER CHECK (invocation_evidence_limit BETWEEN 1 AND 4194304),
     invocation_reference TEXT,
+    invocation_callback_digest BYTEA CHECK (octet_length(invocation_callback_digest) = 32),
     invocation_claim UUID,
     invocation_claim_until TIMESTAMPTZ,
     invocation_next_at TIMESTAMPTZ,

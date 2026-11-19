@@ -27,6 +27,8 @@ use super::*;
 mod agent;
 #[path = "hosted/broker.rs"]
 mod broker;
+#[path = "hosted/callbacks.rs"]
+mod callbacks;
 #[path = "hosted/database.rs"]
 mod database;
 #[path = "hosted/failures.rs"]
@@ -54,6 +56,7 @@ struct Fixture {
     coordinator_count: usize,
     worker_handles: Vec<vigilo::operations::Worker>,
     coordinator_handles: Vec<vigilo::operations::Coordinator>,
+    callback_issuer: Option<Arc<callbacks::Issuer>>,
 }
 impl Fixture {
     async fn new() -> anyhow::Result<Self> {
@@ -74,6 +77,7 @@ impl Fixture {
             coordinator_count: 0,
             worker_handles: vec![],
             coordinator_handles: vec![],
+            callback_issuer: None,
         })
     }
     async fn setup(&mut self) -> anyhow::Result<()> {
@@ -121,6 +125,7 @@ impl Fixture {
         config.agent_credentials_allow_http_loopback = true;
         config.coordinator.tick_seconds = 1;
         config.worker_max_inflight_chunks = 2;
+        config.callback_issuer = self.callback_issuer.clone().map(|value| value as _);
         self.runtime = Some(HostedRuntime::new(config).await?);
         Ok(())
     }

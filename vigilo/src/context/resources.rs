@@ -218,6 +218,20 @@ impl Context {
         self.4.request.clone().filter(|r| r.plan_digest().is_some())
     }
 
+    /// Binds an execution-local verified request for credential-only work.
+    /// Retrying an invocation does not open the run's object store.
+    pub(crate) fn with_invocation_credentials(&self, request: Request) -> Result<Self> {
+        ensure!(
+            request.plan_digest().is_some(),
+            "accepted run identity required"
+        );
+        let resolver = self.dataset_resolver()?;
+        let mut context = self.clone();
+        context.2 = Arc::new(self.2.injected(resolver));
+        context.4.request = Some(Arc::new(request));
+        Ok(context)
+    }
+
     /// Resolve outside SQL transactions. The host sees only verified ownership
     /// and pinned metadata. A reply cannot silently switch to standalone services.
     async fn injected_resources(

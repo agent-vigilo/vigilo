@@ -40,6 +40,76 @@ pub(crate) struct Job {
     pub route: Route,
 }
 
+#[derive(sqlx::FromRow)]
+pub(crate) struct CallbackJob {
+    kind: sqlx::types::Json<Kind>,
+    pub due_at: DateTime<Utc>,
+    route: sqlx::types::Json<Route>,
+    pub plan_digest: String,
+    pub binding_hash: String,
+}
+
+impl CallbackJob {
+    pub(crate) fn job(self, key: Attempt) -> Job {
+        Job {
+            key,
+            kind: self.kind.0,
+            due_at: self.due_at,
+            route: self.route.0,
+        }
+    }
+}
+
+/// Finds at most one due action using the verified route and current invocation.
+/// The action's separate write claim rechecks local ownership after this read.
+pub(crate) async fn callback_job(
+    db: &PgPool,
+    key: Attempt,
+    invocation_id: Uuid,
+) -> Result<Option<CallbackJob>> {
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, key.tenant_id, key.run_id).await?;
+    let job = sqlx::query_as(
+        "SELECT to_jsonb(work.kind) AS kind,work.due_at,
+                s.config_snapshot->'invocation_transport' AS route,
+                s.config_snapshot #>> '{run_plan,digest}' AS plan_digest,
+                s.config_snapshot->>'storage_binding_hash' AS binding_hash
+         FROM execution_attempts a
+         JOIN executions e ON e.run_id=a.run_id AND e.run_shard=a.run_shard AND e.id=a.execution_id
+         JOIN local_shard_admissions ad ON ad.run_id=a.run_id AND ad.run_shard=a.run_shard
+         JOIN run_snapshots s ON s.run_id=a.run_id AND s.run_shard=a.run_shard
+         CROSS JOIN LATERAL (
+            SELECT 'cancel'::text AS kind,a.invocation_cancel_at AS due_at
+            WHERE a.invocation_cancel_at <= statement_timestamp()
+            UNION ALL
+            SELECT 'expire',a.invocation_deadline
+            WHERE e.current_attempt_id=a.id
+               AND a.invocation_status IN ('submitting','waiting','submission_unknown')
+               AND a.invocation_deadline <= statement_timestamp()
+            UNION ALL
+            SELECT 'submit',a.invocation_next_at
+            WHERE e.current_attempt_id=a.id AND a.invocation_status='submitting'
+               AND a.invocation_deadline > statement_timestamp()
+               AND a.invocation_next_at <= statement_timestamp()
+         ) work
+         WHERE a.tenant_id=$1 AND a.run_id=$2 AND a.run_shard=$3 AND a.id=$4 AND e.chunk_id=$5
+            AND a.invocation_id=$6 AND a.invocation_callback_digest IS NOT NULL
+            AND ad.tenant_id=$1 AND ad.write_epoch=$7 AND ad.state IN ('open','draining')
+            AND s.tenant_id=$1 AND s.config_snapshot ? 'invocation_transport'",
+    )
+    .bind(key.tenant_id)
+    .bind(key.run_id)
+    .bind(key.run_shard)
+    .bind(key.attempt_id)
+    .bind(key.chunk_id)
+    .bind(invocation_id)
+    .bind(key.write_epoch)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(job)
+}
+
 // SQL starts with SELECT to keep the existing recovery observation category.
 // The three index windows have independent budgets so polls cannot crowd out
 // deadline handling or cancellation. Durable fields remain on execution shards.
@@ -55,6 +125,7 @@ FROM (
   (SELECT run_id,run_shard,tenant_id,id,execution_id,invocation_deadline AS due_at,'expire'::text AS kind
    FROM execution_attempts
    WHERE invocation_status IN ('submitting','waiting','submission_unknown')
+     AND invocation_callback_digest IS NULL
      AND invocation_deadline <= statement_timestamp()
    ORDER BY invocation_deadline,run_id,id LIMIT $3)
   UNION ALL
@@ -62,6 +133,7 @@ FROM (
           CASE WHEN invocation_status='submitting' THEN 'submit' ELSE 'poll' END
    FROM execution_attempts
    WHERE invocation_next_at <= statement_timestamp() AND invocation_deadline > statement_timestamp()
+     AND invocation_callback_digest IS NULL
      AND (invocation_status='waiting' OR (invocation_status='submitting' AND EXISTS (
         SELECT 1 FROM executions e JOIN run_chunks c ON c.run_id=e.run_id AND c.run_shard=e.run_shard AND c.id=e.chunk_id
         WHERE e.run_id=execution_attempts.run_id AND e.run_shard=execution_attempts.run_shard
@@ -70,6 +142,7 @@ FROM (
   UNION ALL
   (SELECT run_id,run_shard,tenant_id,id,execution_id,invocation_cancel_at,'cancel'
    FROM execution_attempts WHERE invocation_cancel_at <= statement_timestamp()
+     AND invocation_callback_digest IS NULL
    ORDER BY invocation_cancel_at,run_id,id LIMIT $3)
 ) a
 JOIN executions e ON e.run_id=a.run_id AND e.run_shard=a.run_shard AND e.id=a.execution_id
@@ -127,6 +200,7 @@ pub(crate) async fn claim_poll(db: &PgPool, key: Attempt) -> Result<Option<PollC
            AND (a.invocation_claim_until IS NULL OR a.invocation_claim_until <= statement_timestamp())
          RETURNING a.invocation_id,a.invocation_claim AS token,a.invocation_request AS request,
              a.invocation_requires_reference AS requires_reference,a.invocation_deadline AS deadline,a.execution_id,
+             a.invocation_callback_digest AS callback_digest,
              a.invocation_reference AS reference,a.invocation_requires_agent AS require_agent,a.invocation_poll_count AS poll_count,a.invocation_evidence_limit AS evidence_limit",
     ).bind(f64::from(CLAIM_SECS)).bind(key.run_id).bind(key.run_shard).bind(key.attempt_id).bind(key.chunk_id)
     .fetch_optional(&mut *tx).await?;

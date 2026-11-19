@@ -92,6 +92,8 @@ pub struct HostedConfig {
     pub coordinator: CoordinatorOptions,
     pub wasm: WasmOptions,
     pub agent_http: AgentHttpLimits,
+    /// Supplies HTTPS callback addresses and per-invocation completion credentials.
+    pub callback_issuer: Option<Arc<dyn super::invocations::CallbackIssuer>>,
     /// Local development only; HTTPS remains required unless explicitly enabled.
     /// The exception accepts literal loopback addresses, never arbitrary HTTP hosts.
     pub agent_credentials_allow_http_loopback: bool,
@@ -118,6 +120,7 @@ impl HostedConfig {
             coordinator: Default::default(),
             wasm: Default::default(),
             agent_http: Default::default(),
+            callback_issuer: None,
             agent_credentials_allow_http_loopback: false,
             evaluator_http: Default::default(),
             evaluator_http_concurrency: 64,
@@ -210,6 +213,7 @@ impl HostedRuntime {
             )
             .with_resource_resolver(config.resources)
             .with_runtime_dependencies(messaging, config.wasm)
+            .with_callback_issuer(config.callback_issuer)
             .with_agent_http_limits(config.agent_http)
             .with_evaluator_http(http)
             .with_http_policy_max_age(config.policy_max_age_seconds)
@@ -264,6 +268,13 @@ impl HostedRuntime {
             active: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
+    /// Returns the invocation service for the trusted host's authenticated ingress
+    /// and scheduling code. Issuing a completion credential grants no other operation.
+    pub fn invocations(&self) -> Option<super::invocations::Service> {
+        self.0.execution.callback_issuer()?;
+        Some(super::invocations::Service::new(self.0.execution.clone()))
+    }
+
     /// Closes the supplied shared pools, including external clones. Stop and join
     /// services before closing; in-flight borrowers are allowed to return first.
     pub async fn close(&self) {
@@ -340,6 +351,39 @@ pub struct Coordinator {
     active: Arc<tokio::sync::Mutex<()>>,
 }
 impl Coordinator {
+    /// Publishes one configured outbox batch from a known execution placement.
+    /// Call once per wakeup batch and reconcile periodically after missed wakeups.
+    /// This operation does not scan control-plane placement or run metadata.
+    pub async fn publish_execution_outbox(&self, database_alias: &str) -> Result<usize, Error> {
+        let _active = self
+            .active
+            .try_lock()
+            .map_err(|_| Error::Conflict("coordinator is already running"))?;
+        let context = &self.context;
+        let db = context
+            .dbr()
+            .await
+            .map_err(Error::Dependency)?
+            .execution_database_from_hint(database_alias)
+            .await
+            .map_err(Error::Dependency)?;
+        let publisher =
+            crate::outbox::MqEventPublisher::new(context.mq().await.map_err(Error::Dependency)?);
+        let stats = crate::outbox::publish_pending_events(
+            &db,
+            &publisher,
+            &crate::outbox::OutboxPublisherConfig {
+                batch_size: self.options.outbox_batch_size,
+                publish_parallelism: self.options.outbox_publish_parallelism,
+                lease_seconds: self.options.outbox_lease_seconds,
+                retry_delay_seconds: self.options.outbox_retry_delay_seconds,
+            },
+        )
+        .await
+        .map_err(Error::Dependency)?;
+        Ok(stats.published_events)
+    }
+
     /// One bounded existing orchestration pass. Placement failures retain the
     /// existing containment/logging behavior; success is not an all-runs-complete claim.
     pub async fn once(&self) -> Result<(), Error> {

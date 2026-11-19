@@ -61,6 +61,8 @@ impl Attempt {
 
 /// Frozen submission inputs. Callback authorization is supplied by the host at delivery.
 pub(crate) struct Intent {
+    pub invocation_id: Uuid,
+    pub callback_digest: Option<[u8; 32]>,
     pub agent: AgentIdentity,
     pub case: CaseInput,
     pub deadline: DateTime<Utc>,
@@ -81,16 +83,14 @@ pub(crate) struct Claim {
     pub token: Uuid,
     pub request: Vec<u8>,
     pub requires_reference: bool,
+    pub callback_digest: Option<Vec<u8>>,
 }
 
 /// This value is constructed by the host only after verifying callback authority.
 #[derive(Clone, Copy)]
 pub(crate) enum CompletionProof {
     RequestClaim(Uuid),
-    #[cfg(test)]
-    VerifiedCallback {
-        invocation_id: Uuid,
-    },
+    VerifiedCallback { invocation_id: Uuid },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +98,14 @@ pub(crate) enum Acceptance {
     Accepted,
     Duplicate,
     Ineligible,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OutcomeError {
+    #[error("conflicting invocation outcome")]
+    Conflict,
+    #[error("invalid invocation outcome")]
+    Invalid,
 }
 
 #[derive(sqlx::FromRow)]
@@ -153,7 +161,7 @@ pub(crate) async fn start(
         (1..=wire::MAX_EVIDENCE_BYTES).contains(&intent.evidence_limit),
         "invalid deferred evidence limit"
     );
-    let invocation_id = uuid::Builder::from_random_bytes(rand::random()).into_uuid();
+    let invocation_id = intent.invocation_id;
     let submission = Submission {
         schema_version: wire::SCHEMA_VERSION.into(),
         invocation_id,
@@ -189,6 +197,7 @@ pub(crate) async fn start(
             SET invocation_id=$1, invocation_status='submitting', invocation_deadline=$2,
                 invocation_request=$3, invocation_deduplicates=$4, invocation_requires_reference=$5,
                 invocation_requires_agent=$12, invocation_evidence_limit=$13,
+                invocation_callback_digest=$15,
                 invocation_claim=CASE WHEN $14::double precision IS NULL THEN gen_random_uuid() END,
                 invocation_claim_until=CASE WHEN $14 IS NULL THEN LEAST($2,statement_timestamp()+make_interval(secs=>$6)) END,
                 invocation_next_at=LEAST($2,statement_timestamp()+make_interval(secs=>COALESCE($14,$6))),
@@ -209,6 +218,7 @@ pub(crate) async fn start(
     .bind(invocation_id).bind(intent.deadline).bind(&body).bind(intent.deduplicates)
     .bind(intent.requires_reference).bind(f64::from(lease_seconds)).bind(key.tenant_id)
     .bind(key.run_id).bind(key.run_shard).bind(key.attempt_id).bind(key.chunk_id).bind(intent.require_agent).bind(i32::try_from(intent.evidence_limit)?).bind(intent.delay_before_send_secs)
+    .bind(intent.callback_digest.as_ref().map(|digest| digest.as_slice()))
     .fetch_optional(&mut *tx).await?;
     let (token, execution_id) = parked
         .ok_or_else(|| anyhow::anyhow!("deferred submission could not park its current attempt"))?;
@@ -220,6 +230,7 @@ pub(crate) async fn start(
         token,
         request: body,
         requires_reference: intent.requires_reference,
+        callback_digest: intent.callback_digest.map(Vec::from),
     }))
 }
 
@@ -258,10 +269,11 @@ pub(crate) async fn reclaim_submission(
              AND a.invocation_status='submitting' AND a.invocation_deadline > clock_timestamp()
              AND a.invocation_next_at <= clock_timestamp()
              AND (a.invocation_claim_until IS NULL OR a.invocation_claim_until <= clock_timestamp())
-           RETURNING invocation_id,invocation_claim,invocation_request,invocation_requires_reference,invocation_deadline,a.execution_id
+           RETURNING invocation_id,invocation_claim,invocation_request,invocation_requires_reference,invocation_deadline,a.execution_id,invocation_callback_digest
         )
         SELECT invocation_id,invocation_claim AS token,invocation_request AS request,
-            invocation_requires_reference AS requires_reference,invocation_deadline AS deadline,execution_id
+            invocation_requires_reference AS requires_reference,invocation_deadline AS deadline,execution_id,
+            invocation_callback_digest AS callback_digest
         FROM claimed WHERE invocation_claim IS NOT NULL",
     ).bind(f64::from(lease_seconds)).bind(key.run_id).bind(key.run_shard)
     .bind(key.attempt_id).bind(key.chunk_id).fetch_optional(&mut *tx).await?;
@@ -307,6 +319,7 @@ struct OutcomeTarget {
     claim: Option<Uuid>,
     require_agent: bool,
     evidence_limit: i32,
+    callback_active: bool,
 }
 
 /// Accepts bounded evidence only for the currently authorized invocation.
@@ -318,10 +331,7 @@ pub(crate) async fn accept(
     proof: CompletionProof,
     body: &[u8],
 ) -> Result<Acceptance> {
-    ensure!(
-        body.len() <= wire::MAX_OUTCOME_BYTES,
-        "invocation outcome exceeds byte limit"
-    );
+    ensure!(body.len() <= wire::MAX_OUTCOME_BYTES, OutcomeError::Invalid);
     let mut tx = db.begin().await?;
     let Some(chunk) = lock_chunk(&mut tx, key).await? else {
         return Ok(Acceptance::Ineligible);
@@ -333,6 +343,7 @@ pub(crate) async fn accept(
              AND a.invocation_status IN ('submitting','waiting','submission_unknown')
              AND a.invocation_deadline > clock_timestamp()) AS eligible,
             CASE WHEN a.invocation_claim_until > clock_timestamp() THEN a.invocation_claim END AS claim,
+            (a.invocation_callback_digest IS NOT NULL AND a.invocation_deadline > clock_timestamp()) AS callback_active,
             a.invocation_requires_agent AS require_agent,a.invocation_evidence_limit AS evidence_limit
          FROM execution_attempts a JOIN executions e
            ON e.run_id=a.run_id AND e.run_shard=a.run_shard AND e.id=a.execution_id AND e.current_attempt_id=a.id
@@ -344,22 +355,20 @@ pub(crate) async fn accept(
     };
     let request_claim = match proof {
         CompletionProof::RequestClaim(token) => Some(token),
-        #[cfg(test)]
         CompletionProof::VerifiedCallback { .. } => None,
     };
     let authorized = match proof {
         CompletionProof::RequestClaim(token) => target.claim == Some(token),
-        #[cfg(test)]
         CompletionProof::VerifiedCallback {
             invocation_id: authorized_id,
-        } => authorized_id == invocation_id,
+        } => authorized_id == invocation_id && target.callback_active,
     };
     if !authorized || chunk.control == "revoked" {
         return Ok(Acceptance::Ineligible);
     }
     let digest = blake3::hash(body);
     if let Some(prior) = target.digest {
-        ensure!(prior == digest.as_bytes(), "conflicting invocation outcome");
+        ensure!(prior == digest.as_bytes(), OutcomeError::Conflict);
         return Ok(Acceptance::Duplicate);
     }
     if !target.eligible || !matches!(chunk.status.as_str(), "pending" | "leased") {
@@ -378,11 +387,13 @@ pub(crate) async fn accept(
         invocation_id,
         &submission.requested_agent,
         target.require_agent,
-    )? {
+    )
+    .map_err(|_| OutcomeError::Invalid)?
+    {
         Outcome::Completed { evidence, .. } => {
             ensure!(
                 evidence.bytes.len() <= usize::try_from(target.evidence_limit)?,
-                "invocation evidence exceeds profile limit"
+                OutcomeError::Invalid
             );
             (Some(evidence.bytes), Some(evidence.content_type))
         }

@@ -21,6 +21,12 @@ pub(super) async fn exec(
     let db = context.dbr().await?.control().await?;
     let out = context.out().await?;
     let parsed = load_run_inputs(profile, profile_file, dataset, dataset_file)?;
+    if matches!(
+        parsed.profile.harness.completion(),
+        vigilo::invocation::profile::Completion::Callback { .. }
+    ) {
+        parsed.profile.harness.validate(false)?;
+    }
     let executability = run_profile_validation::validate_profile_executability(
         db,
         &parsed.profile,

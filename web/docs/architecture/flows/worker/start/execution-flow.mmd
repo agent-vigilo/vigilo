@@ -80,12 +80,12 @@ sequenceDiagram
                         Vigilo->>Vigilo: Retain bounded failure diagnostics and skip the agent call
                     end
                 end
-                opt Polling harness
+                opt Deferred harness completion
                     Vigilo->>ExecutionDB: Commit submission intent or load accepted evidence
                     opt New deferred invocation
-                        Vigilo->>Agent: Submit native request with deadline
-                        Agent-->>Vigilo: Acceptance receipt and provider reference
-                        Vigilo->>ExecutionDB: Save receipt and schedule first status check
+                        Vigilo->>Agent: Submit native request with deadline and callback when configured
+                        Agent-->>Vigilo: Acceptance receipt
+                        Vigilo->>ExecutionDB: Save receipt and schedule first status check for polling
                     end
                 end
                 opt Complete successful agent invocation

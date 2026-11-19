@@ -22,6 +22,7 @@ pub(crate) mod storage;
 pub(crate) mod wasm;
 
 struct ContextInner {
+    callback_issuer: Option<Arc<dyn crate::operations::invocations::CallbackIssuer>>,
     deferred_health: crate::deferred_runtime::EndpointHealth,
     http_policies: vigilo::evaluator_http::cache::Cache,
     pub dbr: database::Context,
@@ -51,6 +52,7 @@ impl Context {
     ) -> Self {
         Self(
             Arc::new(ContextInner {
+                callback_issuer: None,
                 deferred_health: Default::default(),
                 http_policies: Default::default(),
                 storage: storage::Context::default(),
@@ -123,6 +125,7 @@ impl Context {
         let inner = Arc::get_mut(&mut view.0).expect("unshared authority view");
         inner.mq.config = self.0.mq.config.clone();
         inner.wasm.config = self.0.wasm.config.clone();
+        inner.callback_issuer = self.0.callback_issuer.clone();
         view.1 = self.1;
         view.2 = self.2.clone();
         view.3 = self.3.clone();
@@ -187,6 +190,22 @@ impl Context {
 
     pub(crate) fn deferred_health(&self) -> &crate::deferred_runtime::EndpointHealth {
         &self.0.deferred_health
+    }
+
+    pub(crate) fn with_callback_issuer(
+        mut self,
+        issuer: Option<Arc<dyn crate::operations::invocations::CallbackIssuer>>,
+    ) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("unshared runtime construction")
+            .callback_issuer = issuer;
+        self
+    }
+
+    pub(crate) fn callback_issuer(
+        &self,
+    ) -> Option<&dyn crate::operations::invocations::CallbackIssuer> {
+        self.0.callback_issuer.as_deref()
     }
 
     pub(crate) fn agent_credentials(&self) -> &crate::agent_client::credentials::Provider {

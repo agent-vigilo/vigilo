@@ -36,6 +36,8 @@ fn agent() -> AgentIdentity {
 
 fn intent(deduplicates: bool) -> Intent {
     Intent {
+        invocation_id: Uuid::new_v4(),
+        callback_digest: Some([1; 32]),
         agent: agent(),
         case: CaseInput {
             input: json!({"prompt":"frozen"}),
@@ -46,7 +48,7 @@ fn intent(deduplicates: bool) -> Intent {
         require_agent: true,
         evidence_limit: 1024,
         deduplicates,
-        requires_reference: true,
+        requires_reference: false,
         delay_before_send_secs: None,
     }
 }
