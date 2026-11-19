@@ -22,7 +22,7 @@ flowchart TD
     Recover[Discover expired leases and due standalone invocations under placement authority]
     RecoveryIsolated[Classify failure, count it, and skip alias]
     DispatchClaim{Restricted cursor claim returned a route?}
-    DispatchRun[Read scoped snapshot and route; select pool, fence admission and retain cursor lock]
+    DispatchRun[Read scoped snapshot and route, fence admission, and commit with the cursor if colocated]
     DispatchIsolated[Leave cursor open and exclude alias for this pass]
     FinalizeCandidate{Restricted discovery finds candidate within budget?}
     ReadSummaries[Read candidate summaries in one batch per database]

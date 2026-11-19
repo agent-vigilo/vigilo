@@ -10,7 +10,7 @@ flowchart TD
     Create([run create])
     Pending[Chunk pending]
     Dispatch[Dispatch window marks dispatched_at]
-    ClaimGuard{Run running and chunk claimable?}
+    ClaimGuard{Open admission, running run and claimable chunk?}
     Leased[Chunk leased]
     Recover{Coordinator recovery budget left?}
     RecoveryEvent[Recovery event enqueued]
@@ -30,7 +30,7 @@ flowchart TD
     Create --> Pending
 
     Pending --> Dispatch --> ClaimGuard
-    Leased -->|Lease expired| Recover
+    Leased -->|Lease expired on open or draining shard| Recover
     Recover -- Yes --> RecoveryEvent --> Pending
     Recover -- No --> Failed
     ClaimGuard -- Yes --> Leased --> LoadCases --> Process

@@ -1,10 +1,128 @@
-//! Live recovery ownership and serial-delay observations through the public CLI.
-//! Two requested plans share a recovery cycle; a delayed missing-root response
-//! must release its owner and leave the healthy plan eligible for admission.
+//! Live recovery ownership through the public CLI.
+//! Covers admission after a delayed storage failure and resumption after an
+//! expired worker lease on a draining shard moves to another database.
 use super::*;
 
 #[path = "../support/storage_proxy.rs"]
 pub(super) mod storage_proxy;
+
+#[tokio::test]
+async fn draining_shard_recovers_expired_lease_and_resumes_on_target() -> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: PRIMARY_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "recovery_during_drain",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    run_vigilo_ok(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+    let token = Uuid::now_v7();
+    sqlx::query("UPDATE run_chunks SET status='leased', lease_token=$2, leased_until=clock_timestamp()+interval '10 minutes' WHERE run_id=$1")
+        .bind(run)
+        .bind(token)
+        .execute(&fixture.primary)
+        .await?;
+    // A live lease refuses the original delivery. The resumed worker must
+    // receive the new recovery event after the source lease expires.
+    run_vigilo_ok(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "single-default",
+        ["worker", "once"],
+    )?;
+    let run_id = run.to_string();
+    let move_args = ["shard", "move", &run_id, "0", "--alias", SHARD_ALIAS];
+    let pending = run_vigilo_output(&fixture.config, PRIMARY_ALIAS, "single-default", move_args)?;
+    assert!(!pending.status.success());
+    let output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&pending.stdout),
+        String::from_utf8_lossy(&pending.stderr)
+    );
+    assert!(output.contains("route remains draining"), "{output}");
+    run_vigilo_ok(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+    let (state, live_token): (String, Option<Uuid>) = sqlx::query_as(
+        "SELECT a.state,c.lease_token FROM run_chunks c JOIN local_shard_admissions a USING (run_id, run_shard) WHERE c.run_id=$1",
+    )
+    .bind(run)
+    .fetch_one(&fixture.primary)
+    .await?;
+    assert_eq!((state.as_str(), live_token), ("draining", Some(token)));
+
+    sqlx::query("UPDATE run_chunks SET leased_until=clock_timestamp()-interval '1 second' WHERE run_id=$1 AND lease_token=$2")
+        .bind(run)
+        .bind(token)
+        .execute(&fixture.primary)
+        .await?;
+    run_vigilo_ok(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+    let recovered: (String, i32, Option<Uuid>) =
+        sqlx::query_as("SELECT status,recovery_count,lease_token FROM run_chunks WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&fixture.primary)
+            .await?;
+    assert_eq!(
+        recovered,
+        ("pending".to_owned(), 1, None),
+        "recover the expired lease under draining admission"
+    );
+    let published: Vec<String> = sqlx::query_scalar(
+        "SELECT dedupe_key FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.chunk.ready' AND dedupe_key LIKE '%:ready:recovery:1' AND status='published'",
+    )
+    .bind(run)
+    .fetch_all(&fixture.primary)
+    .await?;
+    assert_eq!(published.len(), 1);
+
+    let moved = run_vigilo_json(&fixture.config, PRIMARY_ALIAS, "single-default", move_args)?;
+    assert_eq!(moved["meta"]["moved"], true);
+    assert_eq!(
+        shard_placement_alias(&fixture.primary, run, 0).await?,
+        SHARD_ALIAS
+    );
+    let status = drive_run_to_status(
+        &fixture,
+        "retry expired lease after shard move",
+        PRIMARY_ALIAS,
+        "single-default",
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(status["data"]["gate_status"], "pass");
+    assert_eq!(execution_count(&fixture.primary, run).await?, 0);
+    assert_eq!(execution_count(&fixture.shard, run).await?, 1);
+    let completed_by: Vec<String> = sqlx::query_scalar(
+        "SELECT broker_message_id FROM execution_attempts WHERE run_id=$1 AND status='completed'",
+    )
+    .bind(run)
+    .fetch_all(&fixture.shard)
+    .await?;
+    assert_eq!(completed_by, published);
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delayed_root_failure_releases_owner_and_next_run_recovers() -> anyhow::Result<()> {

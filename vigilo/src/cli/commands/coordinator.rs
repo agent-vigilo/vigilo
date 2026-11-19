@@ -772,17 +772,18 @@ async fn dispatch_ready_chunk_windows(
                 continue;
             }
         };
-        if execution_route.placement.database_alias != route.database_alias
-            || execution_route.placement.route_version != route.route_version
-            || execution_route.placement.write_epoch != route.write_epoch
+        let execution_placement = execution_route.placement();
+        if execution_placement.database_alias != route.database_alias
+            || execution_placement.route_version != route.route_version
+            || execution_placement.write_epoch != route.write_epoch
         {
             debug!(
                 run_id = %route.run_id,
                 run_shard = route.run_shard,
                 selected_database_alias = %route.database_alias,
                 selected_route_version = route.route_version,
-                current_database_alias = %execution_route.placement.database_alias,
-                current_route_version = execution_route.placement.route_version,
+                current_database_alias = %execution_placement.database_alias,
+                current_route_version = execution_placement.route_version,
                 "dispatch route changed before execution pool resolution"
             );
             dispatch_claim.control_tx.rollback().await?;

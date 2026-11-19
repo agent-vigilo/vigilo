@@ -2,6 +2,7 @@
 use futures_util::FutureExt;
 
 use super::*;
+use crate::context::database::ExecutionRoute;
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
@@ -88,6 +89,7 @@ async fn execution_dispatch_uses_claimed_scope(pool: PgPool) {
                 placement,
                 pool: restricted.clone(),
             };
+            let dispatch_route = DispatchExecutionRoute::Separate(route.clone());
             let expected_tenant = if expected_run == third {
                 tenant
             } else {
@@ -100,7 +102,7 @@ async fn execution_dispatch_uses_claimed_scope(pool: PgPool) {
                 let failed = dispatch_admitted_run_window(
                     &router,
                     claim.control_tx,
-                    &route,
+                    &dispatch_route,
                     1,
                     &claim.route,
                     &wrong,
@@ -170,7 +172,7 @@ async fn execution_dispatch_uses_claimed_scope(pool: PgPool) {
                     dispatch_admitted_run_window(
                         &router,
                         claim.control_tx,
-                        &route,
+                        &dispatch_route,
                         1,
                         &claim.route,
                         &snapshot,

@@ -58,16 +58,21 @@ Describes the major internal responsibilities of the coordinator runtime.
   The coordinator claims requests on the owning execution placement, checks
   deadlines independently, and accepts results into the existing chunk outbox.
   Remote cancellation uses a separate bounded delivery budget after local work.
-- Chunk lease recovery then runs before dispatch and finalization: expired worker chunk leases are either requeued with recovery-scoped chunk-ready outbox event records or marked failed after the recovery limit.
+- Chunk lease recovery runs before dispatch and finalization. It requeues
+  recoverable expired leases with a recovery-scoped chunk-ready outbox record
+  or settles exhausted chunks as failed. Recovery can release expired leases
+  while a shard drains. New worker claims require open admission.
 - Dispatch claims an open `run_id + run_shard` cursor, selects one bounded chunk window from that shard, and inserts one `run.chunk.ready` outbox event record per selected chunk.
 - A coordinator cycle discovers cursors through a restricted function. A
   targeted dispatch locks the specified cursor under the run's scope and
   checks the route generation. The lock remains held through the routed write
   and is released on commit or rollback.
-- Dispatch carries the claimed work identity into its execution transaction before
-  taking the shared movement fence and validating local admission. Snapshot, chunk,
-  summary and outbox writes share that context. Missing admission is repaired using
-  the held control transaction; commit, rollback and cancellation clear local context.
+- Dispatch takes the shared movement fence and validates local admission under
+  the claimed work identity. A placement that shares the control database uses
+  the claimed cursor transaction for the snapshot, chunk, summary and outbox
+  writes. On a separate execution database those writes use their own transaction,
+  which commits before the control cursor advances. Missing admission is repaired
+  using the held control transaction.
 - Already-running run dispatch is cursor-owned and takes only a compatible shared `runs` lock, allowing multiple coordinators to dispatch different shard cursors for the same run while cancellation and finalization retain exclusive lifecycle guards.
 - Finalization is coordinator-owned and lease guarded. Each cycle inspects a
   bounded candidate set, rotates blocked runs behind unchecked work, and can

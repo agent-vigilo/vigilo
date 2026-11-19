@@ -63,16 +63,21 @@ sequenceDiagram
         Vigilo->>ControlDB: Claim cursor and bind returned work identity in one statement
         ControlDB-->>Vigilo: Dispatch route or no work, retain cursor lock
         Vigilo->>ControlDB: Read snapshot and routing records on the same scoped transaction
-        Vigilo->>Vigilo: Validate route and select bound execution pool
-        Vigilo->>ExecutionDB: Bind claimed identity, fence movement and validate admission
-        Vigilo->>ExecutionDB: Upsert run snapshot and insert one chunk-ready outbox record per selected chunk
-        alt Execution placement write succeeds
-            ExecutionDB-->>Vigilo: Dispatch shard window result
-            Vigilo->>ControlDB: Release or mark dispatch cursor drained
-        else Execution placement fails
-            ExecutionDB-->>Vigilo: Database error
-            Note over Vigilo,ControlDB: Cursor stays open
-            Vigilo->>Vigilo: Classify, count, and exclude alias for this pass
+        Vigilo->>Vigilo: Validate the execution route
+        alt Control and execution share the database
+            Vigilo->>ControlDB: Fence movement and validate admission on the cursor transaction
+            Vigilo->>ControlDB: Dispatch chunks, enqueue readiness and advance cursor in one commit
+        else Separate execution database
+            Vigilo->>ExecutionDB: Bind claimed identity, fence movement and validate admission
+            Vigilo->>ExecutionDB: Dispatch chunks and commit readiness records
+            alt Execution placement write succeeds
+                ExecutionDB-->>Vigilo: Dispatch shard window result
+                Vigilo->>ControlDB: Release or mark dispatch cursor drained
+            else Execution placement fails
+                ExecutionDB-->>Vigilo: Database error
+                Note over Vigilo,ControlDB: Cursor stays open
+                Vigilo->>Vigilo: Classify, count, and exclude alias for this pass
+            end
         end
     end
 

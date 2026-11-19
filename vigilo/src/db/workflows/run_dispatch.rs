@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::run_shard_summary;
 use crate::context::database::{
     self,
-    ExecutionRoute,
+    DispatchExecutionRoute,
 };
 
 mod queries;
@@ -363,11 +363,12 @@ async fn dispatch_next_run_window(
     .await?)
 }
 
-/// Claims and dispatches one exact run-shard through fenced write admission.
+/// Dispatches one claimed run-shard through fenced write admission. Colocated
+/// work commits its cursor and execution writes together.
 pub(crate) async fn dispatch_admitted_run_window(
     database_router: &database::DatabaseRouter,
     mut control_tx: Transaction<'static, Postgres>,
-    execution_route: &ExecutionRoute,
+    execution_route: &DispatchExecutionRoute,
     chunk_window_size: i64,
     route: &DispatchRoute,
     snapshot: &DispatchRunSnapshot,
@@ -378,30 +379,44 @@ pub(crate) async fn dispatch_admitted_run_window(
         snapshot.run_id,
         snapshot.run_shard,
     )?;
+    let placement = execution_route.placement();
     if snapshot.tenant_id != route.tenant_id
-        || execution_route.placement.run_id != route.run_id
-        || execution_route.placement.run_shard != route.run_shard
-        || execution_route.placement.database_alias != route.database_alias
-        || execution_route.placement.write_epoch != route.write_epoch
-        || execution_route.placement.route_version != route.route_version
+        || placement.run_id != route.run_id
+        || placement.run_shard != route.run_shard
+        || placement.database_alias != route.database_alias
+        || placement.write_epoch != route.write_epoch
+        || placement.route_version != route.route_version
     {
         return Err(RoutedDispatchError::Invariant(anyhow::anyhow!(
             "dispatch execution route or snapshot ownership mismatch"
         )));
     }
-    let execution_tx = database_router
-        .begin_dispatch_admission(execution_route, route.tenant_id, &mut control_tx)
-        .await
-        .map_err(RoutedDispatchError::ExecutionWrite)?;
-
-    dispatch_routed_run_window_with_transactions(
-        control_tx,
-        execution_tx,
-        chunk_window_size,
-        route,
-        snapshot,
-    )
-    .await
+    match execution_route {
+        DispatchExecutionRoute::Colocated(placement) => {
+            database_router
+                .admit_colocated_dispatch(placement, &mut control_tx)
+                .await
+                .map_err(RoutedDispatchError::ExecutionWrite)?;
+            let dispatched =
+                write_dispatch_window(&mut control_tx, chunk_window_size, route, snapshot).await?;
+            commit_dispatch_cursor(control_tx, dispatched.as_ref()).await?;
+            Ok(dispatched.as_ref().map(DispatchedRun::from))
+        }
+        DispatchExecutionRoute::Separate(execution_route) => {
+            let execution_tx = database_router
+                .begin_dispatch_admission(execution_route, route.tenant_id, &mut control_tx)
+                .await
+                .map_err(RoutedDispatchError::ExecutionWrite)?;
+            dispatch_routed_run_window_with_transactions(
+                control_tx,
+                execution_tx,
+                chunk_window_size,
+                route,
+                snapshot,
+            )
+            .await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -431,18 +446,32 @@ async fn dispatch_routed_run_window(
     .await
 }
 
-/// Applies a dispatch window while the caller holds shard write admission.
-///
-/// The route is selected from the control database before the caller resolves the
-/// execution placement. This function keeps the shard-local dispatch statement
-/// constrained to that routed `run_id + run_shard`.
+/// Commits the separate execution placement before advancing its control cursor.
 async fn dispatch_routed_run_window_with_transactions(
-    mut control_tx: Transaction<'static, Postgres>,
+    control_tx: Transaction<'static, Postgres>,
     mut execution_tx: Transaction<'static, Postgres>,
     chunk_window_size: i64,
     route: &DispatchRoute,
     snapshot: &DispatchRunSnapshot,
 ) -> Result<Option<DispatchedRun>, RoutedDispatchError> {
+    let dispatched =
+        write_dispatch_window(&mut execution_tx, chunk_window_size, route, snapshot).await?;
+    execution_tx
+        .commit()
+        .await
+        .map_err(anyhow::Error::from)
+        .map_err(RoutedDispatchError::ExecutionWrite)?;
+    commit_dispatch_cursor(control_tx, dispatched.as_ref()).await?;
+    Ok(dispatched.as_ref().map(DispatchedRun::from))
+}
+
+/// Writes a bounded window while the caller retains placement admission.
+async fn write_dispatch_window(
+    execution_tx: &mut Transaction<'static, Postgres>,
+    chunk_window_size: i64,
+    route: &DispatchRoute,
+    snapshot: &DispatchRunSnapshot,
+) -> Result<Option<DispatchedRunWindow>, RoutedDispatchError> {
     validate_dispatch_snapshot_route(
         route.run_id,
         route.run_shard,
@@ -450,26 +479,26 @@ async fn dispatch_routed_run_window_with_transactions(
         snapshot.run_shard,
     )?;
 
-    let dispatched =
-        dispatch_run_window(&mut execution_tx, chunk_window_size, route, snapshot).await?;
+    let dispatched = dispatch_run_window(execution_tx, chunk_window_size, route, snapshot).await?;
 
     if let Some(dispatched) = &dispatched {
         run_shard_summary::insert_run_shard_summary_with(
-            &mut execution_tx,
+            execution_tx,
             dispatched.id,
             dispatched.run_shard,
         )
         .await
         .map_err(RoutedDispatchError::ExecutionWrite)?;
     }
+    Ok(dispatched)
+}
 
-    execution_tx
-        .commit()
-        .await
-        .map_err(anyhow::Error::from)
-        .map_err(RoutedDispatchError::ExecutionWrite)?;
-
-    if let Some(dispatched) = &dispatched {
+/// Advances or releases the held cursor together with all control-side writes.
+async fn commit_dispatch_cursor(
+    mut control_tx: Transaction<'static, Postgres>,
+    dispatched: Option<&DispatchedRunWindow>,
+) -> Result<(), RoutedDispatchError> {
+    if let Some(dispatched) = dispatched {
         let next_status = dispatch_cursor_status(dispatched.has_remaining_chunks);
         update_dispatch_cursor(
             &mut control_tx,
@@ -492,7 +521,7 @@ async fn dispatch_routed_run_window_with_transactions(
             .map_err(RoutedDispatchError::Control)?;
     }
 
-    Ok(dispatched.as_ref().map(DispatchedRun::from))
+    Ok(())
 }
 
 #[cfg(test)]

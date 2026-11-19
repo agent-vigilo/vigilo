@@ -636,6 +636,137 @@ async fn concurrent_pending_run_start_emits_one_started_event(pool: PgPool) {
     assert_eq!(chunk_ready_event_count(&pool, run_id).await, 2);
 }
 
+async fn dispatch_pool(pool: &PgPool, connections: u32) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(connections)
+        .acquire_timeout(Duration::from_secs(1))
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap()
+}
+
+fn fixed_dispatch_router(pool: &PgPool, connections: u32) -> database::DatabaseRouter {
+    database::DatabaseRouter::from_fixed_pools(
+        database::Config::new(
+            String::new(),
+            connections,
+            Duration::from_secs(1),
+            Default::default(),
+            database::PlacementConfig::default_single_database(),
+        ),
+        std::collections::BTreeMap::from([(
+            "primary".into(),
+            database::FixedPlacementPool {
+                pool: pool.clone(),
+                role: crate::models::database_placement::DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
+            },
+        )]),
+    )
+    .unwrap()
+}
+
+async fn dispatch_colocated_claim(
+    router: &database::DatabaseRouter,
+    mut claim: ClaimedDispatchRoute,
+    prepared: Option<&tokio::sync::Barrier>,
+) -> anyhow::Result<DispatchedRun> {
+    let snapshot =
+        prepare_dispatch_run_snapshot_with(&mut claim.control_tx, &claim.route, Uuid::now_v7(), 60)
+            .await?
+            .expect("claimed cursor should have a snapshot");
+    if let Some(prepared) = prepared {
+        prepared.wait().await;
+    }
+    let execution = router
+        .execution_route_from_placements(&snapshot.shard_placement, &snapshot.database_placement)
+        .await?;
+    Ok(dispatch_admitted_run_window(
+        router,
+        claim.control_tx,
+        &execution,
+        1,
+        &claim.route,
+        &snapshot,
+    )
+    .await?
+    .expect("admitted shard should dispatch"))
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn colocated_dispatch_uses_one_connection(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 2)]).await;
+    let limited = dispatch_pool(&pool, 1).await;
+    let fixed = fixed_dispatch_router(&limited, 1);
+    let first = claim_next_dispatch_route(fixed.control().await.unwrap(), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    let first = dispatch_colocated_claim(&fixed, first, None).await.unwrap();
+    assert_eq!(first.chunks_marked_dispatched, 1);
+    assert!(first.has_remaining_chunks);
+    assert_eq!(cursor_status(&pool, run, 0).await, "open");
+
+    let standalone = database::DatabaseRouter::new(database::Config::new(
+        String::new(),
+        1,
+        Duration::from_secs(1),
+        Default::default(),
+        database::PlacementConfig::default_single_database(),
+    ));
+    standalone.control_pool.set(limited.clone()).unwrap();
+    let second = claim_target_dispatch_route(
+        standalone.control().await.unwrap(),
+        Uuid::nil(),
+        run,
+        0,
+        "primary",
+        1,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let second = dispatch_colocated_claim(&standalone, second, None)
+        .await
+        .unwrap();
+    assert_eq!(second.chunks_marked_dispatched, 1);
+    assert!(!second.has_remaining_chunks);
+    assert_eq!(cursor_status(&pool, run, 0).await, "drained");
+    assert_eq!(run_started_event_count(&pool, run).await, 1);
+    assert_eq!(chunk_ready_event_count(&pool, run).await, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn colocated_dispatch_progresses_when_all_connections_hold_claims(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 1), (1, 1)]).await;
+    mark_run_running(&pool, run).await;
+    let limited = dispatch_pool(&pool, 2).await;
+    let router = fixed_dispatch_router(&limited, 2);
+    let barrier = tokio::sync::Barrier::new(2);
+    let dispatch = || async {
+        let claim = claim_next_dispatch_route(&limited, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        dispatch_colocated_claim(&router, claim, Some(&barrier)).await
+    };
+    let (left, right) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(dispatch(), dispatch())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        dispatched_shards(&[left.unwrap(), right.unwrap()]),
+        BTreeSet::from([0, 1])
+    );
+    for shard in [0, 1] {
+        assert_eq!(cursor_status(&pool, run, shard).await, "drained");
+        assert_eq!(dispatched_chunk_count(&pool, run, shard).await, 1);
+    }
+    assert_eq!(chunk_ready_event_count(&pool, run).await, 2);
+}
+
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn running_dispatch_does_not_wait_on_parent_run_share_lock(pool: PgPool) {

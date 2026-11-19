@@ -313,6 +313,29 @@ pub(crate) struct ExecutionRoute {
     pub(crate) pool: PgPool,
 }
 
+/// Dispatch already owns a control connection. A colocated placement uses that
+/// transaction for its writes, while a separate placement needs its own pool.
+pub(crate) enum DispatchExecutionRoute {
+    Colocated(ShardPlacement),
+    Separate(ExecutionRoute),
+}
+
+impl DispatchExecutionRoute {
+    pub(crate) fn placement(&self) -> &ShardPlacement {
+        match self {
+            Self::Colocated(placement) => placement,
+            Self::Separate(route) => &route.placement,
+        }
+    }
+}
+
+enum AdmissionControl<'a> {
+    Colocated,
+    Separate(&'a mut sqlx::PgConnection),
+    #[cfg(test)]
+    Unclaimed,
+}
+
 /// Message-carried route hint paired with its process-local execution pool.
 #[derive(Clone)]
 pub(crate) struct ExecutionWriteRoute {
@@ -632,16 +655,7 @@ impl DatabaseRouter {
         }
         let pools = self.placement_pools().await?;
         if placement.alias == self.placement_config.control_database_alias {
-            if let Some(configured) = pools.pools_by_alias.get(&placement.alias)
-                && configured.database_url_env != placement.database_url_env
-            {
-                anyhow::bail!(
-                    "database placement alias {} changed database_url_env from {} to {}; restart Vigilo to load new connection parameters",
-                    placement.alias,
-                    configured.database_url_env,
-                    placement.database_url_env
-                );
-            }
+            self.validate_control_pool_reference(placement)?;
             let pool = self.control().await?;
             debug!(
                 database_alias = %placement.alias,
@@ -830,14 +844,14 @@ impl DatabaseRouter {
         Ok(ExecutionRoute { placement, pool })
     }
 
-    /// Resolve records read on the claimed dispatch transaction, without another
-    /// control-pool borrow or an unscoped/cached shard lookup. The caller retains
-    /// its cursor claim; execution-local admission rechecks the movement fence.
+    /// Resolve records read on the claimed dispatch transaction. Colocated
+    /// dispatch can proceed immediately without initializing the standalone
+    /// placement cache or borrowing another control connection.
     pub(crate) async fn execution_route_from_placements(
         &self,
         placement: &ShardPlacement,
         database: &DatabasePlacement,
-    ) -> anyhow::Result<ExecutionRoute> {
+    ) -> anyhow::Result<DispatchExecutionRoute> {
         validate_run_shard(placement.run_shard)?;
         anyhow::ensure!(
             placement.database_alias == database.alias,
@@ -856,13 +870,37 @@ impl DatabaseRouter {
             "dispatch database cannot serve owned shards"
         );
         require_shard_capable_placement(database)?;
+        if database.alias == self.control_database_alias() {
+            if self.fixed_pools.is_some() {
+                self.fixed_placement_pool(database)?;
+            } else {
+                self.validate_control_pool_reference(database)?;
+            }
+            return Ok(DispatchExecutionRoute::Colocated(placement.clone()));
+        }
+
         let pool = self
             .resolve_placement_pool(database, Instant::now())
             .await?;
-        Ok(ExecutionRoute {
+        Ok(DispatchExecutionRoute::Separate(ExecutionRoute {
             placement: placement.clone(),
             pool,
-        })
+        }))
+    }
+
+    fn validate_control_pool_reference(&self, placement: &DatabasePlacement) -> anyhow::Result<()> {
+        if let Some(pools) = self.placement_pools.get()
+            && let Some(configured) = pools.pools_by_alias.get(&placement.alias)
+            && configured.database_url_env != placement.database_url_env
+        {
+            anyhow::bail!(
+                "database placement alias {} changed database_url_env from {} to {}; restart Vigilo to load new connection parameters",
+                placement.alias,
+                configured.database_url_env,
+                placement.database_url_env
+            );
+        }
+        Ok(())
     }
 
     /// Refresh exceptional routing under identity verified at the source. The
@@ -999,53 +1037,76 @@ impl DatabaseRouter {
         &self,
         route: &ExecutionRoute,
     ) -> anyhow::Result<Transaction<'static, Postgres>> {
-        self.begin_routed_admission(route, None).await
+        let mut tx = route.pool.begin().await?;
+        crate::db::shard_write_fence::lock_shared(
+            &mut tx,
+            route.placement.run_id,
+            route.placement.run_shard,
+        )
+        .await?;
+        self.validate_or_repair_admission(&route.placement, &mut tx, AdmissionControl::Unclaimed)
+            .await?;
+        Ok(tx)
     }
 
-    /// Acquires dispatch write admission using identity from the held control
-    /// claim. Missing local admission is repaired through that same transaction.
+    /// Acquires admission on a separate execution database. The already-held
+    /// control claim supplies its trusted identity and any missing route record.
     pub(crate) async fn begin_dispatch_admission(
         &self,
         route: &ExecutionRoute,
         tenant_id: Uuid,
         control: &mut sqlx::PgConnection,
     ) -> anyhow::Result<Transaction<'static, Postgres>> {
-        self.begin_routed_admission(route, Some((tenant_id, control)))
+        let mut tx = route.pool.begin().await?;
+        // Scope precedes protected reads. Canonical UUIDs and the typed shard
+        // let us submit the scope and fence without an extra round trip.
+        let setup = format!(
+            "{} SELECT pg_advisory_xact_lock_shared(hashtextextended('{}'::uuid::text, {}::bigint))",
+            crate::db::scope::system_settings(tenant_id, route.placement.run_id),
+            route.placement.run_id,
+            route.placement.run_shard,
+        );
+        (&mut *tx).execute(setup.as_str()).await?;
+        self.validate_or_repair_admission(
+            &route.placement,
+            &mut tx,
+            AdmissionControl::Separate(control),
+        )
+        .await?;
+        Ok(tx)
+    }
+
+    /// Retains the movement fence on the already-scoped control transaction
+    /// when that transaction also owns the execution writes.
+    pub(crate) async fn admit_colocated_dispatch(
+        &self,
+        placement: &ShardPlacement,
+        control: &mut Transaction<'static, Postgres>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            placement.database_alias == self.control_database_alias(),
+            "dispatch placement is not colocated with control"
+        );
+        crate::db::shard_write_fence::lock_shared(control, placement.run_id, placement.run_shard)
+            .await?;
+        self.validate_or_repair_admission(placement, control, AdmissionControl::Colocated)
             .await
     }
 
-    async fn begin_routed_admission(
+    async fn validate_or_repair_admission(
         &self,
-        route: &ExecutionRoute,
-        dispatch: Option<(Uuid, &mut sqlx::PgConnection)>,
-    ) -> anyhow::Result<Transaction<'static, Postgres>> {
-        let mut tx = route.pool.begin().await?;
-        if let Some((tenant_id, _)) = &dispatch {
-            // Only canonical UUIDs and a typed shard enter this fixed SQL. Scope
-            // precedes protected reads without adding a fence round trip.
-            let setup = format!(
-                "{} SELECT pg_advisory_xact_lock_shared(hashtextextended('{}'::uuid::text, {}::bigint))",
-                crate::db::scope::system_settings(*tenant_id, route.placement.run_id),
-                route.placement.run_id,
-                route.placement.run_shard,
-            );
-            (&mut *tx).execute(setup.as_str()).await?;
-        } else {
-            crate::db::shard_write_fence::lock_shared(
-                &mut tx,
-                route.placement.run_id,
-                route.placement.run_shard,
-            )
-            .await?;
-        }
+        placement: &ShardPlacement,
+        tx: &mut Transaction<'static, Postgres>,
+        control: AdmissionControl<'_>,
+    ) -> anyhow::Result<()> {
         let hint = LocalShardRouteHint {
-            run_id: route.placement.run_id,
-            run_shard: route.placement.run_shard,
-            database_alias: route.placement.database_alias.clone(),
-            write_epoch: route.placement.write_epoch,
+            run_id: placement.run_id,
+            run_shard: placement.run_shard,
+            database_alias: placement.database_alias.clone(),
+            write_epoch: placement.write_epoch,
         };
         let validation =
-            validate_local_shard_admission(&mut *tx, &hint, LocalShardWriteKind::NewWork).await;
+            validate_local_shard_admission(&mut **tx, &hint, LocalShardWriteKind::NewWork).await;
         if let Err(error) = validation {
             if !matches!(
                 error.downcast_ref::<LocalShardAdmissionError>(),
@@ -1057,22 +1118,38 @@ impl DatabaseRouter {
             // Repair a missing local admission under the shared movement fence.
             // Reuse the claimed control transaction and its identity; a pool
             // lookup would lose scope and could require a second credential.
-            let current = if let Some((_, control)) = dispatch {
-                shard_placements::select_shard_placement_with(control, hint.run_id, hint.run_shard)
+            let current = match control {
+                AdmissionControl::Colocated => {
+                    shard_placements::select_shard_placement_with(
+                        &mut **tx,
+                        hint.run_id,
+                        hint.run_shard,
+                    )
                     .await?
-                    .ok_or(ExecutionRouteError::MissingShardPlacement {
-                        run_id: hint.run_id,
-                        run_shard: hint.run_shard,
-                    })?
-            } else {
-                self.select_control_shard_placement(hint.run_id, hint.run_shard)
+                }
+                AdmissionControl::Separate(control) => {
+                    shard_placements::select_shard_placement_with(
+                        control,
+                        hint.run_id,
+                        hint.run_shard,
+                    )
                     .await?
-            };
-            if !route.placement.same_route_fence(&current) || !current.is_dispatchable() {
+                }
+                #[cfg(test)]
+                AdmissionControl::Unclaimed => Some(
+                    self.select_control_shard_placement(hint.run_id, hint.run_shard)
+                        .await?,
+                ),
+            }
+            .ok_or(ExecutionRouteError::MissingShardPlacement {
+                run_id: hint.run_id,
+                run_shard: hint.run_shard,
+            })?;
+            if !placement.same_route_fence(&current) || !current.is_dispatchable() {
                 return Err(error);
             }
             upsert_local_shard_admission(
-                &mut *tx,
+                &mut **tx,
                 LocalShardAdmissionDraft {
                     run_id: hint.run_id,
                     run_shard: hint.run_shard,
@@ -1086,7 +1163,7 @@ impl DatabaseRouter {
             .await?;
         }
 
-        Ok(tx)
+        Ok(())
     }
 
     /// Verifies queue identity before protected local admission reads. The lookup

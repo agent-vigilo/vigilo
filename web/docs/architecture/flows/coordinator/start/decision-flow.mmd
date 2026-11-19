@@ -23,7 +23,7 @@ flowchart TD
     CircuitSkip[Leave durable work pending and continue]
     Recover[Discover expired leases and due standalone invocations under placement authority]
     RecoveryIsolated[Count placement failure and continue aliases]
-    Dispatch[Claim cursor; read scoped snapshot and route; select pool and fence execution admission]
+    Dispatch[Claim cursor, read scoped snapshot and route, fence admission, and commit with the cursor if colocated]
     DispatchIsolated[Leave cursor open and exclude failed alias]
     Finalize[Scoped routed reads from discovery; scoped final commit from lease claim]
     FinalizeIsolated[Scope deferral heartbeat; inspect next run]

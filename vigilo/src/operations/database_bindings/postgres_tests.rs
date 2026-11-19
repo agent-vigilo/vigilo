@@ -309,7 +309,7 @@ async fn scoped_dispatch(
         let resolved = resolved
             .expect("routing must not borrow the occupied single-connection pool")
             .unwrap();
-        assert_eq!(resolved.placement.run_id, run);
+        assert_eq!(resolved.placement().run_id, run);
         assert!(
             routing_queries.is_empty(),
             "claimed routing must reuse projected metadata: {routing_queries:?}"

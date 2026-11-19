@@ -288,6 +288,7 @@ pub(super) async fn recover_expired_chunks(
     // Query outline:
     //
     // expired         - recoverable leased chunks whose lease is past due.
+    //                   A draining shard still owns its expired leases.
     // recovered       - clear lease, increment recovery_count, return rows.
     // stale_recovered_attempts
     //                 - mark current running attempts stale before requeue.
@@ -307,7 +308,7 @@ pub(super) async fn recover_expired_chunks(
             JOIN local_shard_admissions admission
               ON admission.run_id = rc.run_id
              AND admission.run_shard = rc.run_shard
-             AND admission.state = 'open'
+             AND admission.state IN ('open','draining')
             JOIN UNNEST($3::uuid[], $4::smallint[]) AS admitted(run_id,run_shard)
               ON admitted.run_id = rc.run_id AND admitted.run_shard = rc.run_shard
             WHERE rc.status = 'leased'
@@ -381,7 +382,7 @@ pub(super) async fn recover_expired_chunks(
             JOIN local_shard_admissions admission
               ON admission.run_id = recovered.run_id
              AND admission.run_shard = recovered.run_shard
-             AND admission.state = 'open'
+             AND admission.state IN ('open','draining')
             ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING id
         )

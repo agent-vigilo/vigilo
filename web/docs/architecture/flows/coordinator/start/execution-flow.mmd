@@ -66,15 +66,20 @@ sequenceDiagram
             loop Bounded dispatch windows
                 Vigilo->>ControlDB: Claim cursor and bind returned work identity in one statement
                 Vigilo->>ControlDB: Read snapshot and routing records on the same scoped transaction
-                Vigilo->>Vigilo: Validate route and select bound execution pool
-                Vigilo->>ExecutionDB: Bind claimed identity, fence movement and validate admission
-                Vigilo->>ExecutionDB: Dispatch routed chunk window
-                alt Execution placement succeeds
-                    ExecutionDB-->>Vigilo: Dispatch shard window result
-                    Vigilo->>ControlDB: Release or mark cursor drained
-                else Execution placement fails
-                    Note over Vigilo,ControlDB: Cursor stays open
-                    Vigilo->>Vigilo: Count failure and exclude alias for this pass
+                Vigilo->>Vigilo: Validate the execution route
+                alt Control and execution share the database
+                    Vigilo->>ControlDB: Fence movement and validate admission on the cursor transaction
+                    Vigilo->>ControlDB: Dispatch chunks, enqueue readiness and advance cursor in one commit
+                else Separate execution database
+                    Vigilo->>ExecutionDB: Bind claimed identity, fence movement and validate admission
+                    Vigilo->>ExecutionDB: Dispatch chunks and commit readiness records
+                    alt Execution placement succeeds
+                        ExecutionDB-->>Vigilo: Dispatch shard window result
+                        Vigilo->>ControlDB: Release or mark cursor drained
+                    else Execution placement fails
+                        Note over Vigilo,ControlDB: Cursor stays open
+                        Vigilo->>Vigilo: Count failure and exclude alias for this pass
+                    end
                 end
             end
             loop Serviceable databases with bounded concurrency
