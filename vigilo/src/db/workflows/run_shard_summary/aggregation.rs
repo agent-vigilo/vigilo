@@ -118,7 +118,7 @@ pub(crate) async fn advance_shard_summary(
     write_epoch: i64,
 ) -> anyhow::Result<bool> {
     Ok(matches!(
-        advance_shard_summary_page(db, Uuid::nil(), run_id, shard, write_epoch).await?,
+        advance_shard_summary_page(db, Uuid::nil(), run_id, shard, write_epoch, None).await?,
         PageOutcome::Advanced | PageOutcome::Sealed | PageOutcome::CaughtUp
     ))
 }
@@ -126,12 +126,13 @@ pub(crate) async fn advance_shard_summary(
 /// Owns one bounded page transaction and reports whether another page may help.
 /// The nonblocking shard claim and shared movement fence precede all page reads.
 /// A sealing commit ends scheduling without another sealed-summary lookup.
-pub(super) async fn advance_shard_summary_page(
+pub(crate) async fn advance_shard_summary_page(
     db: &PgPool,
     tenant_id: Uuid,
     run_id: Uuid,
     shard: i16,
     write_epoch: i64,
+    database_alias: Option<&str>,
 ) -> anyhow::Result<PageOutcome> {
     let mut tx = db.begin().await?;
     // This SELECT reads no protected rows. All returned expressions complete
@@ -143,19 +144,26 @@ pub(super) async fn advance_shard_summary_page(
         return Ok(PageOutcome::Deferred);
     }
     crate::db::shard_write_fence::lock_shared(&mut tx, run_id, shard).await?;
-    let mut context = load_context(&mut tx, run_id, shard, write_epoch).await?;
+    let expected = database_alias.map(|alias| (tenant_id, alias));
+    let mut context = load_context(&mut tx, run_id, shard, write_epoch, expected).await?;
     if context
         .summary
         .as_ref()
         .is_some_and(|summary| summary.sealed)
     {
-        return Ok(PageOutcome::Deferred);
+        // Exact callers need to reconstruct the next step after a committed
+        // seal, even if the caller stopped before it could signal finalization.
+        return Ok(if expected.is_some() {
+            PageOutcome::Sealed
+        } else {
+            PageOutcome::Deferred
+        });
     }
     // Dispatch and cancellation normally prepare local state. Retain recovery
     // for a missing snapshot/summary without submitting no-op inserts per page.
     if context.snapshot.is_none() {
         queries::ensure_snapshot_with(&mut tx, run_id, shard).await?;
-        context = load_context(&mut tx, run_id, shard, write_epoch).await?;
+        context = load_context(&mut tx, run_id, shard, write_epoch, expected).await?;
     }
     let (Some(snapshot), Some(policy), Some(expected)) =
         (context.snapshot, context.policy, context.expected)
@@ -381,11 +389,13 @@ async fn load_context(
     run_id: Uuid,
     shard: i16,
     write_epoch: i64,
+    expected: Option<(Uuid, &str)>,
 ) -> anyhow::Result<Context> {
     let context = sqlx::query_as::<_, Context>(
         r#"
         SELECT EXISTS (SELECT 1 FROM local_shard_admissions
                        WHERE run_id=$1 AND run_shard=$2 AND write_epoch=$3
+                         AND ($4::uuid IS NULL OR (tenant_id=$4 AND database_alias=$5))
                          AND state IN ('open','draining')) AS admitted,
                r.config_snapshot AS snapshot, r.aggregation_policy_hash AS policy,
                r.expected_execution_count AS expected,
@@ -399,6 +409,8 @@ async fn load_context(
     .bind(run_id)
     .bind(shard)
     .bind(write_epoch)
+    .bind(expected.map(|(tenant_id, _)| tenant_id))
+    .bind(expected.map(|(_, alias)| alias))
     .fetch_one(&mut **tx)
     .await?;
     anyhow::ensure!(
@@ -541,7 +553,7 @@ pub(crate) async fn advance_pending_summaries(
         config,
         || started.elapsed() < config.time_budget,
         |(run_id, shard, epoch, tenant_id)| async move {
-            match advance_shard_summary_page(db, tenant_id, run_id, shard, epoch).await {
+            match advance_shard_summary_page(db, tenant_id, run_id, shard, epoch, None).await {
                 Ok(
                     outcome @ (PageOutcome::Advanced | PageOutcome::Sealed | PageOutcome::CaughtUp),
                 ) => {

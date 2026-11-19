@@ -40,6 +40,15 @@ use crate::{
     context::Context,
 };
 
+mod scheduled;
+pub use scheduled::{
+    AdmissionProgress,
+    AggregationProgress,
+    DispatchProgress,
+    RunTarget,
+    ShardTarget,
+};
+
 /// Broker settings are deployment input, never ordinary operation parameters.
 /// None selects the standard topology explicitly; no environment namespace is read.
 #[derive(Clone)]
@@ -367,10 +376,26 @@ impl Coordinator {
             .execution_database_from_hint(database_alias)
             .await
             .map_err(Error::Dependency)?;
-        let publisher =
-            crate::outbox::MqEventPublisher::new(context.mq().await.map_err(Error::Dependency)?);
+        self.publish_outbox(&db).await
+    }
+
+    /// Publishes one bounded batch of durable events from the control store.
+    pub async fn publish_control_outbox(&self) -> Result<usize, Error> {
+        let _active = self
+            .active
+            .try_lock()
+            .map_err(|_| Error::Conflict("coordinator is already running"))?;
+        let router = self.context.dbr().await.map_err(Error::Dependency)?;
+        self.publish_outbox(router.control().await.map_err(Error::Dependency)?)
+            .await
+    }
+
+    async fn publish_outbox(&self, db: &sqlx::PgPool) -> Result<usize, Error> {
+        let publisher = crate::outbox::MqEventPublisher::new(
+            self.context.mq().await.map_err(Error::Dependency)?,
+        );
         let stats = crate::outbox::publish_pending_events(
-            &db,
+            db,
             &publisher,
             &crate::outbox::OutboxPublisherConfig {
                 batch_size: self.options.outbox_batch_size,

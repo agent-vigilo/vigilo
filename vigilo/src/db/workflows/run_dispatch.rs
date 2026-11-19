@@ -27,6 +27,7 @@ use queries::claim_exact_dispatch_cursor;
 pub(crate) use queries::select_next_dispatch_route;
 pub(crate) use queries::{
     claim_next_dispatch_route,
+    claim_target_dispatch_route,
     count_dispatch_cursor_backlog,
     prepare_dispatch_run_snapshot_with,
 };
@@ -45,6 +46,7 @@ pub(crate) struct DispatchedRun {
     pub(crate) chunk_ready_event_records_inserted: i64,
     pub(crate) chunks_marked_dispatched: i64,
     pub(crate) run_started_event_records_inserted: i64,
+    pub(crate) has_remaining_chunks: bool,
 }
 
 /// Immutable run context copied from the control database before execution dispatch.
@@ -114,6 +116,7 @@ impl From<&DispatchedRunWindow> for DispatchedRun {
             chunk_ready_event_records_inserted: dispatched.chunk_ready_event_records_inserted,
             chunks_marked_dispatched: dispatched.chunks_marked_dispatched,
             run_started_event_records_inserted: dispatched.run_started_event_records_inserted,
+            has_remaining_chunks: dispatched.has_remaining_chunks,
         }
     }
 }

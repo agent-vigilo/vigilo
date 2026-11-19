@@ -117,6 +117,14 @@ where
 {
     let db = context.dbr().await?.control().await?;
     let lease = ledger::claim(db, run_id).await?;
+    with_lease(db, lease, work).await
+}
+
+async fn with_lease<F, Fut>(db: &sqlx::PgPool, lease: run_plan::Lease, work: F) -> Result<bool>
+where
+    F: FnOnce(run_plan::Lease) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
     let result = work(lease).await;
     // Only the confirmed activation commit returns true. Another write must not
     // turn committed success into a reported failure if the database goes away.
@@ -134,6 +142,61 @@ where
     let complete = result?;
     release?;
     Ok(complete)
+}
+
+async fn resume_claimed(
+    context: &Context,
+    db: &sqlx::PgPool,
+    config: crate::db::workflows::run_creation::Config,
+    cancel: &CancellationToken,
+    lease: run_plan::Lease,
+) -> Result<bool> {
+    let budget = Budget::standard();
+    let plan = ledger::load(db, lease).await?.context("plan disappeared")?;
+    let reference = plan
+        .manifest
+        .as_ref()
+        .context("accepted plan has no manifest")?;
+    let request = crate::operations::resources::Request::accepted(
+        lease.tenant_id,
+        lease.run_id,
+        &reference.digest,
+        plan.storage_binding_hash.clone(),
+    )?;
+    let reader = open_reader(
+        &plan,
+        async {
+            context
+                .execution_resources(request, &plan.limits, cancel)
+                .await
+                .map(|(_, store)| store)
+        },
+        budget,
+        cancel,
+    )
+    .await?;
+    admit(context, &plan, &reader, config, cancel, lease).await
+}
+
+/// Advances one accepted plan under its creation budget and authoritative owner.
+pub(crate) async fn advance(
+    context: &Context,
+    run_id: Uuid,
+    tenant_id: Uuid,
+    config: crate::db::workflows::run_creation::Config,
+    cancel: &CancellationToken,
+) -> Result<Option<bool>> {
+    let db = context.dbr().await?.control().await?;
+    let Some(lease) = ledger::try_claim(db, run_id, Some(tenant_id)).await? else {
+        return Ok(None);
+    };
+    // A scheduler can compose this operation in a small-stack async task.
+    // Keep the storage and admission future out of its caller's frame.
+    with_lease(db, lease, |lease| {
+        Box::pin(resume_claimed(context, db, config, cancel, lease))
+    })
+    .await
+    .map(Some)
 }
 
 /// Include adapter initialization and all root reads in one metadata deadline.
@@ -482,38 +545,10 @@ pub(crate) async fn recover(
     let mut stats = crate::db::workflows::run_creation::RunCreationRecoveryStats::default();
     for id in ids {
         stats.claimed_runs += 1;
-        let budget = Budget::standard();
-        let result = async {
-            with_claim(context, id, |lease| async move {
-                let plan = ledger::load(db, lease).await?.context("plan disappeared")?;
-                let plan = &plan;
-                let cancel = CancellationToken::new();
-                let reference = plan
-                    .manifest
-                    .as_ref()
-                    .context("accepted plan has no manifest")?;
-                let request = crate::operations::resources::Request::accepted(
-                    lease.tenant_id,
-                    lease.run_id,
-                    &reference.digest,
-                    plan.storage_binding_hash.clone(),
-                )?;
-                let reader = open_reader(
-                    plan,
-                    async {
-                        context
-                            .execution_resources(request, &plan.limits, &cancel)
-                            .await
-                            .map(|(_, store)| store)
-                    },
-                    budget,
-                    &cancel,
-                )
-                .await?;
-                admit(context, plan, &reader, config, &cancel, lease).await
-            })
-            .await
-        }
+        let cancel = CancellationToken::new();
+        let result = with_claim(context, id, |lease| {
+            resume_claimed(context, db, config, &cancel, lease)
+        })
         .await;
         match result {
             Ok(true) => stats.completed_runs += 1,

@@ -305,15 +305,20 @@ pub use database_bindings::{
 
 mod hosted;
 pub use hosted::{
+    AdmissionProgress,
     AgentHttpLimits,
     AggregationOptions,
+    AggregationProgress,
     BrokerConfig,
     Coordinator,
     CoordinatorOptions,
     CreationOptions,
+    DispatchProgress,
     HostedConfig,
     HostedRuntime,
     HostedUser,
+    RunTarget,
+    ShardTarget,
     WasmOptions,
     Worker,
 };

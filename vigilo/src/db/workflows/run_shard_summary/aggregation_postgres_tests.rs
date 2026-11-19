@@ -76,6 +76,13 @@ async fn initialized_aggregation_has_bounded_query_cost(pool: PgPool) {
         );
     }
     eprintln!("progress/final/sealed aggregation SQL submissions: {query_counts:?}");
+
+    // An exact retry after an uncertain handoff observes the committed seal.
+    let result =
+        aggregation::advance_shard_summary_page(&pool, Uuid::nil(), run, 4, 1, Some("primary"))
+            .await
+            .unwrap();
+    assert!(matches!(result, PageOutcome::Sealed));
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -836,14 +843,33 @@ async fn aggregation_uses_discovered_ownership_and_scopes_rotation(pool: PgPool)
         .unwrap();
     let work = async {
         assert!(
-            aggregation::advance_shard_summary_page(&restricted, Uuid::now_v7(), runs[0], 4, 1)
+            aggregation::advance_shard_summary_page(
+                &restricted,
+                Uuid::now_v7(),
+                runs[0],
+                4,
+                1,
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            aggregation::advance_shard_summary_page(&restricted, tenant, runs[0], 4, 2, None)
                 .await
                 .is_err()
         );
         assert!(
-            aggregation::advance_shard_summary_page(&restricted, tenant, runs[0], 4, 2)
-                .await
-                .is_err()
+            aggregation::advance_shard_summary_page(
+                &restricted,
+                tenant,
+                runs[0],
+                4,
+                1,
+                Some("wrong")
+            )
+            .await
+            .is_err()
         );
         sqlx::raw_sql(&format!(
             "REVOKE UPDATE ON run_chunk_settlement_consumptions FROM {role}"

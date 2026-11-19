@@ -65,6 +65,11 @@ flowchart TD
     HostedCoordinator["Typed scheduler handle<br/>Validated bindings and host cancellation<br/>No CLI parsing or process signals"]:::component
     HostedCoordinator -->|"Runs bounded shared cycles"| CycleOrchestrator
     HostedCoordinator -->|"Retains scheduler authority"| RuntimeContext
+    HostedCoordinator -->|"Admits one accepted run"| CreationRecovery
+    HostedCoordinator -->|"Dispatches one routed window"| DispatchWorkflow
+    HostedCoordinator -->|"Consumes one settlement page"| ReceiptAggregation
+    HostedCoordinator -->|"Finalizes one run from sealed summaries"| FinalizeWorkflow
+    HostedCoordinator -->|"Publishes a bounded batch"| OutboxPublisher
     Vigilo -->|"Runs coordinator start or once through"| CommandFacade
     CommandFacade -->|"Starts continuous mode with"| ServiceLoop
     CommandFacade -->|"Runs one cycle through"| CycleOrchestrator

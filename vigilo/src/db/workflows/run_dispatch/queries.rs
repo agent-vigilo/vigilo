@@ -58,6 +58,48 @@ pub(crate) async fn claim_next_dispatch_route(
     Ok(Some(ClaimedDispatchRoute { route, control_tx }))
 }
 
+/// Claims only the requested cursor under the supplied run scope and route.
+/// A stale or busy target yields no work without selecting another run.
+pub(crate) async fn claim_target_dispatch_route(
+    db: &PgPool,
+    tenant_id: Uuid,
+    run_id: Uuid,
+    run_shard: i16,
+    database_alias: &str,
+    write_epoch: i64,
+) -> anyhow::Result<Option<ClaimedDispatchRoute>> {
+    let mut control_tx = db.begin().await?;
+    crate::db::scope::set_system(&mut control_tx, tenant_id, run_id).await?;
+    let route = sqlx::query_as::<_, DispatchRoute>(
+        "SELECT r.tenant_id,c.run_id,c.run_shard,sp.database_alias,
+                sp.status AS placement_status,sp.route_version,sp.write_epoch
+         FROM run_shard_dispatch_cursors c
+         JOIN runs r ON r.id=c.run_id AND r.tenant_id=c.tenant_id
+         JOIN shard_placements sp ON sp.run_id=c.run_id AND sp.run_shard=c.run_shard
+         JOIN database_placements dp ON dp.alias=sp.database_alias
+         WHERE c.run_id=$1 AND c.run_shard=$2 AND c.tenant_id=$3 AND c.status='open'
+           AND sp.database_alias=$4 AND sp.write_epoch=$5 AND sp.status='active'
+           AND dp.status IN ('active','draining')
+           AND dp.role IN ('shard','control_and_shard') AND r.execution_control='enabled'
+           AND (r.status='running' OR (r.status='pending' AND
+                (r.coordinator_leased_until IS NULL OR r.coordinator_leased_until < now())))
+         FOR UPDATE OF c SKIP LOCKED",
+    )
+    .bind(run_id)
+    .bind(run_shard)
+    .bind(tenant_id)
+    .bind(database_alias)
+    .bind(write_epoch)
+    .fetch_optional(&mut *control_tx)
+    .await?;
+    if let Some(route) = route {
+        Ok(Some(ClaimedDispatchRoute { route, control_tx }))
+    } else {
+        control_tx.rollback().await?;
+        Ok(None)
+    }
+}
+
 /// Counts currently dispatchable control-database cursor rows.
 ///
 /// This mirrors [`select_next_dispatch_route`] without ordering or row return

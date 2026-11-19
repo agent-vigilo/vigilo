@@ -1145,6 +1145,63 @@ struct RunShardSummaryCollection {
     complete: bool,
 }
 
+/// Attempts finalization only for the specified run under its existing lease
+/// and exact sealed-membership checks. Work that is not ready keeps its state.
+pub(crate) async fn finalize_target(
+    router: &database::DatabaseRouter,
+    coordinator_id: Uuid,
+    tenant_id: Uuid,
+    run_id: Uuid,
+    lease_seconds: i32,
+) -> anyhow::Result<bool> {
+    let control = router.control().await?;
+    let mut tx = control.begin().await?;
+    crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
+    let candidate: Option<String> = sqlx::query_scalar(
+        "SELECT aggregation_policy_hash FROM runs WHERE id=$1 AND tenant_id=$2
+          AND status IN ('running','finalizing') AND execution_control='enabled'
+          AND EXISTS (SELECT 1 FROM run_shard_dispatch_cursors WHERE run_id=$1)
+          AND NOT EXISTS (SELECT 1 FROM run_shard_dispatch_cursors WHERE run_id=$1 AND status<>'drained')",
+    ).bind(run_id).bind(tenant_id).fetch_optional(&mut *tx).await?;
+    tx.commit().await?;
+    let Some(policy) = candidate else {
+        return Ok(false);
+    };
+    let collection = collect_run_shard_summaries(router, coordinator_id, tenant_id, run_id).await?;
+    anyhow::ensure!(
+        collection.failures.failed_operation_count() == 0,
+        "a routed summary is unavailable"
+    );
+    let summaries = collection.output.summaries;
+    if !collection.output.complete
+        || summaries.is_empty()
+        || summaries.iter().any(|s| !s.is_terminal())
+    {
+        return Ok(false);
+    }
+    run_finalize::validate_summary_set(run_id, &summaries, &policy)?;
+    let Some(claimed) =
+        run_finalize::claim_finalization_candidate(control, run_id, coordinator_id, lease_seconds)
+            .await?
+    else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        claimed.tenant_id == tenant_id && claimed.aggregation_policy_hash == policy,
+        "finalization authority changed after summary collection"
+    );
+    Ok(run_finalize::finalize_claimed_run_from_summaries(
+        control,
+        tenant_id,
+        run_id,
+        coordinator_id,
+        &policy,
+        &summaries,
+    )
+    .await?
+    .is_some())
+}
+
 async fn collect_run_shard_summaries(
     database_router: &database::DatabaseRouter,
     coordinator_id: Uuid,

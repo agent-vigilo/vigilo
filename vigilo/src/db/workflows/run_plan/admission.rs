@@ -50,26 +50,40 @@ pub(crate) async fn accept<'e, E: sqlx::Executor<'e, Database = Postgres>>(
     .await
 }
 pub(crate) async fn claim(db: &PgPool, id: Uuid) -> Result<Lease> {
+    try_claim(db, id, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("run admission is leased or terminal, or plan is not ready"))
+}
+
+/// An exact scheduler target must match the owner before committing its lease.
+pub(crate) async fn try_claim(
+    db: &PgPool,
+    id: Uuid,
+    expected_owner: Option<Uuid>,
+) -> Result<Option<Lease>> {
     bounded(async {
         let mut tx = db.begin().await?;
         let owner = Uuid::now_v7();
-        let (tenant_id, run_id, owner, generation): (Uuid, Uuid, Uuid, i64) =
+        let claimed: Option<(Uuid, Uuid, Uuid, i64)> =
             sqlx::query_as("SELECT * FROM vigilo_claim_admission($1,$2)")
                 .bind(id)
                 .bind(owner)
                 .fetch_optional(&mut *tx)
-                .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("run admission is leased or terminal, or plan is not ready")
-                })?;
+                .await?;
+        let Some((tenant_id, run_id, owner, generation)) =
+            claimed.filter(|row| expected_owner.is_none_or(|expected| row.0 == expected))
+        else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
         tx.commit().await?;
-        Ok(Lease {
+        Ok(Some(Lease {
             tenant_id,
             run_id,
             owner,
             generation,
             caller: None,
-        })
+        }))
     })
     .await
 }

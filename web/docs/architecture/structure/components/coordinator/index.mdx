@@ -19,6 +19,12 @@ The trusted library host obtains `operations::Coordinator` from a validated
 implementation. Cancellation stops new cycles and drains the active cycle; the
 host owns task joining and dependency shutdown.
 
+The library handle also accepts a specific run or shard. An admission call
+advances one accepted run and returns its ready shard routes. Separate calls
+dispatch one window, consume one settlement page, or attempt finalization for
+one run. Each call checks its current database authority. A caller can retry a
+deferred operation independently and publish bounded outbox batches per database.
+
 Describes the major internal responsibilities of the coordinator runtime.
 
 <Mermaid value={coordinatorDiagram} />
@@ -54,9 +60,10 @@ Describes the major internal responsibilities of the coordinator runtime.
   Remote cancellation uses a separate bounded delivery budget after local work.
 - Chunk lease recovery then runs before dispatch and finalization: expired worker chunk leases are either requeued with recovery-scoped chunk-ready outbox event records or marked failed after the recovery limit.
 - Dispatch claims an open `run_id + run_shard` cursor, selects one bounded chunk window from that shard, and inserts one `run.chunk.ready` outbox event record per selected chunk.
-- Cursor selection calls a restricted database function inside the dispatch
-  transaction. Its row lock remains held through the routed write; commit or
-  rollback releases it. The function requires an explicit execution grant.
+- A coordinator cycle discovers cursors through a restricted function. A
+  targeted dispatch locks the specified cursor under the run's scope and
+  checks the route generation. The lock remains held through the routed write
+  and is released on commit or rollback.
 - Dispatch carries the claimed work identity into its execution transaction before
   taking the shared movement fence and validating local admission. Snapshot, chunk,
   summary and outbox writes share that context. Missing admission is repaired using
@@ -96,7 +103,7 @@ unavailable shards do not prevent unrelated shards from advancing.
 
 Finalization reads summaries in one batch per execution database, then requires
 validated seals and frozen planned membership before claiming control ownership.
-Receipt aggregation advances only in its dedicated cycle stage.
+Receipt aggregation advances in its dedicated cycle stage or a targeted call.
 See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
 ## Receipt Aggregation Controls
