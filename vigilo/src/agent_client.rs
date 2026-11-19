@@ -371,7 +371,7 @@ fn response_body_excerpt(body: &str) -> String {
 }
 
 /// Preserve complete response bytes without guessing a provider envelope.
-fn captured_output(body: vigilo::response::CapturedBody) -> AgentOutput {
+pub(crate) fn captured_output(body: vigilo::response::CapturedBody) -> AgentOutput {
     AgentOutput {
         captured_body: Some(body),
         mapping: None,

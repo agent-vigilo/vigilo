@@ -1553,3 +1553,6 @@ async fn persisted_response_replays_through_wasm_without_agent_io(pool: PgPool) 
 
 #[path = "postgres_tests/worker_scope.rs"]
 mod worker_scope;
+
+#[path = "postgres_tests/deferred.rs"]
+mod deferred;

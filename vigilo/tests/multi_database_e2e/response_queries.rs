@@ -302,3 +302,81 @@ async fn routed_response_query_matrix() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// Measures one coordinator cycle at each lifecycle checkpoint on isolated databases.
+#[tokio::test]
+async fn routed_coordinator_query_baseline() -> anyhow::Result<()> {
+    if std::env::var("VIGILO_COORDINATOR_QUERY_BASELINE").as_deref() != Ok("1") {
+        return Ok(());
+    }
+    let fixture = E2eFixture::setup()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("enable the multi-database tier"))?;
+    let binary = std::env::var_os("VIGILO_RESPONSE_QUERY_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_vigilo")));
+    for case_count in [1, 8] {
+        let files = write_run_inputs(
+            "coordinator_query_baseline",
+            &fixture.agent.url,
+            SENTIMENT_EVALUATOR_REF,
+            case_count,
+            CaseMode::Passing,
+        )?;
+        let _cleanup = InputCleanup(files.profile.parent().unwrap().to_path_buf());
+        let created = invoke(
+            &fixture.config,
+            &binary,
+            &[
+                "run",
+                "create",
+                "--profile-file",
+                path_arg(&files.profile)?,
+                "--dataset-file",
+                path_arg(&files.dataset)?,
+            ],
+            false,
+        )?;
+        let run = Uuid::parse_str(created["data"]["run_id"].as_str().unwrap())?;
+        for phase in ["dispatch", "await_worker", "finalize", "idle"] {
+            if phase == "finalize" {
+                invoke(&fixture.config, &binary, &["worker", "once"], false)?;
+                let completed: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM executions WHERE run_id=$1 AND status='completed'",
+                )
+                .bind(run)
+                .fetch_one(&fixture.shard)
+                .await?;
+                assert_eq!(completed, case_count as i64);
+            }
+            let control_probe = postgres_probe::Probe::start(&fixture.config.primary_url)?;
+            let execution_probe = postgres_probe::Probe::start(&fixture.config.shard_url)?;
+            let measured = IntegrationConfig {
+                primary_url: control_probe.url.clone(),
+                shard_url: execution_probe.url.clone(),
+                ..fixture.config.clone()
+            };
+            let before_control = counters(&fixture.primary).await?;
+            let before_execution = counters(&fixture.shard).await?;
+            invoke(&measured, &binary, &["coordinator", "once"], false)?;
+            let control_protocol = control_probe.finish()?;
+            let execution_protocol = execution_probe.finish()?;
+            println!(
+                "coordinator-observation {}",
+                json!({
+                    "cases": case_count, "phase": phase,
+                    "control": delta(&before_control, &counters(&fixture.primary).await?),
+                    "execution": delta(&before_execution, &counters(&fixture.shard).await?),
+                    "control_protocol": control_protocol, "execution_protocol": execution_protocol,
+                })
+            );
+        }
+        let status: (String, String) =
+            sqlx::query_as("SELECT status::text, gate_status::text FROM runs WHERE id=$1")
+                .bind(run)
+                .fetch_one(&fixture.primary)
+                .await?;
+        assert_eq!(status, ("completed".into(), "pass".into()));
+    }
+    Ok(())
+}

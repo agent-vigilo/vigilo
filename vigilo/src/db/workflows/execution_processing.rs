@@ -9,6 +9,7 @@
 //! It also owns evaluator runtime lookup and single-flight component loading so
 //! concurrent workers do not repeatedly compile the same evaluator artifact.
 
+pub(crate) mod deferred;
 pub(crate) mod response;
 
 use std::{
@@ -467,11 +468,14 @@ struct AttemptAllocation {
     already_terminal: bool,
     retry_not_due: bool,
     max_attempts_exhausted: bool,
+    #[sqlx(skip)]
+    deferred_output: Option<deferred::ScoringInput>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct ChunkExecutionState {
     pub(crate) open_execution_count: i64,
+    pub(crate) awaiting_agent_count: i64,
     pub(crate) retry_scheduled_count: i64,
     pub(crate) next_retry_after: Option<DateTime<Utc>>,
 }
@@ -936,25 +940,33 @@ async fn evaluate_case_execution(
         );
         response::validate_limits(context.agent_http_limits(), run_profile)?;
         let test_case = make_test_case(case)?;
-        let http = context.http().await?;
-        let invocation = agent_client::invoke(
-            agent_client::Services {
-                client: http,
-                limits: context.agent_http_limits(),
-                credentials: context.agent_credentials(),
-                resources: context.accepted_resources(),
-            },
-            run_id,
-            execution_id,
-            attempt_id,
-            run_profile,
-            &test_case,
-        )
-        .await
-        .map_err(|err| err.context("agent invocation failed"))?;
-        agent_invocation = Some(invocation.diagnostics);
-        let (agent_output, retained) =
-            response::prepare(invocation.output, run_profile, provenance).await?;
+        let output = match &allocation.deferred_output {
+            Some(input) => input.output()?,
+            None => {
+                anyhow::ensure!(
+                    run_profile.harness.is_inline(),
+                    "deferred submission requires a delivery adapter"
+                );
+                let invocation = agent_client::invoke(
+                    agent_client::Services {
+                        client: context.http().await?,
+                        limits: context.agent_http_limits(),
+                        credentials: context.agent_credentials(),
+                        resources: context.accepted_resources(),
+                    },
+                    run_id,
+                    execution_id,
+                    attempt_id,
+                    run_profile,
+                    &test_case,
+                )
+                .await
+                .map_err(|err| err.context("agent invocation failed"))?;
+                agent_invocation = Some(invocation.diagnostics);
+                invocation.output
+            }
+        };
+        let (agent_output, retained) = response::prepare(output, run_profile, provenance).await?;
         response_evidence = Some(retained);
 
         let aggregation_bindings = evaluator_bindings
@@ -1471,7 +1483,7 @@ pub(crate) async fn process_case_batch_execution(
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let database_router = context.dbr().await?;
-    let allocations = database_router
+    let mut allocations = database_router
         .run_database_operation(
             database_alias,
             "worker_attempt_allocation",
@@ -1535,93 +1547,121 @@ pub(crate) async fn process_case_batch_execution(
     );
 
     let parallelism = CASE_EXECUTION_PARALLELISM.min(cases.len().max(1));
-    let ordered_outcomes = drain_allocated_cases(cases.len(), parallelism, control, |index| {
-        let case = &cases[index];
-        let evaluation_plan = &evaluation_plans_by_case[index];
-        let allocation = &allocations[index];
-        let http_policies = &http_policies;
-        async move {
-            if allocation.case_id != case.case_id {
-                anyhow::bail!(
-                    "attempt allocation returned case '{}' while processing case '{}'",
-                    allocation.case_id,
-                    case.case_id
-                );
-            }
-
-            let mut outcome = if allocation.retry_not_due || allocation.already_terminal {
-                CaseExecutionOutcome {
-                    processed: None,
-                    persistence: None,
-                }
-            } else if allocation.max_attempts_exhausted {
-                let attempt_id = allocation.attempt_id.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "case '{}' exhausted attempts without a current attempt id",
-                        case.case_id
-                    )
-                })?;
-                CaseExecutionOutcome {
-                    processed: Some(processed_terminal_failure_without_worker_lease(
-                        allocation.execution_id,
-                        attempt_id,
-                        allocation.attempt_no,
-                        format!(
-                            "execution retry budget exhausted after {} attempts",
-                            allocation.attempt_no
-                        ),
-                    )),
-                    persistence: None,
-                }
-            } else if allocation.should_process {
-                evaluate_case_execution(
-                    context,
-                    http_policies,
-                    run_id,
-                    run_shard,
-                    run_profile,
-                    evaluator_catalog,
-                    response_identity,
-                    case,
-                    &evaluation_plan.evaluator_bindings,
-                    &evaluation_plan.aggregation,
-                    allocation,
-                )
-                .await
-            } else {
-                CaseExecutionOutcome {
-                    processed: None,
-                    persistence: None,
-                }
-            };
-
-            if allocation.should_process
-                && let Some(processed) = &mut outcome.processed
-            {
-                processed.terminal_transition.http_policy_revisions = evaluation_plan
-                    .evaluator_bindings
-                    .iter()
-                    .filter_map(|binding| evaluator_catalog.get(&binding.evaluator_ref))
-                    .filter_map(|entry| {
-                        http_policies
-                            .get(&entry.evaluator_id)
-                            .map(|p| (entry.evaluator_id, p.revision().to_owned()))
-                    })
-                    .collect();
-            }
-            Ok::<_, anyhow::Error>(outcome)
-        }
-    })
-    .await?;
-
     let mut processed = Vec::with_capacity(cases.len());
     let mut completed = Vec::new();
-    for (_, outcome) in ordered_outcomes {
-        if let Some(persistence) = outcome.persistence {
-            completed.push(persistence);
+    let window = if run_profile.harness.is_inline() {
+        cases.len()
+    } else {
+        parallelism
+    };
+    for offset in (0..cases.len()).step_by(window) {
+        let count = window.min(cases.len() - offset);
+        let range = offset..offset + count;
+        if !run_profile.harness.is_inline() {
+            database_router
+                .run_database_operation(
+                    database_alias,
+                    "worker_deferred_evidence_load",
+                    deferred::load_scoring_inputs(
+                        db,
+                        chunk,
+                        lease.worker_id,
+                        &mut allocations[range.clone()],
+                    ),
+                )
+                .await?;
         }
-        if let Some(outcome) = outcome.processed {
-            processed.push(outcome);
+        let ordered_outcomes = drain_allocated_cases(count, parallelism, control, |index| {
+            let index = offset + index;
+            let case = &cases[index];
+            let evaluation_plan = &evaluation_plans_by_case[index];
+            let allocation = &allocations[index];
+            let http_policies = &http_policies;
+            async move {
+                if allocation.case_id != case.case_id {
+                    anyhow::bail!(
+                        "attempt allocation returned case '{}' while processing case '{}'",
+                        allocation.case_id,
+                        case.case_id
+                    );
+                }
+
+                let mut outcome = if allocation.retry_not_due || allocation.already_terminal {
+                    CaseExecutionOutcome {
+                        processed: None,
+                        persistence: None,
+                    }
+                } else if allocation.max_attempts_exhausted {
+                    let attempt_id = allocation.attempt_id.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "case '{}' exhausted attempts without a current attempt id",
+                            case.case_id
+                        )
+                    })?;
+                    CaseExecutionOutcome {
+                        processed: Some(processed_terminal_failure_without_worker_lease(
+                            allocation.execution_id,
+                            attempt_id,
+                            allocation.attempt_no,
+                            format!(
+                                "execution retry budget exhausted after {} attempts",
+                                allocation.attempt_no
+                            ),
+                        )),
+                        persistence: None,
+                    }
+                } else if allocation.should_process {
+                    evaluate_case_execution(
+                        context,
+                        http_policies,
+                        run_id,
+                        run_shard,
+                        run_profile,
+                        evaluator_catalog,
+                        response_identity,
+                        case,
+                        &evaluation_plan.evaluator_bindings,
+                        &evaluation_plan.aggregation,
+                        allocation,
+                    )
+                    .await
+                } else {
+                    CaseExecutionOutcome {
+                        processed: None,
+                        persistence: None,
+                    }
+                };
+
+                if allocation.should_process
+                    && let Some(processed) = &mut outcome.processed
+                {
+                    processed.terminal_transition.http_policy_revisions = evaluation_plan
+                        .evaluator_bindings
+                        .iter()
+                        .filter_map(|binding| evaluator_catalog.get(&binding.evaluator_ref))
+                        .filter_map(|entry| {
+                            http_policies
+                                .get(&entry.evaluator_id)
+                                .map(|p| (entry.evaluator_id, p.revision().to_owned()))
+                        })
+                        .collect();
+                }
+                Ok::<_, anyhow::Error>(outcome)
+            }
+        })
+        .await?;
+
+        for (_, outcome) in ordered_outcomes {
+            if let Some(persistence) = outcome.persistence {
+                completed.push(persistence);
+            }
+            if let Some(outcome) = outcome.processed {
+                processed.push(outcome);
+            }
+        }
+
+        for allocation in &mut allocations[range] {
+            allocation.deferred_output = None;
         }
     }
 

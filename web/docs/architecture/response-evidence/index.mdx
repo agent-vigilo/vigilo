@@ -34,6 +34,11 @@ unsupported identities fail closed. Metadata and payload each carry a BLAKE3
 integrity checksum. Both columns are null when no packet exists. A summary packet has metadata and an empty
 byte payload, making deliberate omission distinguishable from absent evidence.
 
+The execution shard stores evidence used to resume deferred scoring separately
+from the retained response packet. A replacement worker loads it under a new
+claim on the original attempt. The terminal transition clears those scoring
+bytes as it applies the configured retention policy.
+
 The same batched statement that completes or fails attempts stores the packet.
 It verifies the owning run, execution and attempt, plus the case hash, profile hash,
 execution-plan hash, retention mode and mapping hash against frozen state.

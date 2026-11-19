@@ -15,6 +15,7 @@ CREATE TABLE run_chunks (
     leased_until TIMESTAMPTZ,
     recovery_count INTEGER NOT NULL DEFAULT 0 CHECK (recovery_count >= 0),
     last_recovered_at TIMESTAMPTZ,
+    deferred_wakeup_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 

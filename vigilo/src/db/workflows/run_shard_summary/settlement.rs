@@ -99,7 +99,12 @@ pub(crate) async fn settle_locked_chunk_with(
     sqlx::query(r#"
         WITH retired_attempts AS (
         UPDATE execution_attempts a
-        SET status = 'stale', leased_until = NULL, completed_at = COALESCE(a.completed_at, now()), error_message = COALESCE(a.error_message, 'chunk settled before attempt completion'), updated_at = now()
+        SET status = 'stale', leased_until = NULL, completed_at = COALESCE(a.completed_at, now()), error_message = COALESCE(a.error_message, 'chunk settled before attempt completion'), updated_at = now(),
+            invocation_status = CASE WHEN a.invocation_status IN ('submitting','submission_unknown','waiting')
+                THEN CASE WHEN $4 = 'cancelled' THEN 'cancelled'::invocation_status ELSE 'failed'::invocation_status END
+                ELSE a.invocation_status END,
+            invocation_request = NULL, invocation_claim = NULL, invocation_claim_until = NULL,
+            invocation_evidence = NULL, invocation_content_type = NULL
         FROM executions e
         WHERE e.run_id = $1
         AND e.run_shard = $2
@@ -107,14 +112,15 @@ pub(crate) async fn settle_locked_chunk_with(
         AND a.run_id = e.run_id
         AND a.run_shard = e.run_shard
         AND a.execution_id = e.id
-        AND a.status IN ('pending', 'running')
+        AND (a.status IN ('pending', 'running', 'awaiting_agent', 'ready_to_score')
+             OR a.invocation_evidence IS NOT NULL)
         )
         UPDATE executions
         SET status = CASE WHEN $4 = 'cancelled' THEN 'cancelled'::execution_status ELSE 'failed'::execution_status END, retry_after = NULL, completed_at = COALESCE(completed_at, now()), last_error_message = COALESCE(last_error_message, 'chunk settled with unresolved work'), updated_at = now()
         WHERE run_id = $1
         AND run_shard = $2
         AND chunk_id = $3
-        AND status IN ('pending', 'running', 'awaiting_evaluators', 'retry_scheduled')
+        AND status IN ('pending', 'running', 'awaiting_agent', 'awaiting_evaluators', 'retry_scheduled')
         "#)
         .bind(run_id).bind(shard).bind(chunk_id).bind(&disposition).execute(&mut **tx).await?;
 

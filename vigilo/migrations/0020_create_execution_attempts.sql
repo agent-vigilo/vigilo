@@ -17,6 +17,38 @@ CREATE TABLE execution_attempts (
     leased_until TIMESTAMPTZ,
     heartbeat_at TIMESTAMPTZ,
 
+    -- Inline attempts leave the deferred invocation fields null.
+    invocation_id UUID,
+    invocation_status invocation_status,
+    invocation_deadline TIMESTAMPTZ,
+    invocation_request BYTEA,
+    invocation_deduplicates BOOLEAN NOT NULL DEFAULT false,
+    invocation_requires_reference BOOLEAN NOT NULL DEFAULT false,
+    invocation_requires_agent BOOLEAN NOT NULL DEFAULT false,
+    invocation_evidence_limit INTEGER CHECK (invocation_evidence_limit BETWEEN 1 AND 4194304),
+    invocation_reference TEXT,
+    invocation_claim UUID,
+    invocation_claim_until TIMESTAMPTZ,
+    invocation_outcome_digest BYTEA,
+    invocation_evidence BYTEA,
+    invocation_content_type TEXT,
+    CONSTRAINT ck_attempt_invocation_identity CHECK (
+        (invocation_id IS NULL) = (invocation_status IS NULL)
+        AND (invocation_id IS NULL) = (invocation_deadline IS NULL)
+        AND (invocation_id IS NULL) = (invocation_evidence_limit IS NULL)
+    ),
+    CONSTRAINT ck_attempt_invocation_claim CHECK (
+        (invocation_claim IS NULL) = (invocation_claim_until IS NULL)
+        AND (invocation_claim_until IS NULL OR invocation_claim_until <= invocation_deadline)
+    ),
+    CONSTRAINT ck_attempt_invocation_payload CHECK (
+        (invocation_evidence IS NULL) = (invocation_content_type IS NULL)
+        AND octet_length(invocation_evidence) <= 4194304
+        AND octet_length(invocation_content_type) <= 1024
+        AND octet_length(invocation_reference) <= 256
+        AND octet_length(invocation_outcome_digest) = 32
+    ),
+
     -- raw artifacts should generally live outside the DB;
     -- keep references here
     request_artifact_uri TEXT,
@@ -79,6 +111,9 @@ CREATE INDEX idx_execution_attempts_run_lease ON execution_attempts(run_id, run_
     WHERE status = 'running';
 
 CREATE INDEX idx_execution_attempts_run_status ON execution_attempts(run_id, run_shard, status);
+
+CREATE UNIQUE INDEX idx_execution_attempts_invocation
+    ON execution_attempts(run_shard, invocation_id) WHERE invocation_id IS NOT NULL;
 
 COMMENT ON TABLE execution_attempts IS
     'Represents a single worker attempt to process an execution. Multiple attempts may exist due to retries, failures, or lease expiration. Only the most recent non-stale attempt is considered authoritative. Rows are list partitioned by run_shard.';

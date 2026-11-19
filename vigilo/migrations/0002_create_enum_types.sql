@@ -42,6 +42,7 @@ COMMENT ON TYPE gate_status IS
 CREATE TYPE execution_status AS ENUM (
   'pending', -- Execution has been created but not yet claimed or started by a worker.
   'running', -- Execution is actively being processed by a worker, including agent invocation and evaluator execution.
+  'awaiting_agent', -- A durable deferred invocation is open.
   'awaiting_evaluators', -- Agent output has been produced, but evaluator results are not yet complete or fully persisted.
   'retry_scheduled', -- Execution previously failed but is eligible for retry; a future attempt is expected.
   'completed', -- Execution finished successfully with all required evaluators completed and an aggregate result produced.
@@ -56,6 +57,8 @@ COMMENT ON TYPE execution_status IS
 CREATE TYPE attempt_status AS ENUM (
   'pending', -- Attempt has been created but not yet claimed by a worker. No work has started.
   'running', -- Attempt is actively being processed by a worker. The worker is expected to hold a valid lease and may be invoking the agent and running evaluators.
+  'awaiting_agent', -- The invocation owns its claim independently of worker leases.
+  'ready_to_score', -- Deferred evidence is durable and this attempt can be resumed.
   'completed', -- Attempt finished successfully with agent execution and evaluation complete. Results should be fully persisted.
   'failed_agent_call', -- Attempt failed during agent invocation (e.g., HTTP error, timeout, or upstream failure) before evaluation could complete.
   'failed_evaluation', -- Attempt produced agent output but failed during evaluator execution or result persistence.
@@ -66,6 +69,10 @@ CREATE TYPE attempt_status AS ENUM (
 
 COMMENT ON TYPE attempt_status IS
     'Lifecycle state of a single execution attempt. Represents one worker-owned attempt to process an execution, including leasing, execution, evaluation, and termination conditions.';
+
+CREATE TYPE invocation_status AS ENUM (
+    'submitting', 'submission_unknown', 'waiting', 'completed', 'failed', 'timed_out', 'cancelled'
+);
 
 CREATE TYPE evaluation_status AS ENUM (
   'passed', -- Evaluator determined the output meets the expected criteria or constraints for this check.

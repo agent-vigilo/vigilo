@@ -61,11 +61,18 @@ pub(super) async fn cancel_open_attempts(
             UPDATE execution_attempts
             SET status = 'cancelled'::attempt_status,
                 leased_until = NULL,
+                invocation_status = CASE WHEN invocation_status IN ('submitting','submission_unknown','waiting')
+                    THEN 'cancelled'::invocation_status ELSE invocation_status END,
+                invocation_request = NULL,
+                invocation_claim = NULL,
+                invocation_claim_until = NULL,
+                invocation_evidence = NULL,
+                invocation_content_type = NULL,
                 error_message = COALESCE(error_message, (SELECT control_reason FROM runs WHERE id=$1), $2),
                 completed_at = COALESCE(completed_at, now()),
                 updated_at = now()
             WHERE run_id = $1::uuid
-              AND status IN ('pending'::attempt_status, 'running'::attempt_status)
+              AND status IN ('pending', 'running', 'awaiting_agent', 'ready_to_score')
             RETURNING 1
         )
         SELECT COUNT(*)::bigint
@@ -99,6 +106,7 @@ pub(super) async fn cancel_open_executions(
               AND status IN (
                   'pending'::execution_status,
                   'running'::execution_status,
+                  'awaiting_agent'::execution_status,
                   'awaiting_evaluators'::execution_status,
                   'retry_scheduled'::execution_status
               )

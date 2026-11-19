@@ -1443,6 +1443,26 @@ async fn run_worker_message_admitted(
                     ),
                 )
                 .await?;
+            if chunk_state.open_execution_count > 0
+                && !run_context.profile.harness.is_inline()
+                && chunk_state.retry_scheduled_count == 0
+            {
+                let chunk = heartbeat.stop().await;
+                database_router
+                    .run_database_operation(
+                        &payload.database_alias,
+                        "worker_release_deferred_chunk",
+                        execution_processing::deferred::release(db, &chunk),
+                    )
+                    .await?;
+                mq.ack(&message.raw).await?;
+                debug!(
+                    chunk_id = %chunk.id,
+                    awaiting_agent_count = chunk_state.awaiting_agent_count,
+                    "released deferred chunk"
+                );
+                return Ok(WorkerCycleOutcome::Processed);
+            }
             if chunk_state.open_execution_count > 0 {
                 let chunk = heartbeat.stop().await;
                 let reason = format!(

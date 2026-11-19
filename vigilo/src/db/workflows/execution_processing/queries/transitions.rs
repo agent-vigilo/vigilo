@@ -355,6 +355,8 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 END,
                 response_evidence = COALESCE(terminal_input.response_evidence, execution_attempts.response_evidence),
                 response_evidence_bytes = COALESCE(terminal_input.response_bytes, execution_attempts.response_evidence_bytes),
+                invocation_evidence = NULL,
+                invocation_content_type = NULL,
                 outcome_summary = execution_attempts.outcome_summary
                     || jsonb_build_object('evaluator_http_policy_revisions', terminal_input.http_policy_revisions)
                     || CASE WHEN terminal_input.agent_failure IS NOT NULL
@@ -543,6 +545,7 @@ pub(crate) async fn summarize_chunk_execution_state(
     if case_ids.is_empty() {
         return Ok(ChunkExecutionState {
             open_execution_count: 0,
+            awaiting_agent_count: 0,
             retry_scheduled_count: 0,
             next_retry_after: None,
         });
@@ -557,10 +560,12 @@ pub(crate) async fn summarize_chunk_execution_state(
                 WHERE status IN (
                     'pending'::execution_status,
                     'running'::execution_status,
+                    'awaiting_agent'::execution_status,
                     'awaiting_evaluators'::execution_status,
                     'retry_scheduled'::execution_status
                 )
             )::bigint AS open_execution_count,
+            COUNT(*) FILTER (WHERE status = 'awaiting_agent')::bigint AS awaiting_agent_count,
             COUNT(*) FILTER (
                 WHERE status = 'retry_scheduled'::execution_status
             )::bigint AS retry_scheduled_count,
