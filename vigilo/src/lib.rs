@@ -33,6 +33,10 @@ mod runtime;
 
 pub mod operations;
 
+/// Configuration and native message contracts for harness integrations.
+#[path = "contracts/invocation.rs"]
+pub mod invocation;
+
 /// Versioned agent response configuration and evidence contracts.
 #[path = "contracts/response.rs"]
 pub mod response;
