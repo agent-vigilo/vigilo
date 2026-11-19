@@ -30,6 +30,7 @@ flowchart TD
 
     ExecutionProcessor["fa:fa-list-check <br/> <b>Execution Processing Workflow</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Allocates due attempts under a shared run-state guard, skips retry waits, and runs chunk cases with bounded parallelism.</small>"]:::component
     AgentClient["fa:fa-brain <br/> <b>Inline Harness Transport</b> <br/> <small>[Component: Rust / HTTP]</small> <br/> <small>Invokes Direct Probe or Delegated Trial, validates target identity and captures bounded evidence.</small>"]:::component
+    DeferredInvocation["<b>Deferred Invocation</b><br/><small>Commits submission intent and resumes the original attempt from a saved outcome.</small>"]:::component
     WasmSemaphore["fa:fa-gauge-high <br/> <b>Wasm Evaluation Semaphore</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Caps active evaluator invocations across the worker process.</small>"]:::component
     EvaluatorExecutor["fa:fa-microchip <br/> <b>Evaluator Runtime Executor</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Runs Code Scorers and Model-as-a-Judge implementations through the same ABI and fresh-store limits.</small>"]:::component
     CompletenessAggregator["fa:fa-list-check <br/> <b>Completeness & Aggregation</b> <br/> <small>[Component: Rust]</small> <br/> <small>Verifies required evaluator scores before calculating authoritative dimension and aggregate scores.</small>"]:::component
@@ -56,6 +57,7 @@ flowchart TD
         InputByteCache
         ExecutionProcessor
         AgentClient
+        DeferredInvocation
         Credentials
         WasmSemaphore
         EvaluatorExecutor
@@ -114,7 +116,12 @@ flowchart TD
     InputByteCache -->|"Bounded verified reads on miss"| Objects
     MessageHandler -->|"Processes claimed case batch with"| ExecutionProcessor
 
-    ExecutionProcessor -->|"Invokes the configured harness with bounded concurrency through"| AgentClient
+    ExecutionProcessor -->|"Invokes an inline harness through"| AgentClient
+    ExecutionProcessor -->|"Submits or resumes deferred work through"| DeferredInvocation
+    DeferredInvocation -->|"Stores intent and reads saved outcomes"| Database
+    DeferredInvocation -->|"Submits a Direct Probe"| TargetAgent
+    DeferredInvocation -->|"Submits a Delegated Trial"| Trial
+    DeferredInvocation -->|"Restores accepted evidence"| CapturedBody
     AgentClient -->|"Direct Probe <br> <small>[HTTP]</small>"| TargetAgent
     AgentClient -->|"Submits case input and receives the outcome <br> <small>[HTTP]</small>"| Trial
     Trial -->|Drives the session with| TargetAgent

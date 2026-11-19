@@ -27,8 +27,10 @@ flowchart TD
     RetryEligible{Failure retryable and attempt budget remains?}
     RetryScheduled[Persist retry_after using backoff and accepted server advice]
     RetryDue{Retry window due and attempts remain?}
-    TimedOut[Timed out]
+    TimedOut[Attempt and execution timed out]
     Awaiting[Awaiting evaluators]
+    Resume[Reclaim the original attempt]
+    DeferredOutcome{Saved result}
     Settle[Terminal chunk settlement under chunk lock]
     Unresolved[Close unresolved execution without inventing an aggregate]
     Stale[Attempt stale]
@@ -41,8 +43,10 @@ flowchart TD
     AwaitAgent -- Poll or authenticated callback --> Accept{Current invocation and eligible?}
     Accept -- Yes --> Awaiting
     Accept -- Stale or conflicting --> Reject
-    Awaiting --> ScoreSaved[Score saved evidence on the same attempt] --> TerminalGuard
-    AwaitAgent -- Deadline elapsed --> TimedOut
+    AwaitAgent -- Deadline elapsed --> Awaiting
+    Awaiting --> Resume --> DeferredOutcome
+    DeferredOutcome -- Evidence --> ScoreSaved[Score saved evidence] --> TerminalGuard
+    DeferredOutcome -- Failure or timeout --> TerminalGuard
     AwaitAgent --> Cancel
     RunGuard -- Not running --> Reject
     Supersede --> Stale
@@ -54,6 +58,7 @@ flowchart TD
     AggregateGuard -- Completed with aggregate --> AttemptCompleted --> ExecutionCompleted
     AggregateGuard -- Agent invocation failed --> AttemptAgentFail --> RetryEligible
     AggregateGuard -- Evaluation or persistence failed --> AttemptEvalFail --> RetryEligible
+    AggregateGuard -- Invocation timed out --> TimedOut
     AggregateGuard -- Missing required aggregate --> Reject
     RetryEligible -- Yes --> RetryScheduled
     RetryEligible -- No --> ExecutionFailed
@@ -74,7 +79,7 @@ flowchart TD
 
 
     class Worker,Cancel command
-    class RunGuard,Pending,Supersede,Running,AttemptRunning,AgentAndEvaluators,TerminalGuard,AggregateGuard,Awaiting,ScoreSaved,RetryEligible,RetryScheduled,RetryDue system
+    class RunGuard,Pending,Supersede,Running,AttemptRunning,AgentAndEvaluators,TerminalGuard,AggregateGuard,Awaiting,Resume,DeferredOutcome,ScoreSaved,RetryEligible,RetryScheduled,RetryDue system
     class AttemptCompleted,ExecutionCompleted success
     class AttemptAgentFail,AttemptEvalFail,ExecutionFailed,ExecutionCancelled,AttemptCancelled,TimedOut,Reject error
     class Stale component

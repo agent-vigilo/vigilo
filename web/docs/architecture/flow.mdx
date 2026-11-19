@@ -162,10 +162,11 @@ The worker invokes the configured agent target:
 - may run an internal multi-step workflow within the HTTP response deadline
 - is invoked directly or through a Delegated Trial service at `harness.http`
 
-The native request contains run, execution and attempt IDs, agent identity, case
-input, and non-oracle case metadata. Chat Completions requests use `model` and
-`messages`; both formats carry the attempt correlation header. The worker preserves
-the complete response body and applies the profile
+The native invocation envelope carries a schema version, invocation ID, deadline,
+requested agent and case input, with optional case context and callback details.
+An inline Direct Probe can also use the Vigilo case request with run, execution
+and attempt IDs, or Chat Completions with `model` and `messages`. Requests carry
+attempt correlation. The worker preserves the complete evidence body and applies the profile
 [response mapping](/docs/configuration/run-profile#explicit-response-contracts)
 once per attempt before evaluation. Evaluators consume `input.response-evidence`;
 Vigilo does not infer an answer from familiar response fields.
@@ -176,6 +177,19 @@ If the agent call fails:
 attempt.status = failed_agent_call
 execution.status = retry_scheduled (if retryable)
 ```
+
+For polling completion, the worker commits submission intent, stores the
+receipt, and releases the chunk when no cases are ready. The coordinator
+discovers due invocations on the execution placement. Poll claims, deadlines and
+outcomes stay on that placement. A committed outcome records scoring readiness.
+A worker resumes the original attempt from the saved result when the chunk can
+run. Remote cancellation follows local settlement.
+
+For callback completion, the application authenticates the delivery and supplies
+the verified invocation route. The library accepts eligible outcomes in the
+same execution-shard transaction and coalesces scoring wakeups by chunk.
+The application schedules invocation recovery and publishes ready work from the
+owning placement. See [callback completion](/docs/configuration/run-profile#callback-completion).
 
 ### 4. Evaluation Phase
 
@@ -271,19 +285,6 @@ Workers renew the chunk lease and the running attempt leases while processing. T
 Retries are bounded by `defaults.max_attempts`. When the current attempt number has reached that limit, the worker closes the execution as failed instead of scheduling another attempt. Planned retry waits do not consume the worker-message failure retry budget; actual worker processing failures still use bounded RabbitMQ retry buckets and are quarantined or fail the chunk after exhaustion.
 
 ### 7. Run Finalization
-
-For polling completion, the worker commits submission intent, stores the
-receipt, and releases the chunk when no cases are ready. The coordinator
-discovers due invocations with its execution-placement recovery read. Poll
-claims, deadlines, and outcomes remain on that placement. Accepted evidence
-creates one ready notification for the pending chunk, and another worker can
-score it on the original attempt. Remote cancellation follows local settlement.
-
-Callback delivery uses the same execution-shard outcome transaction. An embedding
-application authenticates the delivery and supplies the verified invocation route.
-The library accepts eligible outcomes and coalesces scoring wakeups by chunk.
-The application schedules invocation recovery and publishes ready work from the
-owning placement. See [callback completion](/docs/configuration/run-profile#callback-completion).
 
 Before finalization, the coordinator recovers expired chunk leases for running runs. Recoverable chunks are reset to `pending`, their current running attempts are marked `stale`, and they receive a recovery-scoped `run.chunk.ready` outbox event record. Chunks that exceed the recovery limit are marked `failed`.
 

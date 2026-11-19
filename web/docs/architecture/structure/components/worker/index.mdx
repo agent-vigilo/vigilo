@@ -56,6 +56,10 @@ HTTP permissions; they are separate from the harness call to the target.
   adapter is resolved once per cached artifact, not per case. Lifecycle changes
   affect new runs without changing an already-created run.
 - Workers use a shared HTTP client and run chunk cases with bounded chunk-local parallelism before persisting results in batch.
+- For deferred completion, the worker stores submission intent on the execution
+  shard before calling the harness. It can release the chunk while waiting and
+  reclaim the same attempt when a saved outcome is ready. See
+  [execution lifecycle](../../../state/execution-lifecycle) for the state transitions.
 - Evaluator execution is admitted through a process-wide Wasm semaphore and each invocation runs in a fresh Wasmtime store with memory, table, instance, fuel, timeout, and log-message limits.
 - The completeness and aggregation component verifies every required evaluator binding before publishing scores. Missing, errored, skipped, or unscored required output produces an errored aggregate with no score; optional diagnostic output cannot affect policy.
 - Execution writes use shared run-state guards so chunks for the same running run do not serialize on the run row.

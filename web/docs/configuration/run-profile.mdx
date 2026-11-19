@@ -218,6 +218,8 @@ A run binds one target agent to one evaluation harness. Case input varies by cas
 and case groups select evaluators and scoring. The harness specifies `kind`,
 `http` and an explicit completion kind. The CLI runtime supports `inline` and
 `polling`. An embedded runtime with a callback issuer supports `callback`.
+For both deferred kinds, set `capabilities.idempotent_submission` to `true`
+or `false` to match the harness's behavior. Inline completion omits `capabilities`.
 
 | Harness kind | HTTP endpoint and response |
 | --- | --- |
@@ -253,9 +255,10 @@ With a native outcome it is read from `executed_agent`. With a provider-specific
 response, use `executed_agent_pointer` to select the identity object. Vigilo checks
 any identity selected by that pointer, including when its presence is optional.
 
-The native envelope is capped at 8 MiB. Decoded evidence is capped at 4 MiB and
-honors the worker and profile response limits. Response mapping applies to the
-decoded evidence. The configured endpoint or harness owns any internal tools,
+Native submissions honor the worker and profile request limits. The outcome
+envelope is capped at 8 MiB. Decoded evidence is capped at 4 MiB and honors the
+worker and profile response limits. Response mapping applies to the decoded
+evidence. The configured endpoint or harness owns any internal tools,
 conversation or simulation. Inline invocations return the complete outcome in
 the original HTTP response.
 
@@ -293,7 +296,8 @@ harness:
   `status: pending` or a native final outcome with the original identity.
 - The worker releases its lease while the invocation waits. Accepted evidence
   is saved on the execution shard and resumes scoring on the same attempt.
-  `deadline_secs` bounds the entire remote invocation and defaults to 600.
+  `deadline_secs` bounds the entire remote invocation and accepts 1 through
+  86,400 seconds, with a default of 600.
   `http.timeout_secs` bounds the submission request.
 - The first status check is due after five seconds. Later checks use jittered
   backoff with a 60-second cap and honor accepted server retry advice. Each
@@ -309,8 +313,9 @@ harness:
 
 Both harness kinds can use `completion.kind: callback` with the native invocation
 contract in an embedded runtime. Configure `completion.deadline_secs` to bound the
-remote work. The default is 600 seconds. Declare `capabilities.idempotent_submission`
-when the harness deduplicates retry submissions by invocation ID.
+remote work. It accepts 1 through 86,400 seconds, with a default of 600.
+Set `capabilities.idempotent_submission: true` when the harness deduplicates
+retry submissions by invocation ID.
 
 The embedding application provides the HTTPS callback address and a separate,
 invocation-scoped bearer credential. The harness receives them in `callback.url`

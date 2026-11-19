@@ -78,7 +78,8 @@ The public `operations` module returns typed values for interface adapters:
 | Bounded ordinary and sensitive exports | `export::ExportClient` and `export::SensitiveExportClient` |
 | Dataset upload, resume and cleanup | `datasets::DatasetClient` |
 | Evaluator discovery, publication, state and tests | `evaluators::EvaluatorClient` |
-| Coordinator and worker execution | Handles from `HostedRuntime` |
+| Coordinator and worker execution | `Coordinator` and `Worker` handles from `HostedRuntime` |
+| Authenticated callback acceptance and due invocation work | `HostedRuntime::invocations` when a callback issuer is configured |
 
 Prepared runs, datasets and evaluator packages are sealed verification results;
 interfaces cannot deserialize them from a request body. Preparation validates the

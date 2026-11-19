@@ -28,10 +28,10 @@ How executions and attempts become authoritative work records while workers proc
 - A new worker attempt or recovered expired chunk lease marks a previous running
   attempt `stale`. A deferred invocation can wait without a worker lease.
   Submission and polling use separate, short invocation claims.
-- A deferred submission moves the execution to `awaiting_agent`. Accepted
-  evidence moves it to `awaiting_evaluators`. A worker claims the same attempt
-  to score the saved evidence. A deadline closes the invocation, and the
-  resumed attempt settles as `timed_out` without an evaluator score.
+- A deferred submission moves the execution to `awaiting_agent`. An accepted
+  outcome or an elapsed deadline moves it to `awaiting_evaluators` so a worker
+  can reclaim the same attempt. The worker scores saved evidence on success
+  and settles failures or timeouts without a score.
 - A verified callback can finish the invocation before its submission receipt.
   Vigilo checks the current attempt, placement epoch, and deadline on the
   execution shard. Acceptance commits evidence and scoring readiness together.

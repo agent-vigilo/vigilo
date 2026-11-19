@@ -30,8 +30,11 @@ It focuses on the parts of AI evaluation that become hard as systems grow: idemp
 ## Harnesses And Evaluators
 
 The **Direct Probe (Direct Execution of Target Agent)** harness invokes the target
-and captures evidence. **Deterministic (Code Scorer)** and **Model-as-a-Judge**
-evaluators measure evidence; host policy owns normalization and release gates.
+and captures evidence. A **Delegated Trial (Harness-Orchestrated Session)** gives
+the interaction to a separate harness and collects its evidence. Both support
+inline or polling completion through the CLI, and callback completion through the
+library. **Deterministic (Code Scorer)** and **Model-as-a-Judge** evaluators
+measure evidence. Host policy owns normalization and release gates.
 See the [canonical vocabulary](https://agentvigilo.com/docs/glossary#harnesses-and-evaluators)
 for session ownership, evaluator types and completion-delivery boundaries.
 
