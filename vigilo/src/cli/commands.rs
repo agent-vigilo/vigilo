@@ -112,6 +112,7 @@ impl Command {
         match self {
             Self::Coordinator(command) => {
                 messaging = Some(command.messaging.config()?);
+                agent_credentials = command.agent_credentials.clone();
                 circuit_breaker = command.circuit_breaker;
                 database_operation_timeout = Some(command.database_operation_timeout.config()?);
             }

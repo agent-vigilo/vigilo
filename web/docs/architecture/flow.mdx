@@ -272,6 +272,13 @@ Retries are bounded by `defaults.max_attempts`. When the current attempt number 
 
 ### 7. Run Finalization
 
+For polling completion, the worker commits submission intent, stores the
+receipt, and releases the chunk when no cases are ready. The coordinator
+discovers due invocations with its execution-placement recovery read. Poll
+claims, deadlines, and outcomes remain on that placement. Accepted evidence
+creates one ready notification for the pending chunk, and another worker can
+score it on the original attempt. Remote cancellation follows local settlement.
+
 Before finalization, the coordinator recovers expired chunk leases for running runs. Recoverable chunks are reset to `pending`, their current running attempts are marked `stale`, and they receive a recovery-scoped `run.chunk.ready` outbox event record. Chunks that exceed the recovery limit are marked `failed`.
 
 The coordinator checks a bounded number of candidates per cycle:

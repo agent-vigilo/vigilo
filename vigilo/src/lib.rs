@@ -19,6 +19,7 @@ mod contracts;
 mod core_evaluators;
 mod dataset_ingestion;
 mod db;
+mod deferred_runtime;
 mod evaluator_abi;
 mod evaluator_package;
 mod evaluator_requests;

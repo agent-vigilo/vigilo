@@ -22,6 +22,7 @@ pub(crate) mod storage;
 pub(crate) mod wasm;
 
 struct ContextInner {
+    deferred_health: crate::deferred_runtime::EndpointHealth,
     http_policies: vigilo::evaluator_http::cache::Cache,
     pub dbr: database::Context,
     pub http: http::Context,
@@ -50,6 +51,7 @@ impl Context {
     ) -> Self {
         Self(
             Arc::new(ContextInner {
+                deferred_health: Default::default(),
                 http_policies: Default::default(),
                 storage: storage::Context::default(),
                 dbr: database::Context {
@@ -181,6 +183,10 @@ impl Context {
     ) -> Self {
         self.2 = Arc::new(provider);
         self
+    }
+
+    pub(crate) fn deferred_health(&self) -> &crate::deferred_runtime::EndpointHealth {
+        &self.0.deferred_health
     }
 
     pub(crate) fn agent_credentials(&self) -> &crate::agent_client::credentials::Provider {

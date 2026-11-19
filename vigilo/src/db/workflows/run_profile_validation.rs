@@ -542,6 +542,9 @@ fn collect_static_profile_config_issues(profile: &RunProfile) -> Vec<String> {
     if let Err(err) = agent_client::validate_request_format(profile) {
         issues.push(err.to_string());
     }
+    if let Err(err) = agent_client::deferred::Route::from_profile(profile) {
+        issues.push(err.to_string());
+    }
 
     for group in &profile.case_groups {
         let mut binding_ids = HashSet::new();
@@ -709,7 +712,7 @@ mod tests {
     };
 
     #[test]
-    fn deferred_completion_is_rejected_before_run_admission() {
+    fn callback_completion_is_rejected_without_host_ingress() {
         let mut profile = profile();
         let vigilo::invocation::profile::Harness::DirectProbe { completion, .. } =
             &mut profile.harness
@@ -720,7 +723,7 @@ mod tests {
         assert!(
             super::collect_static_profile_config_issues(&profile)
                 .iter()
-                .any(|issue| issue.contains("only inline harness completion is available"))
+                .any(|issue| issue.contains("callback ingress is unavailable"))
         );
     }
 

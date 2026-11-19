@@ -266,3 +266,27 @@ fn provider_reported_identity_is_only_read_from_the_explicit_pointer() {
     stale.version = "2.0.0".into();
     assert!(check(&json!({"reported":stale}), false).is_err());
 }
+
+#[test]
+fn provider_references_are_encoded_as_data_in_the_admitted_slot() {
+    use super::profile::poll_url;
+    let path = poll_url(
+        "https://provider.example/status/{provider_reference}",
+        "a/b?c=1#fragment",
+    )
+    .unwrap();
+    assert_eq!(
+        path.as_str(),
+        "https://provider.example/status/a%2Fb%3Fc%3D1%23fragment"
+    );
+    let query = poll_url(
+        "https://provider.example/status?ref={provider_reference}",
+        "a&next=evil",
+    )
+    .unwrap();
+    assert_eq!(
+        query.query_pairs().collect::<Vec<_>>(),
+        [("ref".into(), "a&next=evil".into())]
+    );
+    assert!(poll_url("https://provider.example/status/{provider_reference}", "..").is_err());
+}

@@ -63,6 +63,20 @@ pub(super) async fn cancel_open_attempts(
                 leased_until = NULL,
                 invocation_status = CASE WHEN invocation_status IN ('submitting','submission_unknown','waiting')
                     THEN 'cancelled'::invocation_status ELSE invocation_status END,
+                invocation_cancel_at = CASE WHEN invocation_status IN ('submitting','submission_unknown','waiting')
+                    AND EXISTS (SELECT 1 FROM run_snapshots s WHERE s.run_id=execution_attempts.run_id
+                        AND s.run_shard=execution_attempts.run_shard
+                        AND s.config_snapshot#>'{invocation_transport,cancellation}' <> 'null'::jsonb)
+                    AND (invocation_status<>'submitting' OR invocation_claim IS NOT NULL)
+                THEN statement_timestamp() ELSE invocation_cancel_at END,
+                invocation_cancel_until = CASE WHEN invocation_status IN ('submitting','submission_unknown','waiting')
+                    AND EXISTS (SELECT 1 FROM run_snapshots s WHERE s.run_id=execution_attempts.run_id
+                        AND s.run_shard=execution_attempts.run_shard
+                        AND s.config_snapshot#>'{invocation_transport,cancellation}' <> 'null'::jsonb)
+                    THEN statement_timestamp()+interval '1 minute' ELSE invocation_cancel_until END,
+                invocation_cancel_uncertain = CASE WHEN invocation_status IN ('submitting','submission_unknown','waiting')
+                    THEN invocation_status<>'waiting' ELSE invocation_cancel_uncertain END,
+                invocation_next_at = NULL,
                 invocation_request = NULL,
                 invocation_claim = NULL,
                 invocation_claim_until = NULL,

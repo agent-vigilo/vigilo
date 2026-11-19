@@ -211,6 +211,10 @@ pub(crate) struct Command {
     #[command(flatten)]
     pub(crate) run_creation: RunCreationOptions,
 
+    /// Trusted JSON credential provider configuration for deferred harness requests
+    #[arg(long, env = "VIGILO_AGENT_CREDENTIALS")]
+    pub(crate) agent_credentials: Option<std::path::PathBuf>,
+
     /// Seconds between coordinator cycles in start mode
     #[arg(long, env = "VIGILO_COORDINATOR_TICK_SECONDS", default_value_t = COORDINATOR_TICK_SECONDS, value_parser = clap::value_parser!(u64).range(1..=3600))]
     pub tick_seconds: u64,
@@ -367,7 +371,8 @@ async fn run_coordinator_cycle(
     // Recovery runs before new dispatch so dead workers do not block
     // finalization or leave ready work stranded.
     let recovery_started = Instant::now();
-    let recovery = recover_expired_chunk_leases(database_router, coordinator_id, config).await?;
+    let (recovery, cancellations) =
+        recover_expired_chunk_leases(&context, database_router, coordinator_id, config).await?;
     let recovery_ms = recovery_started.elapsed().as_millis() as u64;
 
     // --- Dispatch runnable chunk windows ---
@@ -401,6 +406,7 @@ async fn run_coordinator_cycle(
     let publication =
         publish_outbox_events(database_router, &publisher, &outbox_config, coordinator_id).await?;
     let outbox_publish_ms = outbox_started.elapsed().as_millis() as u64;
+    crate::deferred_runtime::deliver_cancellations(&context, cancellations).await;
 
     let mut placement_failures = PlacementFailureStats::default();
     placement_failures.merge(recovery.failures);
@@ -481,10 +487,14 @@ fn log_database_operation_error(
 }
 
 async fn recover_expired_chunk_leases(
+    context: &Context,
     database_router: &database::DatabaseRouter,
     coordinator_id: Uuid,
     config: &CoordinatorRuntimeConfig,
-) -> anyhow::Result<PlacementPassResult<run_dispatch::ChunkLeaseRecoveryStats>> {
+) -> anyhow::Result<(
+    PlacementPassResult<run_dispatch::ChunkLeaseRecoveryStats>,
+    crate::deferred_runtime::Work,
+)> {
     // --- Expired lease recovery pass ---
     // The workflow returns both recovered chunks and chunks failed after
     // exhausting recovery attempts.
@@ -508,13 +518,19 @@ async fn recover_expired_chunk_leases(
         |alias| async move {
             let db = database_router.execution_database(&alias).await?;
             let recovery_started = Instant::now();
-            let stats = run_dispatch::recover_expired_chunk_leases(
+            let (stats, jobs) = run_dispatch::recover_expired_work(
                 &db,
                 config.chunk_lease_max_recoveries,
                 config.chunk_lease_recovery_batch_size,
+                database_router.supports_standalone_polling(),
             )
             .await?;
-            Ok((stats, recovery_started.elapsed().as_millis() as u64))
+            Ok((
+                stats,
+                recovery_started.elapsed().as_millis() as u64,
+                db,
+                jobs,
+            ))
         },
     )
     .await;
@@ -524,7 +540,9 @@ async fn recover_expired_chunk_leases(
     for skip in batch.skipped {
         record_placement_skip(&mut failures, coordinator_id, "chunk_lease_recovery", skip);
     }
-    for (alias, (alias_stats, recovery_ms)) in batch.successes {
+    let mut deferred = Vec::new();
+    for (alias, (alias_stats, recovery_ms, db, jobs)) in batch.successes {
+        deferred.extend(jobs.into_iter().map(|job| (db.clone(), job)));
         stats.recovered_chunks += alias_stats.recovered_chunks;
         stats.failed_chunks += alias_stats.failed_chunks;
 
@@ -570,10 +588,14 @@ async fn recover_expired_chunk_leases(
         );
     }
 
-    Ok(PlacementPassResult {
-        output: stats,
-        failures,
-    })
+    let cancellations = crate::deferred_runtime::run(context, deferred).await;
+    Ok((
+        PlacementPassResult {
+            output: stats,
+            failures,
+        },
+        cancellations,
+    ))
 }
 
 /// Drains placement-local summaries within independent aggregation budgets.

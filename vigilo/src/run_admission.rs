@@ -200,6 +200,9 @@ async fn admit(
     let profile = serde_json::from_value(reader.configuration.snapshot["profile"].clone())?;
     snapshot_template["response_policy"] =
         crate::contracts::response_retention::policy_identity(&profile)?;
+    if let Some(route) = crate::agent_client::deferred::Route::from_profile(&profile)? {
+        snapshot_template["invocation_transport"] = serde_json::to_value(route)?;
+    }
     let mut gate_counts = BTreeMap::new();
     let mut expected = BTreeMap::new();
     let mut clock = lease::Clock::new();

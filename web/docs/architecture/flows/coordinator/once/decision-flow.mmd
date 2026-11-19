@@ -19,7 +19,7 @@ flowchart TD
     CreationDeferred[Release ownership and continue bounded candidates]
     RecoveryCatalog{Restricted execution-alias discovery succeeds?}
     RecoveryPlacement{Execution placements remain?}
-    Recover[Restricted expired-lease discovery and movement locks; scope exact batch and recover atomically]
+    Recover[Discover expired leases and due standalone invocations under placement authority]
     RecoveryIsolated[Classify failure, count it, and skip alias]
     DispatchClaim{Restricted cursor claim returned a route?}
     DispatchRun[Read scoped snapshot and route; select pool, fence admission and retain cursor lock]
@@ -71,7 +71,7 @@ flowchart TD
     RecoveryCatalog -- No --> RecoveryFail
     RecoveryCatalog -- Yes --> RecoveryPlacement
     RecoveryPlacement -- Yes --> Recover
-    RecoveryPlacement -- No --> DispatchClaim
+    RecoveryPlacement -- No --> DeferredWork[Expire and claim bounded deferred work on execution placements] --> DispatchClaim
     Recover --> RecoveryPlacement
     Recover -. Placement operation fails .-> RecoveryIsolated
     RecoveryIsolated --> RecoveryPlacement
@@ -105,7 +105,7 @@ flowchart TD
     OutboxCatalog -- No --> OutboxFail
     OutboxCatalog -- Yes --> OutboxPlacement
     OutboxPlacement -- Yes --> ClaimOutbox
-    OutboxPlacement -- No --> Stats
+    OutboxPlacement -- No --> StopRequests[Deliver bounded remote cancellations] --> Stats
 
     ClaimOutbox --> Events
     ClaimOutbox -. Placement operation fails .-> OutboxIsolated
@@ -132,6 +132,7 @@ flowchart TD
 
     class Start command
     class Success success
+    class DeferredWork system
     class CoordinatorId,Database,Controls,SettleControls,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryCatalog,RecoveryPlacement,Recover,RecoveryIsolated,DispatchClaim,DispatchRun,DispatchIsolated,FinalizeCandidate,ReadSummaries,FinalizeClaim,FinalizeRun,FinalizeIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationRotate,AggregationNext,AggregationDrain,Messaging,OutboxCatalog,OutboxPlacement,ClaimOutbox,Events,BrokerCircuit,PublishResult,MarkPublished,Reschedule,OutboxIsolated,Stats system
     class Publish component
     class ContextFail,RecoveryFail,DispatchFail,FinalizeFail,OutboxFail error

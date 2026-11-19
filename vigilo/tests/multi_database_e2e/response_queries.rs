@@ -47,7 +47,7 @@ fn invoke(
     }
 }
 
-async fn counters(pool: &PgPool) -> anyhow::Result<BTreeMap<String, i64>> {
+pub(super) async fn counters(pool: &PgPool) -> anyhow::Result<BTreeMap<String, i64>> {
     Ok(sqlx::query_as::<_, (String, i64)>(
         r#"
         /* response-query-observer */
@@ -67,7 +67,10 @@ async fn counters(pool: &PgPool) -> anyhow::Result<BTreeMap<String, i64>> {
     .into_iter()
     .collect())
 }
-fn delta(before: &BTreeMap<String, i64>, after: &BTreeMap<String, i64>) -> BTreeMap<String, i64> {
+pub(super) fn delta(
+    before: &BTreeMap<String, i64>,
+    after: &BTreeMap<String, i64>,
+) -> BTreeMap<String, i64> {
     after
         .iter()
         .map(|(key, value)| {

@@ -47,6 +47,7 @@ fn intent(deduplicates: bool) -> Intent {
         evidence_limit: 1024,
         deduplicates,
         requires_reference: true,
+        delay_before_send_secs: None,
     }
 }
 
@@ -83,7 +84,7 @@ async fn start(pool: &PgPool, seed: &SeededAttempt, deduplicates: bool) -> Claim
 }
 
 async fn expire_claim(pool: &PgPool, attempt: Uuid) {
-    sqlx::query("UPDATE execution_attempts SET invocation_claim_until=now()-interval '1 second' WHERE id=$1")
+    sqlx::query("UPDATE execution_attempts SET invocation_claim_until=now()-interval '1 second',invocation_next_at=now()-interval '1 second' WHERE id=$1")
         .bind(attempt).execute(pool).await.unwrap();
 }
 
@@ -216,6 +217,7 @@ async fn completion_and_release_are_durable_and_scoring_reuses_the_attempt(pool:
         };
         *completion = Completion::Polling {
             status_url: "https://harness.example/status/{provider_reference}".into(),
+            deadline_secs: 600,
         };
         *capabilities = Some(Capabilities {
             idempotent_submission: false,
@@ -495,4 +497,65 @@ async fn two_invocations_share_one_ready_chunk_event(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(ready, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn cooldown_delays_an_unsent_nonidempotent_invocation_without_losing_it(pool: PgPool) {
+    let seed = seed_running_attempt(&pool, 60, 120).await;
+    let key = deferred::Attempt::from_chunk(&seed.chunk, seed.attempt_id);
+    assert!(
+        deferred::start(&pool, key, Uuid::nil(), intent(false), 60)
+            .await
+            .is_err()
+    );
+    let mut parked = intent(false);
+    parked.delay_before_send_secs = Some(10.0);
+    assert!(
+        deferred::start(&pool, key, seed.chunk.lease_token.unwrap(), parked, 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(deferred::release(&pool, &seed.chunk).await.unwrap());
+    let id: Uuid = sqlx::query_scalar(
+        "SELECT invocation_id FROM execution_attempts WHERE id=$1 AND invocation_claim IS NULL",
+    )
+    .bind(key.attempt_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE execution_attempts SET invocation_next_at=now()-interval '1 second' WHERE id=$1",
+    )
+    .bind(key.attempt_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let first = deferred::reclaim_submission(&pool, key, 60)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.invocation_id, id);
+    expire_claim(&pool, key.attempt_id).await;
+    sqlx::query(
+        "UPDATE execution_attempts SET invocation_next_at=now()-interval '1 second' WHERE id=$1",
+    )
+    .bind(key.attempt_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        deferred::reclaim_submission(&pool, key, 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let state: String =
+        sqlx::query_scalar("SELECT invocation_status::text FROM execution_attempts WHERE id=$1")
+            .bind(key.attempt_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "submission_unknown");
 }

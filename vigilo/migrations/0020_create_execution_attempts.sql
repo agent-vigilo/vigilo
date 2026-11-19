@@ -29,6 +29,13 @@ CREATE TABLE execution_attempts (
     invocation_reference TEXT,
     invocation_claim UUID,
     invocation_claim_until TIMESTAMPTZ,
+    invocation_next_at TIMESTAMPTZ,
+    invocation_poll_count INTEGER NOT NULL DEFAULT 0 CHECK (invocation_poll_count >= 0),
+    invocation_cancel_at TIMESTAMPTZ,
+    invocation_cancel_until TIMESTAMPTZ,
+    invocation_cancel_attempts INTEGER NOT NULL DEFAULT 0 CHECK (invocation_cancel_attempts BETWEEN 0 AND 3),
+    invocation_cancel_uncertain BOOLEAN NOT NULL DEFAULT false,
+    invocation_cancel_result TEXT CHECK (invocation_cancel_result IN ('accepted','unknown','failed','unconfirmed')),
     invocation_outcome_digest BYTEA,
     invocation_evidence BYTEA,
     invocation_content_type TEXT,
@@ -39,7 +46,8 @@ CREATE TABLE execution_attempts (
     ),
     CONSTRAINT ck_attempt_invocation_claim CHECK (
         (invocation_claim IS NULL) = (invocation_claim_until IS NULL)
-        AND (invocation_claim_until IS NULL OR invocation_claim_until <= invocation_deadline)
+        AND (invocation_claim_until IS NULL OR invocation_claim_until <=
+            CASE WHEN invocation_cancel_at IS NOT NULL THEN invocation_cancel_until ELSE invocation_deadline END)
     ),
     CONSTRAINT ck_attempt_invocation_payload CHECK (
         (invocation_evidence IS NULL) = (invocation_content_type IS NULL)
@@ -114,6 +122,16 @@ CREATE INDEX idx_execution_attempts_run_status ON execution_attempts(run_id, run
 
 CREATE UNIQUE INDEX idx_execution_attempts_invocation
     ON execution_attempts(run_shard, invocation_id) WHERE invocation_id IS NOT NULL;
+
+CREATE INDEX idx_execution_attempts_invocation_due
+    ON execution_attempts(invocation_next_at, run_id, id) WHERE invocation_next_at IS NOT NULL;
+
+CREATE INDEX idx_execution_attempts_invocation_deadline
+    ON execution_attempts(invocation_deadline, run_id, id)
+    WHERE invocation_status IN ('submitting', 'waiting', 'submission_unknown');
+
+CREATE INDEX idx_execution_attempts_invocation_cancel
+    ON execution_attempts(invocation_cancel_at, run_id, id) WHERE invocation_cancel_at IS NOT NULL;
 
 COMMENT ON TABLE execution_attempts IS
     'Represents a single worker attempt to process an execution. Multiple attempts may exist due to retries, failures, or lease expiration. Only the most recent non-stale attempt is considered authoritative. Rows are list partitioned by run_shard.';

@@ -216,12 +216,12 @@ defaults, and failure behavior.
 
 A run binds one target agent to one evaluation harness. Case input varies by case,
 and case groups select evaluators and scoring. The harness specifies `kind`,
-`http` and an explicit `completion.kind: inline`.
+`http` and an explicit completion kind. Both harnesses support `inline` and `polling` in standalone.
 
 | Harness kind | HTTP endpoint and response |
 | --- | --- |
 | `direct_probe` | Invokes the target directly. Select the Vigilo case or Chat Completions request format, or set `agent.config.request_format: native` for the native invocation envelope. |
-| `delegated_trial` | Invokes a separate harness that drives a session with the requested agent and returns the final outcome in the initial HTTP response. Uses the native invocation envelope. |
+| `delegated_trial` | Invokes a separate harness that drives a session with the requested agent. It uses the native invocation envelope. |
 
 ```yaml
 agent:
@@ -255,8 +255,54 @@ any identity selected by that pointer, including when its presence is optional.
 The native envelope is capped at 8 MiB. Decoded evidence is capped at 4 MiB and
 honors the worker and profile response limits. Response mapping applies to the
 decoded evidence. The configured endpoint or harness owns any internal tools,
-conversation or simulation. Each invocation returns its complete outcome within
-the HTTP deadline.
+conversation or simulation. Inline invocations return the complete outcome in
+the original HTTP response.
+
+### Polling completion
+
+Use polling for work that continues after the submission request returns. Polling
+uses the native contract for Direct Probe and Delegated Trial.
+
+```yaml
+harness:
+  kind: delegated_trial
+  http:
+    url: https://trials.example.com/execute
+    timeout_secs: 15
+    credential: trial-api
+  completion:
+    kind: polling
+    deadline_secs: 600
+    status_url: https://trials.example.com/status/{provider_reference}
+  capabilities:
+    idempotent_submission: true
+    cancellation:
+      url: https://trials.example.com/cancel
+      credential: trial-api
+```
+
+- The submission endpoint returns HTTP 202 with `status: accepted`, the original
+  `schema_version` and `invocation_id`, and an opaque `provider_reference` of up
+  to 256 UTF-8 bytes. If the receipt is lost, Vigilo retries with the same ID and
+  request body only when the profile declares idempotent submission. Otherwise
+  the invocation waits for its deadline.
+- The coordinator sends a GET to the status URL, with the provider reference
+  encoded as a full path segment or query value. Use a query value for dot-segment
+  references such as `.` or `..`. HTTP 200 carries
+  `status: pending` or a native final outcome with the original identity.
+- The worker releases its lease while the invocation waits. Accepted evidence
+  is saved on the execution shard and resumes scoring on the same attempt.
+  `deadline_secs` bounds the entire remote invocation and defaults to 600.
+  `http.timeout_secs` bounds the submission request.
+- The first status check is due after five seconds. Later checks use jittered
+  backoff with a 60-second cap and honor accepted server retry advice. Each
+  status request has a five-second ceiling and respects the invocation deadline.
+  The coordinator admits at most 32 due requests with eight concurrent slots
+  per cycle. Deadline processing has its own budget.
+- Optional cancellation sends a separate POST with `schema_version`,
+  `invocation_id` and `provider_reference` when available. An empty HTTP 202
+  acknowledges the stop request. Remote delivery has up to three attempts
+  within one minute. Local settlement proceeds independently.
 
 ### Agent invocation diagnostics
 
@@ -345,16 +391,17 @@ These policies do not change the supported response mapping.
 
 ### Remote execution and duplicate requests
 
-A timeout means Vigilo did not receive a complete response within its deadline.
+For inline completion, a timeout means Vigilo did not receive a complete response within its deadline.
 The endpoint may already have accepted the request, performed side effects, or
 completed the work. A worker crash or lost lease can create the same uncertainty.
 A retry can therefore repeat remote work; Vigilo does not guarantee exactly-once
-agent execution or remotely cancel work when an attempt expires.
+inline agent execution. Polling profiles can configure remote cancellation.
 
 | Identity | Across retries of one execution | Visible to endpoint |
 | --- | --- | --- |
 | `run_id`, `execution_id` | Remain stable | `vigilo_case` body |
-| `attempt_id` | Changes for each allocated attempt | `vigilo_case` body, native `invocation_id`, and `X-Vigilo-Attempt-Id` header |
+| `attempt_id` | Changes for each allocated attempt | `vigilo_case` body, inline native `invocation_id`, and `X-Vigilo-Attempt-Id` header |
+| Deferred `invocation_id` | Stable across safe resubmission of the same invocation | Native submission, receipt, outcome, and cancellation |
 
 Chat Completions requests omit Vigilo execution identifiers from the body. Their
 attempt header identifies one invocation, not the logical execution. All three

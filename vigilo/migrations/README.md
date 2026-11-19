@@ -36,6 +36,8 @@ Deferred invocation state lives on the current execution attempt on the owning
 shard. Attempt evidence used for scoring is bounded and held separately from
 the final retained response packet. The shard outbox coalesces completion
 wakeups by chunk and publishes them through the existing placement dispatcher.
+Partial indexes cover due status checks, invocation deadlines, and pending
+remote cancellation on the execution placement.
 
 Runtime ownership and routing are documented in
 [Scale-out and shard migration](https://agentvigilo.com/docs/architecture/scaling).

@@ -10,6 +10,7 @@
 //! concurrent workers do not repeatedly compile the same evaluator artifact.
 
 pub(crate) mod deferred;
+pub(crate) mod deferred_jobs;
 pub(crate) mod response;
 
 use std::{
@@ -1501,7 +1502,10 @@ pub(crate) async fn process_case_batch_execution(
     let ids = evaluation_plans_by_case
         .iter()
         .zip(&allocations)
-        .filter(|(_, allocation)| allocation.should_process)
+        .filter(|(_, allocation)| {
+            allocation.should_process
+                && (run_profile.harness.is_inline() || allocation.deferred_output.is_some())
+        })
         .flat_map(|(plan, _)| plan.evaluator_bindings.iter())
         .map(|binding| {
             evaluator_catalog
@@ -1608,6 +1612,44 @@ pub(crate) async fn process_case_batch_execution(
                                 allocation.attempt_no
                             ),
                         )),
+                        persistence: None,
+                    }
+                } else if allocation.should_process
+                    && !run_profile.harness.is_inline()
+                    && allocation.deferred_output.is_none()
+                {
+                    let attempt_id = allocation
+                        .attempt_id
+                        .ok_or_else(|| anyhow::anyhow!("missing deferred attempt id"))?;
+                    let result = crate::deferred_runtime::start_case(
+                        context,
+                        db,
+                        chunk,
+                        run_profile,
+                        attempt_id,
+                        make_test_case(case)?,
+                    )
+                    .await;
+                    let processed = match result {
+                        Ok(()) => None,
+                        Err(error) => {
+                            match error.downcast::<crate::agent_client::failure::Failure>() {
+                                Ok(failure) => {
+                                    let mut processed = processed_terminal_failure(
+                                        allocation.execution_id,
+                                        attempt_id,
+                                        allocation.attempt_no,
+                                        failure.to_string(),
+                                    );
+                                    processed.terminal_transition.agent_failure = Some(failure);
+                                    Some(processed)
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    };
+                    CaseExecutionOutcome {
+                        processed,
                         persistence: None,
                     }
                 } else if allocation.should_process {

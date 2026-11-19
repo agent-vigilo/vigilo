@@ -134,6 +134,10 @@ pub(crate) async fn prepare(
     let upload_id = upload.id;
     let profile: RunProfile = serde_json::from_value(payload.clone())?;
     let router = context.dbr().await?;
+    ensure!(
+        profile.harness.is_inline() || router.supports_standalone_polling(),
+        "this runtime does not provide deferred invocation delivery"
+    );
     let db = router.control().await?;
     let access = run_plan::preparation::Access::new(db, caller);
     ensure!(

@@ -50,6 +50,9 @@ pub(crate) struct Services<'a> {
     pub(crate) resources: Option<std::sync::Arc<vigilo::operations::resources::Request>>,
 }
 
+#[path = "agent_client/deferred.rs"]
+pub(crate) mod deferred;
+
 #[path = "agent_client/capture.rs"]
 pub(crate) mod capture;
 
@@ -106,6 +109,17 @@ enum AgentRequestFormat {
 
 impl AgentRequestFormat {
     fn from_profile(run_profile: &RunProfile) -> anyhow::Result<Self> {
+        if !run_profile.harness.is_inline() {
+            anyhow::ensure!(
+                run_profile
+                    .agent
+                    .config
+                    .get("request_format")
+                    .is_none_or(|format| format.as_str() == Some("native")),
+                "deferred invocation uses the native request format"
+            );
+            return Ok(Self::Native);
+        }
         if matches!(run_profile.harness, Harness::DelegatedTrial { .. }) {
             anyhow::ensure!(
                 run_profile.agent.config.get("request_format").is_none(),
@@ -138,10 +152,6 @@ impl AgentRequestFormat {
 
 pub(crate) fn validate_request_format(run_profile: &RunProfile) -> anyhow::Result<()> {
     requested_agent(run_profile)?;
-    anyhow::ensure!(
-        run_profile.harness.is_inline(),
-        "only inline harness completion is available"
-    );
     run_profile.harness.validate(false)?;
     if let Some(response) = &run_profile.agent.response
         && let vigilo::response::Interpretation::Json { mapping } = &response.interpretation
@@ -170,7 +180,7 @@ pub(crate) fn validate_request_format(run_profile: &RunProfile) -> anyhow::Resul
     Ok(())
 }
 
-fn requested_agent(profile: &RunProfile) -> anyhow::Result<AgentIdentity> {
+pub(crate) fn requested_agent(profile: &RunProfile) -> anyhow::Result<AgentIdentity> {
     let agent = &profile.agent;
     let identity = AgentIdentity {
         provider: agent.provider.clone(),
@@ -433,6 +443,10 @@ async fn invoke_inner(
     test_case: &TestCase,
     observation: &mut diagnostics::Observation,
 ) -> anyhow::Result<AgentOutput> {
+    anyhow::ensure!(
+        run_profile.harness.is_inline(),
+        "inline invocation requires inline completion"
+    );
     validate_request_format(run_profile)
         .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
     let http = run_profile.harness.http();

@@ -103,6 +103,20 @@ pub(crate) async fn settle_locked_chunk_with(
             invocation_status = CASE WHEN a.invocation_status IN ('submitting','submission_unknown','waiting')
                 THEN CASE WHEN $4 = 'cancelled' THEN 'cancelled'::invocation_status ELSE 'failed'::invocation_status END
                 ELSE a.invocation_status END,
+            invocation_cancel_at = CASE WHEN $4='cancelled'
+                AND a.invocation_status IN ('submitting','submission_unknown','waiting')
+                AND EXISTS (SELECT 1 FROM run_snapshots s WHERE s.run_id=a.run_id AND s.run_shard=a.run_shard
+                    AND s.config_snapshot#>'{invocation_transport,cancellation}' <> 'null'::jsonb)
+                AND (a.invocation_status<>'submitting' OR a.invocation_claim IS NOT NULL)
+                THEN statement_timestamp() ELSE a.invocation_cancel_at END,
+            invocation_cancel_until = CASE WHEN $4='cancelled'
+                AND a.invocation_status IN ('submitting','submission_unknown','waiting')
+                AND EXISTS (SELECT 1 FROM run_snapshots s WHERE s.run_id=a.run_id AND s.run_shard=a.run_shard
+                    AND s.config_snapshot#>'{invocation_transport,cancellation}' <> 'null'::jsonb)
+                THEN statement_timestamp()+interval '1 minute' ELSE a.invocation_cancel_until END,
+            invocation_cancel_uncertain = CASE WHEN a.invocation_status IN ('submitting','submission_unknown','waiting')
+                THEN a.invocation_status<>'waiting' ELSE a.invocation_cancel_uncertain END,
+            invocation_next_at = NULL,
             invocation_request = NULL, invocation_claim = NULL, invocation_claim_until = NULL,
             invocation_evidence = NULL, invocation_content_type = NULL
         FROM executions e

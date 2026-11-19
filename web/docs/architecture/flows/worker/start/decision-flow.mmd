@@ -79,7 +79,12 @@ flowchart TD
     Warm --> Cases
     Warm -. Warmup fails .-> Release
 
-    Cases --> Limits
+    Cases --> CompletionKind{Completion kind}
+    CompletionKind -- Inline --> Limits
+    CompletionKind -- Polling --> ReadyEvidence{Accepted evidence ready?}
+    ReadyEvidence -- Yes --> Permit
+    ReadyEvidence -- New invocation --> Submit[Commit intent and send bounded submission] --> CheckDeferred
+    ReadyEvidence -- Waiting --> CheckDeferred
     Limits --> Credentials
     Limits -. Invalid request or byte limit .-> Persist
     Credentials -- Yes --> Http
@@ -97,7 +102,9 @@ flowchart TD
     Execute --> Persist
     Execute -. Processing fails .-> Release
 
-    Persist --> CheckRetry
+    Persist --> CheckDeferred{Waiting deferred cases without local retry work?}
+    CheckDeferred -- Yes --> Park[Release chunk and retain any ready wakeup] --> Ack
+    CheckDeferred -- No --> CheckRetry
     Persist -. Persistence fails .-> Release
 
     CheckRetry -- Yes --> Delay
@@ -127,6 +134,7 @@ flowchart TD
 
     class Start command
     class Success success
+    class CompletionKind,ReadyEvidence,Submit,CheckDeferred,Park system
     class Loader,Runner,BrokerCircuit,Stream,Event,Decode,Payload,Claim,Paused,DelayPaused,Context,Cases,Persist,CheckRetry,Delay,Complete,Ack,Release,Released,Requeue,Reopen,Shutdown,Stop system
     class Warm,Permit,Execute component
     class ServiceFail,ShutdownFail error

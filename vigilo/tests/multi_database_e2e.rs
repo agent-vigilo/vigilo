@@ -11,6 +11,9 @@
 mod postgres_probe;
 mod support;
 
+#[path = "multi_database_e2e/deferred.rs"]
+mod deferred;
+
 #[path = "multi_database_e2e/hosted.rs"]
 mod hosted;
 
@@ -1101,7 +1104,7 @@ fn unavailable_postgres_url() -> anyhow::Result<String> {
     Ok(format!("postgres://vigilo@{address}/vigilo"))
 }
 
-fn handle_agent_request(mut stream: TcpStream) -> anyhow::Result<()> {
+fn read_agent_request(stream: &mut TcpStream) -> anyhow::Result<String> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buffer = [0u8; 16 * 1024];
     let mut read = 0;
@@ -1123,14 +1126,18 @@ fn handle_agent_request(mut stream: TcpStream) -> anyhow::Result<()> {
             }
         }
     }
-    let request = String::from_utf8_lossy(&buffer[..read]);
+    Ok(String::from_utf8_lossy(&buffer[..read]).into_owned())
+}
+
+fn handle_agent_request(mut stream: TcpStream) -> anyhow::Result<()> {
+    let request = read_agent_request(&mut stream)?;
 
     let (status, body) = if request.contains("requested_agent") {
         use vigilo::invocation::wire::Submission;
         let (_, body) = request
             .split_once("\r\n\r\n")
             .ok_or_else(|| anyhow::anyhow!("missing request body"))?;
-        let submission = Submission::decode(body.as_bytes(), buffer.len(), false)?;
+        let submission = Submission::decode(body.as_bytes(), 16 * 1024, false)?;
         anyhow::ensure!(submission.case.input["user_message"].is_string());
         (
             "HTTP/1.1 200 OK",
@@ -1895,8 +1902,20 @@ fn run_vigilo_output<'a>(
     shard_assignment_policy: &str,
     args: impl IntoIterator<Item = &'a str>,
 ) -> anyhow::Result<Output> {
-    let args = args.into_iter().collect::<Vec<_>>();
-    Ok(Command::new(env!("CARGO_BIN_EXE_vigilo"))
+    Ok(
+        vigilo_command(config, default_execution_alias, shard_assignment_policy)
+            .args(args)
+            .output()?,
+    )
+}
+
+fn vigilo_command(
+    config: &IntegrationConfig,
+    default_execution_alias: &str,
+    shard_assignment_policy: &str,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vigilo"));
+    command
         .env(PRIMARY_DATABASE_URL_ENV, &config.primary_url)
         .env(SHARD_DATABASE_URL_ENV, &config.shard_url)
         .env("MESSAGING_URL", &config.messaging_url)
@@ -1906,9 +1925,8 @@ fn run_vigilo_output<'a>(
             default_execution_alias,
         )
         .env("VIGILO_SHARD_ASSIGNMENT_POLICY", shard_assignment_policy)
-        .args(["-q", "-f", "json"])
-        .args(&args)
-        .output()?)
+        .args(["-q", "-f", "json"]);
+    command
 }
 
 struct RunInputFiles {

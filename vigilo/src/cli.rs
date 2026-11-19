@@ -171,6 +171,7 @@ mod tests {
                         | "messaging-circuit-failure-threshold"
                         | "wasm-timeout-ms"
                         | "database-circuit-failure-threshold"
+                        | "agent-credentials"
                 )
             )
         }));
@@ -189,7 +190,7 @@ mod tests {
         assert!(has_long(worker, "agent-max-request-bytes"));
         assert!(has_long(worker, "agent-max-response-bytes"));
         assert!(has_long(worker, "agent-credentials"));
-        assert!(!has_long(coordinator, "agent-credentials"));
+        assert!(has_long(coordinator, "agent-credentials"));
         assert!(!has_long(coordinator, "agent-max-request-bytes"));
         assert!(has_long(worker, "database-circuit-failure-threshold"));
         assert!(has_long(worker, "database-operation-timeout-seconds"));
@@ -251,27 +252,29 @@ mod tests {
     }
 
     #[test]
-    fn credential_configuration_is_operator_owned_and_worker_only() {
-        let worker = App::try_parse_from([
-            "vigilo",
-            "--database-url",
-            "postgres://control",
-            "worker",
-            "--messaging-url",
-            "amqp://broker",
-            "--agent-credentials",
-            "operator.json",
-            "once",
-        ])
-        .unwrap();
-        assert_eq!(
-            worker
-                .command
-                .context_config("primary")
-                .unwrap()
-                .agent_credentials,
-            Some(std::path::PathBuf::from("operator.json"))
-        );
+    fn credential_configuration_is_operator_owned_and_scoped_to_delivery_commands() {
+        for role in ["worker", "coordinator"] {
+            let runtime = App::try_parse_from([
+                "vigilo",
+                "--database-url",
+                "postgres://control",
+                role,
+                "--messaging-url",
+                "amqp://broker",
+                "--agent-credentials",
+                "operator.json",
+                "once",
+            ])
+            .unwrap();
+            assert_eq!(
+                runtime
+                    .command
+                    .context_config("primary")
+                    .unwrap()
+                    .agent_credentials,
+                Some(std::path::PathBuf::from("operator.json"))
+            );
+        }
         let database = App::try_parse_from([
             "vigilo",
             "--database-url",

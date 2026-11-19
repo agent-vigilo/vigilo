@@ -35,7 +35,13 @@ flowchart TD
     Reject[Reject stale transition]
 
     Worker --> RunGuard
-    RunGuard -- Running --> Pending --> Supersede --> Running --> AttemptRunning --> AgentAndEvaluators
+    RunGuard -- Running --> Pending --> Supersede --> Running --> AttemptRunning
+    AttemptRunning -- Inline --> AgentAndEvaluators
+    AttemptRunning -- Polling --> AwaitAgent[Commit intent and await remote outcome]
+    AwaitAgent -- Outcome accepted --> Awaiting
+    Awaiting --> AgentAndEvaluators
+    AwaitAgent -- Deadline elapsed --> TimedOut
+    AwaitAgent --> Cancel
     RunGuard -- Not running --> Reject
     Supersede --> Stale
 
@@ -64,9 +70,6 @@ flowchart TD
     Settle --> Stale
     Settle --> Unresolved --> ExecutionFailed
 
-    Running -. Reserved partial path .-> Awaiting
-    Running -. Reserved timeout path .-> TimedOut
-    AttemptRunning -. Reserved timeout path .-> TimedOut
 
     class Worker,Cancel command
     class RunGuard,Pending,Supersede,Running,AttemptRunning,AgentAndEvaluators,TerminalGuard,AggregateGuard,Awaiting,RetryEligible,RetryScheduled,RetryDue system

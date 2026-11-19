@@ -241,7 +241,8 @@ pub(crate) async fn finalize_execution_terminal_transitions(
             SELECT
                 transition_input.*,
                 executions.run_id,
-                executions.run_shard
+                executions.run_shard,
+                COALESCE(execution_attempts.invocation_status = 'timed_out', false) AS invocation_timed_out
             FROM transition_input
             JOIN executions
               ON executions.run_id = $7::uuid
@@ -345,6 +346,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
             UPDATE execution_attempts
             SET status = CASE
                     WHEN terminal_input.completed THEN 'completed'::attempt_status
+                    WHEN terminal_input.invocation_timed_out THEN 'timed_out'::attempt_status
                     WHEN terminal_input.agent_failure IS NOT NULL
                         THEN 'failed_agent_call'::attempt_status
                     ELSE 'failed_evaluation'::attempt_status
@@ -379,6 +381,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 terminal_input.attempt_id,
                 terminal_input.attempt_no,
                 terminal_input.completed,
+                terminal_input.invocation_timed_out,
                 terminal_input.error_message,
                 terminal_input.overall_status,
                 terminal_input.retry_not_before,
@@ -442,6 +445,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
             UPDATE executions
             SET status = CASE
                     WHEN attempt_update.completed THEN 'completed'::execution_status
+                    WHEN attempt_update.invocation_timed_out THEN 'timed_out'::execution_status
                     WHEN attempt_update.retry_scheduled THEN 'retry_scheduled'::execution_status
                     ELSE 'failed'::execution_status
                 END,

@@ -192,29 +192,68 @@ fn dispatch_cursor_status(has_remaining_chunks: bool) -> &'static str {
 ///   authority before commit; coordinators aggregate them asynchronously.
 /// - Recovery clears the chunk's opaque claim token, fencing a worker from
 ///   allocating attempts or persisting results after reassignment.
+#[cfg(test)]
 pub(crate) async fn recover_expired_chunk_leases(
     db: &PgPool,
     max_recoveries: i32,
     batch_size: i64,
 ) -> anyhow::Result<ChunkLeaseRecoveryStats> {
+    recover_expired_work(db, max_recoveries, batch_size, false)
+        .await
+        .map(|(stats, _)| stats)
+}
+
+/// Reuses the placement's chunk recovery read for bounded standalone discovery.
+pub(crate) async fn recover_expired_work(
+    db: &PgPool,
+    max_recoveries: i32,
+    batch_size: i64,
+    standalone: bool,
+) -> anyhow::Result<(
+    ChunkLeaseRecoveryStats,
+    Vec<super::execution_processing::deferred_jobs::Job>,
+)> {
+    use super::execution_processing::deferred_jobs;
     let mut tx = db.begin().await?;
 
     // Acquire shared movement admission before chunk locks. The following SQL
     // takes a fresh snapshot and rechecks local state after these nonblocking
     // claims, so a completed move cannot leave recovery writing the old owner.
-    let candidates = sqlx::query_as::<_, (Uuid, i16, Uuid)>(
-        "SELECT run_id, run_shard, tenant_id FROM vigilo_claim_chunk_recovery($1,$2)",
-    )
-    .bind(max_recoveries)
-    .bind(batch_size)
-    .fetch_all(&mut *tx)
-    .await?;
+    type RecoveryRow = (
+        Uuid,
+        i16,
+        Uuid,
+        Option<sqlx::types::Json<deferred_jobs::Job>>,
+    );
+    let (candidates, jobs) = if standalone {
+        let rows: Vec<RecoveryRow> = sqlx::query_as(deferred_jobs::DISCOVER)
+            .bind(max_recoveries)
+            .bind(batch_size)
+            .bind(deferred_jobs::DISCOVERY_LIMIT)
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut recoveries = Vec::new();
+        let mut jobs = Vec::new();
+        for (run, shard, tenant, job) in rows {
+            match job {
+                Some(sqlx::types::Json(job)) => jobs.push(job),
+                None => recoveries.push((run, shard, tenant)),
+            }
+        }
+        (recoveries, jobs)
+    } else {
+        let rows = sqlx::query_as(
+            "SELECT run_id, run_shard, tenant_id FROM vigilo_claim_chunk_recovery($1,$2)",
+        )
+        .bind(max_recoveries)
+        .bind(batch_size)
+        .fetch_all(&mut *tx)
+        .await?;
+        (rows, Vec::new())
+    };
     if candidates.is_empty() {
         tx.commit().await?;
-        return Ok(ChunkLeaseRecoveryStats {
-            recovered_chunks: 0,
-            failed_chunks: 0,
-        });
+        return Ok((ChunkLeaseRecoveryStats::default(), jobs));
     }
     let mut owners = std::collections::BTreeMap::new();
     let mut admitted_runs = Vec::with_capacity(candidates.len());
@@ -244,10 +283,13 @@ pub(crate) async fn recover_expired_chunk_leases(
     }
     tx.commit().await?;
 
-    Ok(ChunkLeaseRecoveryStats {
-        recovered_chunks: recovered,
-        failed_chunks: i64::try_from(failed_rows.len())?,
-    })
+    Ok((
+        ChunkLeaseRecoveryStats {
+            recovered_chunks: recovered,
+            failed_chunks: i64::try_from(failed_rows.len())?,
+        },
+        jobs,
+    ))
 }
 
 /// Starts a dispatchable run in the control database and returns its snapshot.

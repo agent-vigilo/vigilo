@@ -36,7 +36,7 @@ use crate::{
 };
 
 /// Routing and ownership established by the caller before using a shard pool.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Deserialize)]
 pub(crate) struct Attempt {
     pub tenant_id: Uuid,
     pub run_id: Uuid,
@@ -47,7 +47,7 @@ pub(crate) struct Attempt {
 }
 
 impl Attempt {
-    pub(super) fn from_chunk(chunk: &RunChunk, attempt_id: Uuid) -> Self {
+    pub(crate) fn from_chunk(chunk: &RunChunk, attempt_id: Uuid) -> Self {
         Self {
             tenant_id: chunk.tenant_id,
             run_id: chunk.run_id,
@@ -60,10 +60,6 @@ impl Attempt {
 }
 
 /// Frozen submission inputs. Callback authorization is supplied by the host at delivery.
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 pub(crate) struct Intent {
     pub agent: AgentIdentity,
     pub case: CaseInput,
@@ -73,15 +69,14 @@ pub(crate) struct Intent {
     pub evidence_limit: usize,
     pub deduplicates: bool,
     pub requires_reference: bool,
+    pub delay_before_send_secs: Option<f64>,
 }
 
 /// One remote request may be issued after its claim commits.
 #[derive(sqlx::FromRow)]
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 pub(crate) struct Claim {
+    pub deadline: DateTime<Utc>,
+    pub execution_id: Uuid,
     pub invocation_id: Uuid,
     pub token: Uuid,
     pub request: Vec<u8>,
@@ -90,20 +85,15 @@ pub(crate) struct Claim {
 
 /// This value is constructed by the host only after verifying callback authority.
 #[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 pub(crate) enum CompletionProof {
     RequestClaim(Uuid),
-    VerifiedCallback { invocation_id: Uuid },
+    #[cfg(test)]
+    VerifiedCallback {
+        invocation_id: Uuid,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 pub(crate) enum Acceptance {
     Accepted,
     Duplicate,
@@ -111,14 +101,20 @@ pub(crate) enum Acceptance {
 }
 
 #[derive(sqlx::FromRow)]
-struct ChunkState {
+pub(super) struct ChunkState {
     status: String,
     control: String,
     lease_token: Option<Uuid>,
     live_lease: bool,
 }
 
-async fn lock_chunk(
+impl ChunkState {
+    pub(super) fn may_receive_outcome(&self) -> bool {
+        self.control != "revoked" && matches!(self.status.as_str(), "pending" | "leased")
+    }
+}
+
+pub(super) async fn lock_chunk(
     tx: &mut Transaction<'_, Postgres>,
     key: Attempt,
 ) -> Result<Option<ChunkState>> {
@@ -142,10 +138,6 @@ async fn lock_chunk(
 }
 
 /// Records immutable submission bytes and claims the first send under the worker lease.
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 pub(crate) async fn start(
     db: &PgPool,
     key: Attempt,
@@ -174,21 +166,32 @@ pub(crate) async fn start(
     let body = crate::agent_client::limits::serialize(
         &submission,
         u64::try_from(intent.max_request_bytes)?,
-    )?;
+    )
+    .map_err(|error| {
+        crate::agent_client::failure::Failure::terminal(
+            crate::agent_client::failure::Kind::BodyLimit,
+            error,
+        )
+    })?;
 
     let mut tx = db.begin().await?;
-    if !lock_chunk(&mut tx, key).await?.is_some_and(|chunk| {
-        chunk.control == "enabled" && chunk.live_lease && chunk.lease_token == Some(lease_token)
-    }) {
-        return Ok(None);
-    }
-    let claim = sqlx::query_as(
+    ensure!(
+        lock_chunk(&mut tx, key)
+            .await?
+            .is_some_and(|chunk| chunk.control == "enabled"
+                && chunk.live_lease
+                && chunk.lease_token == Some(lease_token)),
+        "deferred submission lost its chunk lease"
+    );
+    let parked: Option<(Option<Uuid>,Uuid)> = sqlx::query_as(
         "WITH started AS (
             UPDATE execution_attempts a
             SET invocation_id=$1, invocation_status='submitting', invocation_deadline=$2,
                 invocation_request=$3, invocation_deduplicates=$4, invocation_requires_reference=$5,
                 invocation_requires_agent=$12, invocation_evidence_limit=$13,
-                invocation_claim=gen_random_uuid(), invocation_claim_until=LEAST($2,clock_timestamp()+make_interval(secs=>$6)),
+                invocation_claim=CASE WHEN $14::double precision IS NULL THEN gen_random_uuid() END,
+                invocation_claim_until=CASE WHEN $14 IS NULL THEN LEAST($2,statement_timestamp()+make_interval(secs=>$6)) END,
+                invocation_next_at=LEAST($2,statement_timestamp()+make_interval(secs=>COALESCE($14,$6))),
                 status='awaiting_agent', leased_until=NULL, updated_at=clock_timestamp()
             FROM executions e
             WHERE a.tenant_id=$7 AND a.run_id=$8 AND a.run_shard=$9 AND a.id=$10
@@ -201,21 +204,26 @@ pub(crate) async fn start(
             UPDATE executions e SET status='awaiting_agent',updated_at=clock_timestamp()
              FROM started s WHERE e.run_id=$8 AND e.run_shard=$9 AND e.id=s.execution_id
         )
-        SELECT invocation_id,invocation_claim AS token,$3::bytea AS request,$5::boolean AS requires_reference FROM started",
+        SELECT invocation_claim,execution_id FROM started",
     )
-    .bind(invocation_id).bind(intent.deadline).bind(body).bind(intent.deduplicates)
+    .bind(invocation_id).bind(intent.deadline).bind(&body).bind(intent.deduplicates)
     .bind(intent.requires_reference).bind(f64::from(lease_seconds)).bind(key.tenant_id)
-    .bind(key.run_id).bind(key.run_shard).bind(key.attempt_id).bind(key.chunk_id).bind(intent.require_agent).bind(i32::try_from(intent.evidence_limit)?)
+    .bind(key.run_id).bind(key.run_shard).bind(key.attempt_id).bind(key.chunk_id).bind(intent.require_agent).bind(i32::try_from(intent.evidence_limit)?).bind(intent.delay_before_send_secs)
     .fetch_optional(&mut *tx).await?;
+    let (token, execution_id) = parked
+        .ok_or_else(|| anyhow::anyhow!("deferred submission could not park its current attempt"))?;
     tx.commit().await?;
-    Ok(claim)
+    Ok(token.map(|token| Claim {
+        deadline: intent.deadline,
+        execution_id,
+        invocation_id,
+        token,
+        request: body,
+        requires_reference: intent.requires_reference,
+    }))
 }
 
 /// Reclaims a lost submission or records ambiguous acceptance when resending is unsafe.
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 pub(crate) async fn reclaim_submission(
     db: &PgPool,
     key: Attempt,
@@ -234,23 +242,26 @@ pub(crate) async fn reclaim_submission(
     let claim = sqlx::query_as(
         "WITH claimed AS (
            UPDATE execution_attempts a
-           SET invocation_status=CASE WHEN invocation_status='submitting' AND NOT invocation_deduplicates
+           SET invocation_status=CASE WHEN invocation_claim IS NOT NULL AND NOT invocation_deduplicates
                  THEN 'submission_unknown'::invocation_status ELSE invocation_status END,
-               invocation_claim=CASE WHEN invocation_status='submitting' AND NOT invocation_deduplicates
+               invocation_claim=CASE WHEN invocation_claim IS NOT NULL AND NOT invocation_deduplicates
                  THEN NULL ELSE gen_random_uuid() END,
-               invocation_claim_until=CASE WHEN invocation_status='submitting' AND NOT invocation_deduplicates
-                 THEN NULL ELSE LEAST(invocation_deadline,clock_timestamp()+make_interval(secs=>$1)) END,
+               invocation_claim_until=CASE WHEN invocation_claim IS NOT NULL AND NOT invocation_deduplicates
+                 THEN NULL ELSE LEAST(invocation_deadline,statement_timestamp()+make_interval(secs=>$1)) END,
+               invocation_next_at=CASE WHEN invocation_deduplicates OR invocation_claim IS NULL
+                 THEN LEAST(invocation_deadline,statement_timestamp()+make_interval(secs=>$1)) END,
                updated_at=clock_timestamp()
            FROM executions e
            WHERE a.run_id=$2 AND a.run_shard=$3 AND a.id=$4 AND e.run_id=a.run_id
              AND e.run_shard=a.run_shard AND e.id=a.execution_id AND e.chunk_id=$5
              AND e.current_attempt_id=a.id AND e.status='awaiting_agent' AND a.status='awaiting_agent'
              AND a.invocation_status='submitting' AND a.invocation_deadline > clock_timestamp()
+             AND a.invocation_next_at <= clock_timestamp()
              AND (a.invocation_claim_until IS NULL OR a.invocation_claim_until <= clock_timestamp())
-           RETURNING invocation_id,invocation_claim,invocation_request,invocation_requires_reference
+           RETURNING invocation_id,invocation_claim,invocation_request,invocation_requires_reference,invocation_deadline,a.execution_id
         )
         SELECT invocation_id,invocation_claim AS token,invocation_request AS request,
-            invocation_requires_reference AS requires_reference
+            invocation_requires_reference AS requires_reference,invocation_deadline AS deadline,execution_id
         FROM claimed WHERE invocation_claim IS NOT NULL",
     ).bind(f64::from(lease_seconds)).bind(key.run_id).bind(key.run_shard)
     .bind(key.attempt_id).bind(key.chunk_id).fetch_optional(&mut *tx).await?;
@@ -259,10 +270,6 @@ pub(crate) async fn reclaim_submission(
 }
 
 /// Records a valid receipt only while the original submission claim owns the invocation.
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 pub(crate) async fn record_receipt(
     db: &PgPool,
     key: Attempt,
@@ -279,6 +286,7 @@ pub(crate) async fn record_receipt(
     let changed = sqlx::query(
         "UPDATE execution_attempts a
          SET invocation_status='waiting',invocation_reference=$1,invocation_claim=NULL,invocation_claim_until=NULL,
+             invocation_next_at=CASE WHEN invocation_requires_reference THEN LEAST(invocation_deadline,statement_timestamp()+interval '5 seconds') END,
              updated_at=clock_timestamp()
          FROM executions e
          WHERE a.run_id=$2 AND a.run_shard=$3 AND a.id=$4 AND e.run_id=a.run_id AND e.run_shard=a.run_shard
@@ -292,10 +300,6 @@ pub(crate) async fn record_receipt(
 }
 
 #[derive(sqlx::FromRow)]
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 struct OutcomeTarget {
     request: Option<Vec<u8>>,
     digest: Option<Vec<u8>>,
@@ -307,10 +311,6 @@ struct OutcomeTarget {
 
 /// Accepts bounded evidence only for the currently authorized invocation.
 /// The original bytes are available to a replacement scoring worker after commit.
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
 pub(crate) async fn accept(
     db: &PgPool,
     key: Attempt,
@@ -344,10 +344,12 @@ pub(crate) async fn accept(
     };
     let request_claim = match proof {
         CompletionProof::RequestClaim(token) => Some(token),
+        #[cfg(test)]
         CompletionProof::VerifiedCallback { .. } => None,
     };
     let authorized = match proof {
         CompletionProof::RequestClaim(token) => target.claim == Some(token),
+        #[cfg(test)]
         CompletionProof::VerifiedCallback {
             invocation_id: authorized_id,
         } => authorized_id == invocation_id,
@@ -390,7 +392,7 @@ pub(crate) async fn accept(
         "WITH accepted AS (
              UPDATE execution_attempts
              SET invocation_status=CASE WHEN $1::bytea IS NOT NULL THEN 'completed'::invocation_status ELSE 'failed'::invocation_status END,
-                 invocation_request=NULL,invocation_claim=NULL,invocation_claim_until=NULL,
+                 invocation_request=NULL,invocation_claim=NULL,invocation_claim_until=NULL,invocation_next_at=NULL,
                  invocation_outcome_digest=$3,invocation_evidence=$1,invocation_content_type=$2,
                  status='ready_to_score',updated_at=clock_timestamp()
              WHERE run_id=$4 AND run_shard=$5 AND id=$6 AND invocation_deadline > clock_timestamp()
@@ -411,11 +413,7 @@ pub(crate) async fn accept(
 }
 
 /// Marks a wakeup while the chunk is locked and publishes only after release.
-#[allow(
-    dead_code,
-    reason = "deferred delivery adapters are not enabled in run admission"
-)]
-async fn mark_ready(tx: &mut Transaction<'_, Postgres>, key: Attempt) -> Result<()> {
+pub(super) async fn mark_ready(tx: &mut Transaction<'_, Postgres>, key: Attempt) -> Result<()> {
     let changed = sqlx::query(
         "UPDATE run_chunks SET deferred_wakeup_id=gen_random_uuid()
          WHERE run_id=$1 AND run_shard=$2 AND id=$3 AND deferred_wakeup_id IS NULL",
@@ -474,6 +472,7 @@ pub(super) enum ScoringInput {
     Ready,
     Completed(vigilo::response::CapturedBody),
     Failed,
+    TimedOut,
 }
 
 impl ScoringInput {
@@ -481,6 +480,11 @@ impl ScoringInput {
         match self {
             Self::Ready => anyhow::bail!("scoring evidence was not loaded"),
             Self::Completed(body) => Ok(crate::agent_client::captured_output(body.clone())),
+            Self::TimedOut => Err(crate::agent_client::failure::Failure::terminal(
+                crate::agent_client::failure::Kind::Timeout,
+                "deferred invocation deadline elapsed",
+            )
+            .into()),
             Self::Failed => Err(crate::agent_client::failure::Failure::terminal(
                 crate::agent_client::failure::Kind::RemoteFailure,
                 "remote invocation reported failure",
@@ -532,7 +536,8 @@ pub(super) async fn resume(
         .map(|row| {
             let deferred_output = match row.state.as_str() {
                 "completed" => Some(ScoringInput::Ready),
-                "failed" | "timed_out" => Some(ScoringInput::Failed),
+                "failed" => Some(ScoringInput::Failed),
+                "timed_out" => Some(ScoringInput::TimedOut),
                 "submitting" | "waiting" | "submission_unknown" => None,
                 _ => anyhow::bail!("invalid parked invocation state"),
             };

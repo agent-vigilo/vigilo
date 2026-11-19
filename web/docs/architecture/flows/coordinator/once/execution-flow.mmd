@@ -13,6 +13,7 @@ sequenceDiagram
     participant ExecutionDB as Execution DBs
     participant Objects as Object Storage
     participant Queue as RabbitMQ
+    participant Harness as External Harness
 
     User->>Vigilo: vigilo coordinator once
     activate Vigilo
@@ -41,7 +42,7 @@ sequenceDiagram
     Vigilo->>ControlDB: Discover routed execution aliases through restricted function
     ControlDB-->>Vigilo: Execution database aliases
     loop Serviceable execution placements
-        Vigilo->>ExecutionDB: Discover expired leases through restricted function, retain movement locks
+        Vigilo->>ExecutionDB: Discover expired leases and indexed due invocations on standalone placements
         Vigilo->>ExecutionDB: Bind exact claimed batch, recheck ownership, recover or fail chunks and settle atomically
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Recovered chunks and poison chunks failed
@@ -49,6 +50,12 @@ sequenceDiagram
             ExecutionDB-->>Vigilo: Database error
             Vigilo->>Vigilo: Classify, count, and continue with next alias
         end
+    end
+
+    opt Due deferred invocation work
+        Vigilo->>ExecutionDB: Close due deadlines and claim bounded remote requests
+        Vigilo->>Harness: Poll status or safely resubmit under the request budget
+        Vigilo->>ExecutionDB: Save outcome or next check, queue ready chunk
     end
 
     loop Dispatch bounded run-shard windows
@@ -129,6 +136,12 @@ sequenceDiagram
             ExecutionDB-->>Vigilo: Database error
             Vigilo->>Vigilo: Classify, count, and continue with next alias
         end
+    end
+
+    opt Due remote cancellation after local settlement
+        Vigilo->>ExecutionDB: Claim bounded cancellation deliveries
+        Vigilo->>Harness: Send bounded cancellation request
+        Vigilo->>ExecutionDB: Record acknowledgement or retry
     end
 
     Vigilo->>Vigilo: Log cycle totals and placement failure counters

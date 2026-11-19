@@ -321,6 +321,11 @@ pub(crate) struct ExecutionWriteRoute {
 }
 
 impl DatabaseRouter {
+    /// Standalone operators own placement discovery. Fixed-role hosts supply their own delivery adapters.
+    pub(crate) fn supports_standalone_polling(&self) -> bool {
+        self.fixed_pools.is_none()
+    }
+
     pub(crate) fn new(config: Config) -> Self {
         Self {
             uri: config.uri,

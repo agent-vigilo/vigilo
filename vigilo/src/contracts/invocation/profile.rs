@@ -121,7 +121,16 @@ impl Harness {
                     "inline completion has no deferred capabilities"
                 );
             }
-            Completion::Polling { status_url } => validate_status_url(status_url)?,
+            Completion::Polling {
+                status_url,
+                deadline_secs,
+            } => {
+                validate_status_url(status_url)?;
+                ensure!(
+                    (1..=86_400).contains(deadline_secs),
+                    "polling deadline_secs must be between 1 and 86400"
+                );
+            }
             Completion::Callback {} => {
                 ensure!(callback_available, "callback ingress is unavailable")
             }
@@ -143,8 +152,16 @@ impl Harness {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Completion {
     Inline {},
-    Polling { status_url: String },
+    Polling {
+        status_url: String,
+        #[serde(default = "default_deadline")]
+        deadline_secs: u32,
+    },
     Callback {},
+}
+
+fn default_deadline() -> u32 {
+    600
 }
 
 /// HTTP destination and optional reference to operator-provided credentials.
@@ -222,6 +239,33 @@ pub(super) fn endpoint_url(value: &str) -> Result<Url> {
         "endpoint must be an absolute HTTP URL without user info or fragment"
     );
     Ok(url)
+}
+
+/// Render the admitted status template with the provider reference as data.
+pub fn poll_url(template: &str, reference: &str) -> Result<Url> {
+    validate_status_url(template)?;
+    ensure!(
+        (1..=256).contains(&reference.len()),
+        "invalid provider reference"
+    );
+    let url = endpoint_url(&template.replace("{provider_reference}", "vigilo-provider-reference"))?;
+    let path_slot = url
+        .path_segments()
+        .is_some_and(|mut parts| parts.any(|part| part == "vigilo-provider-reference"));
+    ensure!(
+        !path_slot || !matches!(reference, "." | ".."),
+        "dot-segment reference requires a query slot"
+    );
+    let mut encoded = String::new();
+    use std::fmt::Write;
+    for byte in reference.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte.into());
+        } else {
+            write!(encoded, "%{byte:02X}")?;
+        }
+    }
+    endpoint_url(&template.replace("{provider_reference}", &encoded))
 }
 
 fn validate_status_url(template: &str) -> Result<()> {
