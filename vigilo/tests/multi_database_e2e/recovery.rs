@@ -33,11 +33,15 @@ async fn outbox_replays_confirmed_message_after_publisher_crash() -> anyhow::Res
         },
     )?;
     // The publisher only reaches this update after RabbitMQ confirms its send.
-    interrupt_coordinator_commit(
+    interrupt_cli_commit(
         &fixture,
         &fixture.shard,
         "outbox_events",
-        "NEW.event_type='run.chunk.ready' AND NEW.status='published'",
+        (
+            "UPDATE",
+            "NEW.event_type='run.chunk.ready' AND NEW.status='published'",
+        ),
+        &["coordinator", "once"],
     )
     .await?;
     let pending = || {
@@ -234,11 +238,12 @@ async fn aggregation_recovers_from_interrupted_page_and_committed_seal() -> anyh
     assert!(!consumed);
     assert_eq!(evidence["passed_execution_count"], 1);
 
-    interrupt_coordinator_commit(
+    interrupt_cli_commit(
         &fixture,
         &fixture.shard,
         "run_chunk_settlement_consumptions",
-        "NEW.consumed AND NOT OLD.consumed",
+        ("UPDATE", "NEW.consumed AND NOT OLD.consumed"),
+        &["coordinator", "once"],
     )
     .await?;
     assert_eq!(checkpoint().await?, original);
@@ -266,11 +271,15 @@ async fn aggregation_recovers_from_interrupted_page_and_committed_seal() -> anyh
     assert_eq!(receipt().await?, (chunk_id, true, evidence.clone()));
 
     // The remote shard seal commits before the coordinator updates the run.
-    interrupt_coordinator_commit(
+    interrupt_cli_commit(
         &fixture,
         &fixture.primary,
         "runs",
-        "NEW.status='completed' AND OLD.status='finalizing'",
+        (
+            "UPDATE",
+            "NEW.status='completed' AND OLD.status='finalizing'",
+        ),
+        &["coordinator", "once"],
     )
     .await?;
     let seal = checkpoint().await?;
@@ -318,12 +327,13 @@ async fn aggregation_recovers_from_interrupted_page_and_committed_seal() -> anyh
     Ok(())
 }
 
-/// Abort a real coordinator process at a test-owned transaction barrier.
-async fn interrupt_coordinator_commit(
+/// Abort a real CLI process at a test-owned transaction barrier.
+async fn interrupt_cli_commit(
     fixture: &E2eFixture,
     db: &PgPool,
     table: &str,
-    condition: &str,
+    (event, condition): (&str, &str),
+    args: &[&str],
 ) -> anyhow::Result<()> {
     let mut barrier = db.begin().await?;
     let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -336,10 +346,10 @@ async fn interrupt_coordinator_commit(
         .execute(&mut *barrier)
         .await?;
     sqlx::raw_sql(&format!(
-        "CREATE FUNCTION hold_coordinator_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+        "CREATE FUNCTION hold_cli_commit() RETURNS trigger LANGUAGE plpgsql AS $$
          BEGIN PERFORM pg_advisory_xact_lock(42188,{blocker}); RETURN NEW; END $$;
-         CREATE TRIGGER hold_coordinator_commit AFTER UPDATE ON {table}
-         FOR EACH ROW WHEN ({condition}) EXECUTE FUNCTION hold_coordinator_commit();",
+         CREATE TRIGGER hold_cli_commit AFTER {event} ON {table}
+         FOR EACH ROW WHEN ({condition}) EXECUTE FUNCTION hold_cli_commit();",
     ))
     .execute(db)
     .await?;
@@ -348,10 +358,7 @@ async fn interrupt_coordinator_commit(
         SHARD_ALIAS,
         "single-default",
     ));
-    let mut child = command
-        .kill_on_drop(true)
-        .args(["coordinator", "once"])
-        .spawn()?;
+    let mut child = command.kill_on_drop(true).args(args).spawn()?;
     let pid = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let Some(pid) = sqlx::query_scalar::<_, i32>(
@@ -366,7 +373,7 @@ async fn interrupt_coordinator_commit(
             }
             anyhow::ensure!(
                 child.try_wait()?.is_none(),
-                "coordinator exited before updating {table}"
+                "CLI exited before reaching the {table} barrier"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -392,10 +399,196 @@ async fn interrupt_coordinator_commit(
     }
     barrier.rollback().await?;
     sqlx::raw_sql(&format!(
-        "DROP TRIGGER hold_coordinator_commit ON {table}; DROP FUNCTION hold_coordinator_commit();",
+        "DROP TRIGGER hold_cli_commit ON {table}; DROP FUNCTION hold_cli_commit();",
     ))
     .execute(db)
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shard_move_replays_committed_target_page_and_fences_old_route() -> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    for (profile, table, already_scored) in [
+        ("move_scored_page", "execution_aggregates", true),
+        ("move_dispatched_page", "run_chunks", false),
+    ] {
+        let run = create_run(
+            &fixture.config,
+            RunCreateInput {
+                default_execution_alias: PRIMARY_ALIAS,
+                shard_assignment_policy: "single-default",
+                agent_url: &fixture.agent.url,
+                profile_id: profile,
+                case_count: 1,
+                case_mode: CaseMode::Passing,
+                evaluator_ref: SENTIMENT_EVALUATOR_REF,
+            },
+        )?;
+        run_vigilo_ok(
+            &fixture.config,
+            PRIMARY_ALIAS,
+            "single-default",
+            ["coordinator", "once"],
+        )?;
+        let original: (String, Value) = sqlx::query_as(
+            "SELECT dedupe_key,payload FROM outbox_events
+             WHERE aggregate_id=$1 AND event_type='run.chunk.ready' AND status='published'",
+        )
+        .bind(run)
+        .fetch_one(&fixture.primary)
+        .await?;
+        assert_eq!(original.1["database_alias"], PRIMARY_ALIAS);
+        assert_eq!(original.1["write_epoch"], 1);
+        if already_scored {
+            run_vigilo_ok(
+                &fixture.config,
+                PRIMARY_ALIAS,
+                "single-default",
+                ["worker", "once"],
+            )?;
+        }
+        let copied_rows = |db: &PgPool| {
+            let db = db.clone();
+            let query =
+                format!("SELECT to_jsonb(r) FROM {table} r WHERE run_id=$1 AND run_shard=0");
+            async move {
+                sqlx::query_scalar::<_, Value>(&query)
+                    .bind(run)
+                    .fetch_all(&db)
+                    .await
+            }
+        };
+        let source = copied_rows(&fixture.primary).await?;
+        assert_eq!(source.len(), 1);
+        let run_arg = run.to_string();
+        let move_args = ["shard", "move", &run_arg, "0", "--alias", SHARD_ALIAS];
+        interrupt_cli_commit(
+            &fixture,
+            &fixture.primary,
+            "shard_move_table_progress",
+            ("INSERT", &format!("NEW.table_name='{table}'")),
+            &move_args,
+        )
+        .await?;
+        assert_eq!(copied_rows(&fixture.shard).await?, source);
+        let (move_id, token, generation): (Uuid, Uuid, i64) = sqlx::query_as(
+            "SELECT id,claim_token,claim_generation FROM shard_move_operations
+             WHERE run_id=$1 AND status='active' AND claimed_until > now()",
+        )
+        .bind(run)
+        .fetch_one(&fixture.primary)
+        .await?;
+        let checkpoint = || {
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT completed_page_count,copied_row_count FROM shard_move_table_progress
+                 WHERE move_id=$1 AND table_name=$2",
+            )
+            .bind(move_id)
+            .bind(table)
+            .fetch_optional(&fixture.primary)
+        };
+        assert_eq!(checkpoint().await?, None);
+        let live = run_vigilo_output(&fixture.config, PRIMARY_ALIAS, "single-default", move_args)?;
+        assert!(!live.status.success());
+        assert!(
+            [&live.stdout, &live.stderr]
+                .iter()
+                .any(|stream| String::from_utf8_lossy(stream).contains("currently claimed")),
+            "{live:?}"
+        );
+
+        let expired = sqlx::query(
+            "UPDATE shard_move_operations SET claimed_until=clock_timestamp()-interval '1 second'
+             WHERE id=$1 AND claim_token=$2",
+        )
+        .bind(move_id)
+        .bind(token)
+        .execute(&fixture.primary)
+        .await?;
+        assert_eq!(expired.rows_affected(), 1);
+        let moved = run_vigilo_json(&fixture.config, PRIMARY_ALIAS, "single-default", move_args)?;
+        assert_eq!(moved["meta"]["moved"], true);
+        assert_eq!(checkpoint().await?, Some((1, 1)));
+        assert_eq!(copied_rows(&fixture.shard).await?, source);
+        let route = || {
+            sqlx::query_as::<_, (String, String, i64, i64)>(
+                "SELECT database_alias,status,route_version,write_epoch FROM shard_placements
+                 WHERE run_id=$1 AND run_shard=0",
+            )
+            .bind(run)
+            .fetch_one(&fixture.primary)
+        };
+        let cutover = route().await?;
+        assert_eq!(
+            (cutover.0.as_str(), cutover.1.as_str(), cutover.3),
+            (SHARD_ALIAS, "active", 2)
+        );
+        assert!(cutover.2 > 1);
+        let retry = run_vigilo_json(&fixture.config, PRIMARY_ALIAS, "single-default", move_args)?;
+        assert_eq!(retry["meta"]["moved"], false);
+        assert_eq!(route().await?, cutover);
+        let completed: Vec<(Uuid, String, i64)> = sqlx::query_as(
+            "SELECT id,status,claim_generation FROM shard_move_operations WHERE run_id=$1",
+        )
+        .bind(run)
+        .fetch_all(&fixture.primary)
+        .await?;
+        assert_eq!(
+            completed,
+            vec![(move_id, "completed".into(), generation + 1)]
+        );
+        for (db, alias, state) in [
+            (&fixture.primary, PRIMARY_ALIAS, "closed"),
+            (&fixture.shard, SHARD_ALIAS, "open"),
+        ] {
+            let local: (String, String, i64) = sqlx::query_as(
+                "SELECT database_alias,state,write_epoch FROM local_shard_admissions
+                 WHERE run_id=$1 AND run_shard=0",
+            )
+            .bind(run)
+            .fetch_one(db)
+            .await?;
+            assert_eq!(local, (alias.into(), state.into(), 2));
+        }
+
+        if !already_scored {
+            // The only queued readiness message still names the old route.
+            // It must claim and write on the target, with no source execution.
+            run_vigilo_ok(
+                &fixture.config,
+                PRIMARY_ALIAS,
+                "single-default",
+                ["worker", "once"],
+            )?;
+            assert_eq!(execution_count(&fixture.primary, run).await?, 0);
+            let consumed: Vec<String> = sqlx::query_scalar(
+                "SELECT broker_message_id FROM execution_attempts WHERE run_id=$1 AND status='completed'",
+            )
+            .bind(run)
+            .fetch_all(&fixture.shard)
+            .await?;
+            assert_eq!(consumed, vec![original.0]);
+        }
+        assert_eq!(execution_count(&fixture.shard, run).await?, 1);
+        let terminal = drive_run_to_status(
+            &fixture,
+            profile,
+            PRIMARY_ALIAS,
+            "single-default",
+            run,
+            "completed",
+        )
+        .await?;
+        assert_eq!(terminal["data"]["gate_status"], "pass");
+        assert_eq!(terminal["data"]["terminal_execution_count"], 1);
+        assert_eq!(
+            outbox_event_count(&fixture.primary, run, "run.completed").await?,
+            1
+        );
+    }
     Ok(())
 }
 
