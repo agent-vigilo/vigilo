@@ -97,6 +97,73 @@ async fn wakeups(pool: &PgPool, run: Uuid) -> i64 {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
+async fn closed_shards_leave_discovery_room_for_healthy_polls(pool: PgPool) {
+    use crate::db::workflows::execution_processing::deferred_jobs::{
+        self,
+        DISCOVERY_LIMIT,
+        Kind,
+    };
+
+    let mut healthy = None;
+    for index in 0..=DISCOVERY_LIMIT {
+        let seed = seed_running_attempt(&pool, 60, 120).await;
+        let key = deferred::Attempt::from_chunk(&seed.chunk, seed.attempt_id);
+        let mut settings = intent(false);
+        settings.callback_digest = None;
+        settings.requires_reference = true;
+        let claim = deferred::start(&pool, key, seed.chunk.lease_token.unwrap(), settings, 60)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            deferred::record_receipt(&pool, key, &claim, &receipt(claim.invocation_id))
+                .await
+                .unwrap()
+        );
+        assert!(deferred::release(&pool, &seed.chunk).await.unwrap());
+        let route = json!({
+            "http":{"url":"https://harness.example"},
+            "status_url":"https://harness.example/status/{provider_reference}",
+            "deadline_secs":600,"submit_timeout_secs":10,
+            "forward_context":false,"require_agent":true,"deduplicates":false
+        });
+        sqlx::query("UPDATE run_snapshots SET config_snapshot=jsonb_set(config_snapshot,'{invocation_transport}',$2) WHERE run_id=$1")
+            .bind(seed.run_id).bind(route).execute(&pool).await.unwrap();
+        if index < DISCOVERY_LIMIT {
+            sqlx::query("UPDATE local_shard_admissions SET state='closed',write_epoch=write_epoch+1 WHERE run_id=$1")
+                .bind(seed.run_id).execute(&pool).await.unwrap();
+        } else {
+            healthy = Some(key);
+        }
+        sqlx::query("UPDATE execution_attempts SET invocation_next_at=now()-make_interval(secs=>$2) WHERE id=$1")
+            .bind(seed.attempt_id).bind(if index < DISCOVERY_LIMIT { 120.0 } else { 30.0 })
+            .execute(&pool).await.unwrap();
+    }
+    let healthy = healthy.unwrap();
+    let (recovery, jobs) = run_dispatch::recover_expired_work(&pool, 3, 1, true)
+        .await
+        .unwrap();
+    assert_eq!(recovery.recovered_chunks, 0);
+    assert_eq!(
+        jobs.len(),
+        1,
+        "closed-shard polls cannot consume the discovery limit"
+    );
+    assert_eq!(jobs[0].kind, Kind::Poll);
+    assert_eq!(jobs[0].key.attempt_id, healthy.attempt_id);
+    let claim = deferred_jobs::claim_poll(&pool, jobs[0].key)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claim.reference, "remote-reference");
+    let (_, jobs) = run_dispatch::recover_expired_work(&pool, 3, 1, true)
+        .await
+        .unwrap();
+    assert!(jobs.is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
 async fn submission_claim_recovery_preserves_identity_and_requires_deduplication(pool: PgPool) {
     for deduplicates in [false, true] {
         let seed = seed_running_attempt(&pool, 60, 120).await;

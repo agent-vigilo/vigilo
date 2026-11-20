@@ -308,6 +308,12 @@ the execution database that owns the changed rows. Lease recovery and outbox
 publication iterate placements independently; a failed alias is logged and
 skipped while healthy aliases finish the pass.
 
+Within a placement, expired chunk recovery reads up to 32 extra candidates per
+retry class so it can skip contended shards and chunks within the window. The
+configured recovery batch still limits writes in each class. Standalone deferred
+discovery checks local ownership before limiting due work, so retained rows on
+closed placements do not use polling slots.
+
 ## Control Database Scale
 
 The control database is singular and authoritative. Its CPU, memory, storage,

@@ -42,7 +42,7 @@ sequenceDiagram
     Vigilo->>ControlDB: Discover routed execution aliases through restricted function
     ControlDB-->>Vigilo: Execution database aliases
     loop Serviceable execution placements
-        Vigilo->>ExecutionDB: Discover expired leases and indexed due invocations on standalone placements
+        Vigilo->>ExecutionDB: Read expired leases with bounded lookahead and limit eligible standalone invocations
         Vigilo->>ExecutionDB: Bind exact claimed batch, recheck ownership, recover or fail chunks and settle atomically
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Recovered chunks and poison chunks failed

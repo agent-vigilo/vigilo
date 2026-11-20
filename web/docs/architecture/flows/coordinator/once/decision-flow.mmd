@@ -19,7 +19,7 @@ flowchart TD
     CreationDeferred[Release ownership and continue bounded candidates]
     RecoveryCatalog{Restricted execution-alias discovery succeeds?}
     RecoveryPlacement{Execution placements remain?}
-    Recover[Discover expired leases and due standalone invocations under placement authority]
+    Recover[Read expired leases with bounded lookahead and limit eligible standalone invocations]
     RecoveryIsolated[Classify failure, count it, and skip alias]
     DispatchClaim{Restricted cursor claim returned a route?}
     DispatchRun[Read scoped snapshot and route, fence admission, and commit with the cursor if colocated]

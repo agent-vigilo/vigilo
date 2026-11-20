@@ -112,44 +112,50 @@ pub(crate) async fn callback_job(
 
 // SQL starts with SELECT to keep the existing recovery observation category.
 // The three index windows have independent budgets so polls cannot crowd out
-// deadline handling or cancellation. Durable fields remain on execution shards.
+// deadline handling or cancellation. Filter ownership before ordering and
+// limiting each window. Inlining lets PostgreSQL use the due-time indexes.
 pub(crate) const DISCOVER: &str = "
 SELECT run_id, run_shard, tenant_id, NULL::jsonb AS job
 FROM vigilo_claim_chunk_recovery($1,$2)
 UNION ALL
 SELECT a.run_id,a.run_shard,a.tenant_id,
        jsonb_build_object('key',jsonb_build_object('tenant_id',a.tenant_id,'run_id',a.run_id,
-            'run_shard',a.run_shard,'chunk_id',e.chunk_id,'attempt_id',a.id,'write_epoch',ad.write_epoch),
-            'kind',a.kind,'due_at',a.due_at,'route',s.config_snapshot->'invocation_transport')
+            'run_shard',a.run_shard,'chunk_id',a.chunk_id,'attempt_id',a.id,'write_epoch',a.write_epoch),
+            'kind',a.kind,'due_at',a.due_at,'route',a.route)
 FROM (
-  (SELECT run_id,run_shard,tenant_id,id,execution_id,invocation_deadline AS due_at,'expire'::text AS kind
-   FROM execution_attempts
+  WITH eligible AS NOT MATERIALIZED (
+    SELECT a.run_id,a.run_shard,a.tenant_id,a.id,a.invocation_deadline,a.invocation_next_at,
+           a.invocation_cancel_at,a.invocation_status,e.current_attempt_id,e.chunk_id,ad.write_epoch,
+           s.config_snapshot->'invocation_transport' AS route
+    FROM execution_attempts a
+    JOIN executions e ON e.run_id=a.run_id AND e.run_shard=a.run_shard AND e.id=a.execution_id
+    JOIN local_shard_admissions ad ON ad.run_id=a.run_id AND ad.run_shard=a.run_shard AND ad.tenant_id=a.tenant_id
+    JOIN run_snapshots s ON s.run_id=a.run_id AND s.run_shard=a.run_shard AND s.tenant_id=a.tenant_id
+    WHERE ad.state IN ('open','draining') AND s.config_snapshot ? 'invocation_transport'
+      AND a.invocation_callback_digest IS NULL
+  )
+  (SELECT run_id,run_shard,tenant_id,id,chunk_id,write_epoch,route,invocation_deadline AS due_at,'expire'::text AS kind
+   FROM eligible
    WHERE invocation_status IN ('submitting','waiting','submission_unknown')
-     AND invocation_callback_digest IS NULL
+     AND current_attempt_id=id
      AND invocation_deadline <= statement_timestamp()
    ORDER BY invocation_deadline,run_id,id LIMIT $3)
   UNION ALL
-  (SELECT run_id,run_shard,tenant_id,id,execution_id,invocation_next_at,
+  (SELECT run_id,run_shard,tenant_id,id,chunk_id,write_epoch,route,invocation_next_at,
           CASE WHEN invocation_status='submitting' THEN 'submit' ELSE 'poll' END
-   FROM execution_attempts
+   FROM eligible
    WHERE invocation_next_at <= statement_timestamp() AND invocation_deadline > statement_timestamp()
-     AND invocation_callback_digest IS NULL
+     AND current_attempt_id=id
      AND (invocation_status='waiting' OR (invocation_status='submitting' AND EXISTS (
-        SELECT 1 FROM executions e JOIN run_chunks c ON c.run_id=e.run_id AND c.run_shard=e.run_shard AND c.id=e.chunk_id
-        WHERE e.run_id=execution_attempts.run_id AND e.run_shard=execution_attempts.run_shard
-          AND e.id=execution_attempts.execution_id AND c.execution_control='enabled')))
+        SELECT 1 FROM run_chunks c
+        WHERE c.run_id=eligible.run_id AND c.run_shard=eligible.run_shard
+          AND c.id=eligible.chunk_id AND c.execution_control='enabled')))
    ORDER BY invocation_next_at,run_id,id LIMIT $3)
   UNION ALL
-  (SELECT run_id,run_shard,tenant_id,id,execution_id,invocation_cancel_at,'cancel'
-   FROM execution_attempts WHERE invocation_cancel_at <= statement_timestamp()
-     AND invocation_callback_digest IS NULL
+  (SELECT run_id,run_shard,tenant_id,id,chunk_id,write_epoch,route,invocation_cancel_at,'cancel'
+   FROM eligible WHERE invocation_cancel_at <= statement_timestamp()
    ORDER BY invocation_cancel_at,run_id,id LIMIT $3)
 ) a
-JOIN executions e ON e.run_id=a.run_id AND e.run_shard=a.run_shard AND e.id=a.execution_id
-JOIN local_shard_admissions ad ON ad.run_id=a.run_id AND ad.run_shard=a.run_shard AND ad.tenant_id=a.tenant_id
-JOIN run_snapshots s ON s.run_id=a.run_id AND s.run_shard=a.run_shard AND s.tenant_id=a.tenant_id
-WHERE ad.state IN ('open','draining') AND s.config_snapshot ? 'invocation_transport'
-  AND (a.kind='cancel' OR e.current_attempt_id=a.id)
 ";
 
 /// Moves a due submission past a short endpoint cooldown without claiming a send.

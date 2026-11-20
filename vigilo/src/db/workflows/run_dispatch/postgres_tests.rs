@@ -1117,22 +1117,29 @@ async fn restricted_chunk_recovery_discovery_retains_movement_locks(pool: PgPool
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
-async fn chunk_recovery_discovery_bounds_each_retry_class(pool: PgPool) {
-    let run = seed_pending_run(&pool, &[(0, 1), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1)]).await;
-    sqlx::query("UPDATE run_chunks SET status='leased', lease_token=gen_random_uuid(), leased_until=now()-interval '1 minute'*(10-run_shard), recovery_count=CASE WHEN run_shard IN (2,3) THEN 3 ELSE 0 END WHERE run_id=$1 AND run_shard<5")
+async fn chunk_recovery_discovery_reserves_candidates_in_each_retry_class(pool: PgPool) {
+    let shards: Vec<_> = (0..70).map(|shard| (shard, 1)).collect();
+    let run = seed_pending_run(&pool, &shards).await;
+    sqlx::query("UPDATE run_chunks SET status='leased', lease_token=gen_random_uuid(), leased_until=now()-interval '1 minute'*(70-run_shard), recovery_count=CASE WHEN run_shard >= 34 THEN 3 ELSE 0 END WHERE run_id=$1 AND run_shard<69")
         .bind(run).execute(&pool).await.unwrap();
-    sqlx::query("UPDATE run_chunks SET leased_until=now()+interval '1 hour' WHERE run_id=$1 AND run_shard=4")
+    sqlx::query("UPDATE run_chunks SET leased_until=now()+interval '1 hour' WHERE run_id=$1 AND run_shard=68")
         .bind(run).execute(&pool).await.unwrap();
     let rows: Vec<(Uuid, i16)> = sqlx::query_as("SELECT * FROM vigilo_claim_chunk_recovery(3,1)")
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(rows, vec![(run, 0), (run, 2)]);
+    assert_eq!(
+        rows,
+        (0..33)
+            .chain(34..67)
+            .map(|shard| (run, shard))
+            .collect::<Vec<_>>()
+    );
     let all: Vec<(Uuid, i16)> = sqlx::query_as("SELECT * FROM vigilo_claim_chunk_recovery(0,100)")
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(all, vec![(run, 0), (run, 1), (run, 2), (run, 3)]);
+    assert_eq!(all, (0..68).map(|shard| (run, shard)).collect::<Vec<_>>());
     for (limit, batch) in [
         (None, Some(1_i64)),
         (Some(-1), Some(1)),

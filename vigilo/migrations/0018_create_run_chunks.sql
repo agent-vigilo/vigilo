@@ -127,17 +127,19 @@ BEGIN
        OR p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 1000000 THEN
         RAISE EXCEPTION 'invalid chunk recovery limits' USING ERRCODE = '22023';
     END IF;
+    -- Keep a bounded reserve for candidates skipped by the movement fence or
+    -- the later chunk row claim. Recovery writes still use p_batch_size.
     FOR candidate IN
         SELECT DISTINCT c.run_id, c.run_shard, c.tenant_id FROM (
             (SELECT rc.run_id, rc.run_shard, rc.tenant_id FROM %1$I.run_chunks rc
              WHERE rc.status = 'leased' AND rc.leased_until < now()
                AND rc.recovery_count < p_max_recoveries
-             ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size)
+             ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size + 32)
             UNION ALL
             (SELECT rc.run_id, rc.run_shard, rc.tenant_id FROM %1$I.run_chunks rc
              WHERE rc.status = 'leased' AND rc.leased_until < now()
                AND rc.recovery_count >= p_max_recoveries
-             ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size)
+             ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size + 32)
         ) c ORDER BY c.run_id, c.run_shard
     LOOP
         IF pg_try_advisory_xact_lock_shared(

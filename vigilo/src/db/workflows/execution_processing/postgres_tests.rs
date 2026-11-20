@@ -692,11 +692,67 @@ async fn expired_chunk_recovery_stales_attempt_and_requeues_chunk(pool: PgPool) 
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
-async fn recovered_attempt_cannot_persist_late_results(pool: PgPool) {
+async fn recovery_skips_blocked_work_and_fences_late_results(pool: PgPool) {
+    let moving = seed_running_attempt(&pool, -300, -300).await;
+    let locked = seed_running_attempt(&pool, -200, -200).await;
     let seed = seed_running_attempt(&pool, -5, -5).await;
-    run_dispatch::recover_expired_chunk_leases(&pool, 3, 10)
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text,$2::bigint))")
+        .bind(moving.run_id)
+        .bind(i64::from(moving.run_shard))
+        .execute(&mut *blocker)
         .await
         .unwrap();
+    sqlx::query("SELECT id FROM run_chunks WHERE run_id=$1 AND run_shard=$2 AND id=$3 FOR UPDATE")
+        .bind(locked.run_id)
+        .bind(locked.run_shard)
+        .bind(locked.chunk_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let recover = || {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_dispatch::recover_expired_chunk_leases(&pool, 3, 1),
+        )
+    };
+    let first = recover().await.unwrap().unwrap();
+    assert_eq!(
+        first.recovered_chunks, 1,
+        "old blocked work must leave room for recovery"
+    );
+    assert_eq!(first.failed_chunks, 0);
+    assert_eq!(recover().await.unwrap().unwrap().recovered_chunks, 0);
+    let states: Vec<(i64, String, i32)> = sqlx::query_as(
+        "SELECT candidates.ordinal, c.status, c.recovery_count
+         FROM unnest($1::uuid[]) WITH ORDINALITY candidates(id,ordinal)
+         JOIN run_chunks c ON c.id=candidates.id ORDER BY candidates.ordinal",
+    )
+    .bind(&[moving.chunk_id, locked.chunk_id, seed.chunk_id][..])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            (1, "leased".into(), 0),
+            (2, "leased".into(), 0),
+            (3, "pending".into(), 1)
+        ]
+    );
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.chunk.ready'",
+    )
+    .bind(seed.run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+    blocker.rollback().await.unwrap();
+    assert_eq!(recover().await.unwrap().unwrap().recovered_chunks, 1);
+    assert_eq!(recover().await.unwrap().unwrap().recovered_chunks, 1);
+    assert_eq!(recover().await.unwrap().unwrap().recovered_chunks, 0);
     let completed = CompletedExecutionPersistence {
         execution_id: seed.execution_id,
         attempt_id: seed.attempt_id,

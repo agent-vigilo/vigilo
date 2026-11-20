@@ -106,9 +106,11 @@ and SELECT on control deliveries, plus appropriate row-policy access. Callers ne
 only an explicit execute grant for claiming, not direct table access.
 
 The chunk migration defines `vigilo_claim_chunk_recovery(integer,bigint)`.
-It discovers bounded expired chunks in each retry class and acquires shared
-transaction-level movement locks before returning distinct run/shard identities with ownership.
-Recovery writes follow in a separate statement, rechecking current ownership.
+It reads the configured expired-chunk batch plus up to 32 extra candidates in
+each retry class. It acquires nonblocking shared movement locks before returning
+distinct run/shard identities with ownership. The extra candidates let recovery
+skip contended work within the window. The following writes recheck ownership,
+skip locked chunk rows and retain the configured write limit per class.
 The function binds its table to the installation schema, fixes its search path,
 and denies public execution. An explicitly granted caller needs no table access
 for discovery; a limited non-login owner needs SELECT on `run_chunks`.
