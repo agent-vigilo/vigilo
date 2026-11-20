@@ -53,8 +53,9 @@ installs the latest compatible core evaluators. Use
 `vigilo::operations::Client` provides typed standalone run operations, status and
 results summaries using shared lazy database pools. `HostedRuntime` creates caller,
 coordinator and worker handles with explicit host resource and database bindings.
-The caller owns its runtime and presentation. See the
-[library boundary and example](https://agentvigilo.com/docs/architecture/structure/components/vigilo/).
+The caller owns its runtime and presentation. See
+[release compatibility](https://docs.rs/vigilo/latest/vigilo/operations/#release-compatibility)
+and the [library boundary and example](https://agentvigilo.com/docs/architecture/structure/components/vigilo/).
 
 ## Explore
 

@@ -8,6 +8,22 @@
 //! and fixed-role pools; authentication and database policy installation belong to
 //! the embedding host.
 //!
+//! # Release compatibility
+//!
+//! Pin the exact `vigilo` crate version (for example, `vigilo = "=0.1.0"`)
+//! and check in the host application's `Cargo.lock`. Deploy the host,
+//! coordinator and workers with the same tested Vigilo release when they
+//! share an installation. Pin each tested artifact by digest in your
+//! deployment configuration, such as a container image SHA-256 digest.
+//!
+//! Pre-v1 releases can change APIs, configuration and persisted formats.
+//! Qualify the full combination before changing the pinned version. Vigilo
+//! validates harness invocation, agent response, dataset and evaluator
+//! contracts at their respective boundaries. Those contracts have their
+//! own identities and validation rules.
+//!
+//! # Prepared operations
+//!
 //! Preparation returns sealed, verified work rather than deserializable request
 //! objects. Interfaces pass ordinary input to the preparation methods; they cannot
 //! reconstruct the resulting proofs from user JSON.
