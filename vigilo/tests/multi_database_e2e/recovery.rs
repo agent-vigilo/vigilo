@@ -345,6 +345,7 @@ async fn delayed_root_failure_releases_owner_and_next_run_recovers() -> anyhow::
         );
         let payload: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(payload["data"]["status"], "creating");
+        assert_eq!(payload["meta"]["creation_placements_pending"], 1);
         runs.push(Uuid::parse_str(
             payload["data"]["run_id"].as_str().unwrap(),
         )?);

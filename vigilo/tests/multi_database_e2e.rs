@@ -71,58 +71,149 @@ const E2E_MAX_RUNTIME_CYCLES: usize = 8;
 const E2E_WORKER_PASSES_PER_CYCLE: usize = 4;
 
 #[tokio::test]
-async fn run_creation_recovers_after_cross_database_seed_status_failure() -> anyhow::Result<()> {
+async fn run_creation_recovers_after_submitter_dies_before_admission_checkpoint()
+-> anyhow::Result<()> {
     let Some(fixture) = E2eFixture::setup().await? else {
         return Ok(());
     };
 
-    install_seed_status_failure(&fixture.primary).await?;
-    let recoverable_output = create_run_output(
+    sqlx::raw_sql(
+        "CREATE FUNCTION hold_admission_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NEW.admission_cursor > OLD.admission_cursor THEN
+                 PERFORM pg_advisory_xact_lock(42187);
+             END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER hold_admission_checkpoint BEFORE UPDATE ON run_plans
+         FOR EACH ROW EXECUTE FUNCTION hold_admission_checkpoint();",
+    )
+    .execute(&fixture.primary)
+    .await?;
+    let mut barrier = fixture.primary.begin().await?;
+    let barrier_pid: i32 =
+        sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(42187)")
+            .fetch_one(&mut *barrier)
+            .await?;
+
+    let profile_id = "e2e_creation_recovery";
+    let inputs = write_run_inputs(
+        profile_id,
+        &fixture.agent.url,
+        SENTIMENT_EVALUATOR_REF,
+        1,
+        CaseMode::Passing,
+    )?;
+    let mut create = tokio::process::Command::from(vigilo_command(
         &fixture.config,
-        RunCreateInput {
-            default_execution_alias: SHARD_ALIAS,
-            shard_assignment_policy: "single-default",
-            agent_url: &fixture.agent.url,
-            profile_id: "e2e_creation_recovery",
-            case_count: 1,
-            case_mode: CaseMode::Passing,
-            evaluator_ref: SENTIMENT_EVALUATOR_REF,
-        },
-    )?;
-    remove_seed_status_failure(&fixture.primary).await?;
-    if !recoverable_output.status.success() {
-        anyhow::bail!(
-            "recoverable run create failed with status {}\nstdout:\n{}\nstderr:\n{}",
-            recoverable_output.status,
-            String::from_utf8_lossy(&recoverable_output.stdout),
-            String::from_utf8_lossy(&recoverable_output.stderr)
-        );
-    }
-    let recoverable_payload: Value = serde_json::from_slice(&recoverable_output.stdout)?;
-    let recoverable_run_id = Uuid::parse_str(
-        recoverable_payload["data"]["run_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("recoverable create response omitted data.run_id"))?,
-    )?;
-    assert_eq!(recoverable_payload["data"]["status"], "creating");
+        SHARD_ALIAS,
+        "single-default",
+    ));
+    let mut child = create
+        .kill_on_drop(true)
+        .args([
+            "run",
+            "create",
+            "--profile-file",
+            path_arg(&inputs.profile)?,
+            "--dataset-file",
+            path_arg(&inputs.dataset)?,
+        ])
+        .spawn()?;
+
+    let checkpoint_pid = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, i32>(
+                "SELECT pid FROM pg_stat_activity
+                 WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))",
+            )
+            .bind(barrier_pid)
+            .fetch_optional(&fixture.primary)
+            .await?;
+            if let Some(pid) = waiting {
+                return Ok::<_, anyhow::Error>(pid);
+            }
+            anyhow::ensure!(
+                child.try_wait()?.is_none(),
+                "submission exited before checkpoint"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    let (run, owner, generation): (Uuid, Uuid, i64) = sqlx::query_as(
+        "SELECT r.id, r.coordinator_id, p.generation FROM runs r JOIN run_plans p ON p.run_id=r.id
+         WHERE r.evaluation_profile_id=$1 AND r.status='creating'",
+    )
+    .bind(profile_id)
+    .fetch_one(&fixture.primary)
+    .await?;
+    let checkpoint = || {
+        sqlx::query_as::<_, (i32, i32, Value)>(
+            "SELECT admission_cursor, chunk_cursor, admission_state FROM run_plans WHERE run_id=$1",
+        )
+        .bind(run)
+        .fetch_one(&fixture.primary)
+    };
+    let local_seed = || {
+        sqlx::query_as::<_, (Uuid, i16, i32, i32, Value, Value)>(
+            "SELECT c.id,c.run_shard,c.ordinal_start,c.ordinal_end,to_jsonb(s)-'updated_at',to_jsonb(a)
+             FROM run_chunks c JOIN run_snapshots s USING(run_id,run_shard)
+             JOIN local_shard_admissions a USING(run_id,run_shard)
+             WHERE c.run_id=$1 ORDER BY c.run_shard,c.ordinal_start",
+        )
+        .bind(run)
+        .fetch_all(&fixture.shard)
+    };
+    let routes = || {
+        sqlx::query_as::<_, (i16, String, String)>(
+            "SELECT run_shard,database_alias,status FROM shard_placements WHERE run_id=$1 ORDER BY run_shard",
+        )
+        .bind(run)
+        .fetch_all(&fixture.primary)
+    };
+    let committed = local_seed().await?;
+    assert_eq!(committed.len(), 1);
+    assert_eq!((committed[0].1, committed[0].2, committed[0].3), (0, 0, 1));
+    assert_eq!(checkpoint().await?, (0, 1, json!({})));
+    assert_eq!(dispatch_cursor_count(&fixture.primary, run).await?, 0);
+    assert!(routes().await?.is_empty());
     assert_eq!(
-        recoverable_payload["meta"]["creation_placements_pending"],
-        1
-    );
-    assert_eq!(
-        run_chunk_count(&fixture.shard, recoverable_run_id).await?,
-        1
-    );
-    assert_eq!(
-        dispatch_cursor_count(&fixture.primary, recoverable_run_id).await?,
+        outbox_event_count(&fixture.shard, run, "run.chunk.ready").await?,
         0
     );
 
+    child.kill().await?;
+    // PostgreSQL can keep running a blocked statement after its client exits.
+    // Terminate the observed backend before opening the barrier so the
+    // unacknowledged checkpoint is guaranteed to roll back.
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1, 5000)")
+        .bind(checkpoint_pid)
+        .fetch_one(&fixture.primary)
+        .await?;
+    if !terminated {
+        let running: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)")
+                .bind(checkpoint_pid)
+                .fetch_one(&fixture.primary)
+                .await?;
+        assert!(
+            !running,
+            "checkpoint backend must exit before releasing the barrier"
+        );
+    }
+    barrier.rollback().await?;
+    sqlx::raw_sql(
+        "DROP TRIGGER hold_admission_checkpoint ON run_plans;
+         DROP FUNCTION hold_admission_checkpoint();",
+    )
+    .execute(&fixture.primary)
+    .await?;
     let creating_status = run_vigilo_json(
         &fixture.config,
         SHARD_ALIAS,
         "single-default",
-        ["run", "status", &recoverable_run_id.to_string()],
+        ["run", "status", &run.to_string()],
     )?;
     assert_eq!(creating_status["data"]["status"], "creating");
     assert_eq!(
@@ -130,24 +221,66 @@ async fn run_creation_recovers_after_cross_database_seed_status_failure() -> any
         1
     );
 
-    expire_run_creation_lease(&fixture.primary, recoverable_run_id).await?;
-    run_vigilo_ok(
-        &fixture.config,
+    let once = || {
+        run_vigilo_ok(
+            &fixture.config,
+            SHARD_ALIAS,
+            "single-default",
+            ["coordinator", "once"],
+        )
+    };
+    once()?;
+    let retained: (Uuid, bool) = sqlx::query_as(
+        "SELECT coordinator_id, coordinator_leased_until > now() FROM runs WHERE id=$1",
+    )
+    .bind(run)
+    .fetch_one(&fixture.primary)
+    .await?;
+    assert_eq!(retained, (owner, true));
+    assert_eq!(checkpoint().await?, (0, 1, json!({})));
+    assert_eq!(dispatch_cursor_count(&fixture.primary, run).await?, 0);
+    assert!(routes().await?.is_empty());
+    assert_eq!(local_seed().await?, committed);
+
+    expire_run_creation_lease(&fixture.primary, run).await?;
+    once()?;
+    once()?;
+    let (cursor, total, state) = checkpoint().await?;
+    assert_eq!((cursor, total), (1, 1));
+    assert_eq!(state["0"]["chunk_count"], 1);
+    assert_eq!(local_seed().await?, committed);
+    assert_eq!(run_chunk_count(&fixture.shard, run).await?, 1);
+    assert_eq!(dispatch_cursor_count(&fixture.primary, run).await?, 1);
+    assert_eq!(
+        routes().await?,
+        vec![(0, SHARD_ALIAS.into(), "active".into())]
+    );
+    assert_eq!(
+        run_creation_placement_state(&fixture.primary, run, SHARD_ALIAS).await?,
+        ("seeded".to_string(), generation + 1)
+    );
+    assert_eq!(
+        outbox_event_count(&fixture.shard, run, "run.chunk.ready").await?,
+        1
+    );
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.started").await?,
+        1
+    );
+    let terminal = drive_run_to_status(
+        &fixture,
+        "replay interrupted admission",
         SHARD_ALIAS,
         "single-default",
-        ["coordinator", "once"],
-    )?;
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(terminal["data"]["gate_status"], "pass");
+    assert_eq!(execution_count(&fixture.shard, run).await?, 1);
     assert_eq!(
-        run_chunk_count(&fixture.shard, recoverable_run_id).await?,
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
         1
-    );
-    assert_eq!(
-        dispatch_cursor_count(&fixture.primary, recoverable_run_id).await?,
-        1
-    );
-    assert_eq!(
-        run_creation_placement_state(&fixture.primary, recoverable_run_id, SHARD_ALIAS).await?,
-        ("seeded".to_string(), 3)
     );
 
     Ok(())
@@ -2163,10 +2296,10 @@ async fn run_creation_placement_state(
     db: &PgPool,
     run_id: Uuid,
     database_alias: &str,
-) -> anyhow::Result<(String, i32)> {
-    Ok(sqlx::query_as::<_, (String, i32)>(
+) -> anyhow::Result<(String, i64)> {
+    Ok(sqlx::query_as::<_, (String, i64)>(
         r#"
-        SELECT CASE WHEN admission_cursor=chunk_cursor THEN 'seeded' ELSE 'pending' END, generation::int
+        SELECT CASE WHEN admission_cursor=chunk_cursor THEN 'seeded' ELSE 'pending' END, generation
         FROM run_plans
         WHERE run_id = $1::uuid
           AND EXISTS(SELECT 1 FROM run_plan_shards WHERE run_id=$1 AND database_alias=$2)
