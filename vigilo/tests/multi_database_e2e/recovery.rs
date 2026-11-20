@@ -1,10 +1,182 @@
 //! Live recovery ownership through the public CLI.
-//! Covers admission after a delayed storage failure and resumption after an
-//! expired worker lease on a draining shard moves to another database.
+//! Exercises commit boundaries across databases and RabbitMQ, including
+//! recovery of expired worker leases on draining shards.
 use super::*;
 
 #[path = "../support/storage_proxy.rs"]
 pub(super) mod storage_proxy;
+
+#[tokio::test]
+async fn outbox_replays_confirmed_message_after_publisher_crash() -> anyhow::Result<()> {
+    use lapin::{
+        Connection,
+        ConnectionProperties,
+        options::{
+            BasicGetOptions,
+            BasicNackOptions,
+        },
+    };
+
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "e2e_outbox_recovery",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    // The publisher only reaches this update after RabbitMQ confirms its send.
+    interrupt_coordinator_commit(
+        &fixture,
+        &fixture.shard,
+        "outbox_events",
+        "NEW.event_type='run.chunk.ready' AND NEW.status='published'",
+    )
+    .await?;
+    let pending = || {
+        sqlx::query_as::<_, (Uuid, String, Value, Uuid, i32, bool)>(
+            "SELECT e.id,e.dedupe_key,e.payload,q.claim_token,q.publish_attempt_count,
+                    q.claimed_until > clock_timestamp()
+             FROM outbox_events e JOIN outbox_delivery_queue q ON q.event_id=e.id
+             WHERE e.aggregate_id=$1 AND e.event_type='run.chunk.ready'
+               AND e.status='pending' AND e.published_at IS NULL",
+        )
+        .bind(run)
+        .fetch_one(&fixture.shard)
+    };
+    let original = pending().await?;
+    assert_eq!((original.4, original.5), (1, true));
+
+    let broker = Connection::connect(
+        &fixture.config.messaging_url,
+        ConnectionProperties::default(),
+    )
+    .await?;
+    let channel = broker.create_channel().await?;
+    let queue = format!("vigilo.{}.worker", fixture.config.mq_namespace);
+    let first = channel
+        .basic_get(&queue, BasicGetOptions::default())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("confirmed message must survive the publisher crash"))?;
+    assert_eq!(
+        first.properties.message_id().as_ref().map(|id| id.as_str()),
+        Some(original.1.as_str())
+    );
+    assert_eq!(serde_json::from_slice::<Value>(&first.data)?, original.2);
+    assert_eq!(first.routing_key.as_str(), "run.chunk.ready");
+
+    let once = || {
+        run_vigilo_ok(
+            &fixture.config,
+            SHARD_ALIAS,
+            "single-default",
+            ["coordinator", "once"],
+        )
+    };
+    once()?;
+    assert_eq!(pending().await?, original);
+    assert!(
+        channel
+            .basic_get(&queue, BasicGetOptions::default())
+            .await?
+            .is_none()
+    );
+
+    let expired = sqlx::query(
+        "UPDATE outbox_delivery_queue
+         SET available_at=clock_timestamp()-interval '1 second',
+             claimed_until=clock_timestamp()-interval '1 second'
+         WHERE event_id=$1 AND claim_token=$2",
+    )
+    .bind(original.0)
+    .bind(original.3)
+    .execute(&fixture.shard)
+    .await?;
+    assert_eq!(expired.rows_affected(), 1);
+    once()?;
+    let second = channel
+        .basic_get(&queue, BasicGetOptions::default())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("replacement publisher must replay the event"))?;
+    assert_eq!(second.routing_key, first.routing_key);
+    assert_eq!(
+        second.properties.message_id(),
+        first.properties.message_id()
+    );
+    assert_eq!(second.data, first.data);
+    let published: Vec<(Uuid, String, Value, bool)> = sqlx::query_as(
+        "SELECT e.id,e.dedupe_key,e.payload,e.status='published' AND e.published_at IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM outbox_delivery_queue q WHERE q.event_id=e.id)
+         FROM outbox_events e WHERE e.aggregate_id=$1 AND e.event_type='run.chunk.ready'",
+    )
+    .bind(run)
+    .fetch_all(&fixture.shard)
+    .await?;
+    assert_eq!(
+        published,
+        vec![(original.0, original.1.clone(), original.2, true)]
+    );
+    assert!(
+        channel
+            .basic_get(&queue, BasicGetOptions::default())
+            .await?
+            .is_none()
+    );
+
+    // Give the normal worker both real copies, with their original properties.
+    for delivery in [first, second] {
+        delivery
+            .nack(BasicNackOptions {
+                multiple: false,
+                requeue: true,
+            })
+            .await?;
+    }
+    for _ in 0..2 {
+        run_vigilo_ok(
+            &fixture.config,
+            SHARD_ALIAS,
+            "single-default",
+            ["worker", "once"],
+        )?;
+    }
+    assert!(
+        channel
+            .basic_get(&queue, BasicGetOptions::default())
+            .await?
+            .is_none()
+    );
+    channel.close(200, "replay verified").await?;
+    broker.close(200, "replay verified").await?;
+
+    let attempts: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status::text,broker_message_id FROM execution_attempts WHERE run_id=$1",
+    )
+    .bind(run)
+    .fetch_all(&fixture.shard)
+    .await?;
+    assert_eq!(attempts, vec![("completed".into(), Some(original.1))]);
+    assert_eq!(execution_count(&fixture.shard, run).await?, 1);
+    let receipts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM run_chunk_settlements WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&fixture.shard)
+            .await?;
+    assert_eq!(receipts, 1);
+    once()?;
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
+        1
+    );
+    Ok(())
+}
 
 #[tokio::test]
 async fn aggregation_recovers_from_interrupted_page_and_committed_seal() -> anyhow::Result<()> {
@@ -153,19 +325,24 @@ async fn interrupt_coordinator_commit(
     table: &str,
     condition: &str,
 ) -> anyhow::Result<()> {
+    let mut barrier = db.begin().await?;
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *barrier)
+        .await?;
+    // Tests isolate schemas but share a database. The live backend PID keeps
+    // each advisory barrier separate even when multiple fault tests run.
+    sqlx::query("SELECT pg_advisory_xact_lock(42188,$1)")
+        .bind(blocker)
+        .execute(&mut *barrier)
+        .await?;
     sqlx::raw_sql(&format!(
         "CREATE FUNCTION hold_coordinator_commit() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN PERFORM pg_advisory_xact_lock(42188); RETURN NEW; END $$;
+         BEGIN PERFORM pg_advisory_xact_lock(42188,{blocker}); RETURN NEW; END $$;
          CREATE TRIGGER hold_coordinator_commit AFTER UPDATE ON {table}
          FOR EACH ROW WHEN ({condition}) EXECUTE FUNCTION hold_coordinator_commit();",
     ))
     .execute(db)
     .await?;
-    let mut barrier = db.begin().await?;
-    let blocker: i32 =
-        sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(42188)")
-            .fetch_one(&mut *barrier)
-            .await?;
     let mut command = tokio::process::Command::from(vigilo_command(
         &fixture.config,
         SHARD_ALIAS,
