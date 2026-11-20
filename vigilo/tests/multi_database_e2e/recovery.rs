@@ -7,6 +7,222 @@ use super::*;
 pub(super) mod storage_proxy;
 
 #[tokio::test]
+async fn aggregation_recovers_from_interrupted_page_and_committed_seal() -> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "e2e_aggregation_recovery",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    let once = || {
+        run_vigilo_ok(
+            &fixture.config,
+            SHARD_ALIAS,
+            "single-default",
+            ["coordinator", "once"],
+        )
+    };
+    once()?;
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["worker", "once"],
+    )?;
+
+    let checkpoint = || {
+        sqlx::query_as::<_, (bool, i32, i32, Option<Value>)>(
+            "SELECT sealed,settled_chunk_count,passed_execution_count,aggregation_state
+             FROM run_shard_summaries WHERE run_id=$1 AND run_shard=0",
+        )
+        .bind(run)
+        .fetch_one(&fixture.shard)
+    };
+    let receipt = || {
+        sqlx::query_as::<_, (Uuid, bool, Value)>(
+            "SELECT s.chunk_id,c.consumed,s.summary FROM run_chunk_settlements s
+             JOIN run_chunk_settlement_consumptions c USING(run_id,run_shard,chunk_id)
+             WHERE s.run_id=$1 AND s.run_shard=0",
+        )
+        .bind(run)
+        .fetch_one(&fixture.shard)
+    };
+    let original = checkpoint().await?;
+    assert_eq!(original, (false, 0, 0, None));
+    let (chunk_id, consumed, evidence) = receipt().await?;
+    assert!(!consumed);
+    assert_eq!(evidence["passed_execution_count"], 1);
+
+    interrupt_coordinator_commit(
+        &fixture,
+        &fixture.shard,
+        "run_chunk_settlement_consumptions",
+        "NEW.consumed AND NOT OLD.consumed",
+    )
+    .await?;
+    assert_eq!(checkpoint().await?, original);
+    assert_eq!(receipt().await?, (chunk_id, false, evidence.clone()));
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
+        0
+    );
+
+    // Commit the receipt page, leaving the canonical seal for another process.
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        [
+            "coordinator",
+            "--max-aggregation-pages-per-cycle",
+            "1",
+            "once",
+        ],
+    )?;
+    let (sealed, settled, passed, state) = checkpoint().await?;
+    assert_eq!((sealed, settled, passed), (false, 1, 1));
+    assert!(state.is_some());
+    assert_eq!(receipt().await?, (chunk_id, true, evidence.clone()));
+
+    // The remote shard seal commits before the coordinator updates the run.
+    interrupt_coordinator_commit(
+        &fixture,
+        &fixture.primary,
+        "runs",
+        "NEW.status='completed' AND OLD.status='finalizing'",
+    )
+    .await?;
+    let seal = checkpoint().await?;
+    assert_eq!((seal.0, seal.1, seal.2), (true, 1, 1));
+    let scorecards = || {
+        sqlx::query_scalar::<_, Value>("SELECT scorecard FROM run_scorecards WHERE run_id=$1")
+            .bind(run)
+            .fetch_all(&fixture.primary)
+    };
+    assert!(scorecards().await?.is_empty());
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
+        0
+    );
+
+    let expired = sqlx::query(
+        "UPDATE runs SET coordinator_leased_until=clock_timestamp()-interval '1 second'
+         WHERE id=$1 AND status='finalizing' AND coordinator_id IS NOT NULL",
+    )
+    .bind(run)
+    .execute(&fixture.primary)
+    .await?;
+    assert_eq!(expired.rows_affected(), 1);
+    once()?;
+    let persisted = scorecards().await?;
+    assert_eq!(persisted.len(), 1);
+    once()?;
+    assert_eq!(scorecards().await?, persisted);
+    assert_eq!(checkpoint().await?, seal);
+    assert_eq!(receipt().await?, (chunk_id, true, evidence));
+    assert_eq!(execution_count(&fixture.shard, run).await?, 1);
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
+        1
+    );
+    let status = run_vigilo_json(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["run", "status", &run.to_string()],
+    )?;
+    assert_eq!(status["data"]["status"], "completed");
+    assert_eq!(status["data"]["gate_status"], "pass");
+    assert_eq!(status["data"]["terminal_execution_count"], 1);
+    Ok(())
+}
+
+/// Abort a real coordinator process at a test-owned transaction barrier.
+async fn interrupt_coordinator_commit(
+    fixture: &E2eFixture,
+    db: &PgPool,
+    table: &str,
+    condition: &str,
+) -> anyhow::Result<()> {
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION hold_coordinator_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock(42188); RETURN NEW; END $$;
+         CREATE TRIGGER hold_coordinator_commit AFTER UPDATE ON {table}
+         FOR EACH ROW WHEN ({condition}) EXECUTE FUNCTION hold_coordinator_commit();",
+    ))
+    .execute(db)
+    .await?;
+    let mut barrier = db.begin().await?;
+    let blocker: i32 =
+        sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(42188)")
+            .fetch_one(&mut *barrier)
+            .await?;
+    let mut command = tokio::process::Command::from(vigilo_command(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+    ));
+    let mut child = command
+        .kill_on_drop(true)
+        .args(["coordinator", "once"])
+        .spawn()?;
+    let pid = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(pid) = sqlx::query_scalar::<_, i32>(
+                "SELECT pid FROM pg_stat_activity
+                 WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))",
+            )
+            .bind(blocker)
+            .fetch_optional(db)
+            .await?
+            {
+                return Ok::<_, anyhow::Error>(pid);
+            }
+            anyhow::ensure!(
+                child.try_wait()?.is_none(),
+                "coordinator exited before updating {table}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+
+    child.kill().await?;
+    // Keep the lock held until PostgreSQL aborts the disconnected transaction.
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1, 5000)")
+        .bind(pid)
+        .fetch_one(db)
+        .await?;
+    if !terminated {
+        let running: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)")
+                .bind(pid)
+                .fetch_one(db)
+                .await?;
+        assert!(
+            !running,
+            "checkpoint backend must exit before releasing the barrier"
+        );
+    }
+    barrier.rollback().await?;
+    sqlx::raw_sql(&format!(
+        "DROP TRIGGER hold_coordinator_commit ON {table}; DROP FUNCTION hold_coordinator_commit();",
+    ))
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn split_dispatch_replays_after_execution_commit_and_control_rollback() -> anyhow::Result<()>
 {
     let Some(fixture) = E2eFixture::setup().await? else {
