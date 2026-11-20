@@ -2,8 +2,9 @@
 import {readFile, readdir, writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {isDeepStrictEqual} from 'node:util';
 
-import {archiveBase, compareVersions, docsHome, releaseLine, versionPattern} from '../src/components/DocVersions/releases.mjs';
+import {archiveBase, compareVersions, docsHome, releaseLine, releaseMetaName, versionPattern} from '../src/components/DocVersions/releases.mjs';
 
 const linePattern = /^(?:0\.(0|[1-9]\d*)|[1-9]\d*)\.x$/;
 const shaPattern = /^[0-9a-f]{40}$/;
@@ -87,6 +88,35 @@ export async function writeRoutes(root, archiveVersion) {
   return routes.length;
 }
 
+function verifySnapshot(snapshot, wanted) {
+  if (snapshot.version !== wanted.version || snapshot.tag !== wanted.tag || snapshot.commit !== wanted.commit) {
+    throw new Error(`Snapshot identity mismatch: ${wanted.tag}`);
+  }
+}
+
+function verifyDocsVersion(html, expectedVersion, description) {
+  const versions = [];
+  for (const [tag] of html.matchAll(/<meta\s+[^>]*>/gi)) {
+    const attrs = Object.fromEntries(
+      Array.from(tag.matchAll(/\s([a-z]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi),
+        ([, name, doubleQuoted, singleQuoted, bare]) => [name.toLowerCase(), doubleQuoted ?? singleQuoted ?? bare]),
+    );
+    if (attrs.name === releaseMetaName) versions.push(attrs.content);
+  }
+  if (versions.length !== 1 || versions[0] !== expectedVersion) {
+    throw new Error(`${description} does not serve expected release ${expectedVersion}`);
+  }
+}
+
+export function verifyDeployment(expected, version, {manifest, snapshot, archivedDocs, latestDocs}) {
+  if (!isDeepStrictEqual(manifest, expected)) throw new Error('Public release manifest differs from deployment');
+  const archived = expected.releases.find(release => release.version === version);
+  if (!archived) throw new Error(`Release ${version} is missing from the deployment manifest`);
+  verifySnapshot(snapshot, archived);
+  verifyDocsVersion(archivedDocs, version, 'Archived docs');
+  verifyDocsVersion(latestDocs, expected.releases[0].version, 'Live docs');
+}
+
 async function readJson(file) {
   return JSON.parse(await readFile(file, 'utf8'));
 }
@@ -94,8 +124,15 @@ async function readJson(file) {
 async function main([command, ...args]) {
   if (command === 'routes') {
     const [root = 'build'] = args;
-    const archive = process.env.VIGILO_DOCS_ARCHIVE === '1' ? process.env.VIGILO_DOCS_RELEASE : undefined;
+    const release = process.env.VIGILO_DOCS_RELEASE;
+    const archive = process.env.VIGILO_DOCS_ARCHIVE === '1' ? release : undefined;
     const count = await writeRoutes(root, archive);
+    if (release) {
+      for (const route of ['docs', docsHome.slice(1)]) {
+        const html = await readFile(path.join(root, route, 'index.html'), 'utf8');
+        verifyDocsVersion(html, release, route);
+      }
+    }
     if (archive) {
       const search = await readJson(path.join(root, 'search-index.json'));
       const documents = search.flatMap(group => group.documents);
@@ -116,11 +153,16 @@ async function main([command, ...args]) {
     await writeFile(output, JSON.stringify(identity(version, tag, commit)) + '\n');
   } else if (command === 'verify-snapshot') {
     const [file, version, tag, commit] = args;
-    const snapshot = await readJson(file);
-    const wanted = identity(version, tag, commit);
-    if (snapshot.version !== wanted.version || snapshot.tag !== wanted.tag || snapshot.commit !== wanted.commit) {
-      throw new Error(`Snapshot identity mismatch: ${tag}`);
-    }
+    verifySnapshot(await readJson(file), identity(version, tag, commit));
+  } else if (command === 'verify-deployment') {
+    const [expected, version, manifest, snapshot, archive, latest] = args;
+    verifyDeployment(await readJson(expected), version, {
+      manifest: await readJson(manifest),
+      snapshot: await readJson(snapshot),
+      archivedDocs: await readFile(archive, 'utf8'),
+      latestDocs: await readFile(latest, 'utf8'),
+    });
+    console.log(`Public documentation verified for ${version}`);
   } else {
     throw new Error(`Unknown docs release command: ${command}`);
   }

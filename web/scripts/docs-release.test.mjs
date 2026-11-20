@@ -4,7 +4,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {test} from 'node:test';
 
-import {identity, mergeManifest, writeRoutes} from './docs-release.mjs';
+import {identity, mergeManifest, verifyDeployment, writeRoutes} from './docs-release.mjs';
 import {archiveBase, destination, docsPath, releaseLine, releaseStatus} from '../src/components/DocVersions/releases.mjs';
 
 const release = (version, digit = 'a') => identity(version, `vigilo/v${version}`, digit.repeat(40));
@@ -56,6 +56,31 @@ test('switching preserves an available page and falls back inside the selected r
   assert.equal(docsPath('/docs/a/', '/'), '/docs/a');
   assert.equal(destination(base, '/docs/a', ['/docs/a'], '#anchor'), base + '/docs/a/#anchor');
   assert.equal(destination(base, '/docs/missing', ['/docs/a'], '#anchor'), base + '/docs/guides/');
+});
+
+test('public deployment verifies the archive and keeps newer docs live for an older patch', () => {
+  const newest = release('2.10.0');
+  const patch = release('1.9.1');
+  const expected = mergeManifest({ ...empty, releases: [newest] }, patch, []).manifest;
+  const actual = {
+    manifest: structuredClone(expected),
+    snapshot: patch,
+    archivedDocs: '<meta name=vigilo-docs-version content=1.9.1>',
+    latestDocs: '<meta content="2.10.0" name="vigilo-docs-version">',
+  };
+  assert.doesNotThrow(() => verifyDeployment(expected, patch.version, actual));
+  assert.throws(() => verifyDeployment(expected, patch.version, {
+    ...actual, manifest: {...expected, releases: [newest]},
+  }), /Public release manifest/);
+  assert.throws(() => verifyDeployment(expected, patch.version, {
+    ...actual, snapshot: release(patch.version, 'b'),
+  }), /Snapshot identity/);
+  assert.throws(() => verifyDeployment(expected, patch.version, {
+    ...actual, archivedDocs: actual.latestDocs,
+  }), /Archived docs/);
+  assert.throws(() => verifyDeployment(expected, patch.version, {
+    ...actual, latestDocs: actual.archivedDocs,
+  }), /Live docs/);
 });
 
 test('archive route validation catches a compiled link escaping the snapshot', async () => {

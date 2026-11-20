@@ -4,6 +4,7 @@ import Link from '@docusaurus/Link';
 import Head from '@docusaurus/Head';
 import Layout from '@theme/Layout';
 import useBaseUrl from '@docusaurus/useBaseUrl';
+import {DocReleaseMetadata} from '@site/src/components/DocVersions';
 import {docsHome} from '@site/src/components/DocVersions/releases.mjs';
 
 export default function DocsHomeRedirect(): ReactNode {
@@ -17,6 +18,7 @@ export default function DocsHomeRedirect(): ReactNode {
     <Layout
       title="Guides"
       description="Agent Vigilo guides for getting started, creating evaluators, and publishing evaluator artifacts.">
+      <DocReleaseMetadata />
       <Head>
         <link rel="canonical" href={canonical} />
         <meta name="robots" content="noindex,follow" />

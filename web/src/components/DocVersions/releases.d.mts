@@ -1,6 +1,7 @@
 export const versionPattern: RegExp;
 export const docsHome: string;
 export const manifestPath: string;
+export const releaseMetaName: string;
 export function releaseLine(version: string): string;
 export function releaseStatus(version: string, latest: string | undefined, archivedLines: string[]): 'Latest' | 'Archived' | undefined;
 export function archiveBase(version: string): string;

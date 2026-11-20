@@ -6,6 +6,7 @@ without network access, then its library/binary tests and operation doctests run
 from an extracted temporary directory outside the checkout. No publication occurs.
 """
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -27,21 +28,29 @@ def verify(root, allow_dirty=False):
     if allow_dirty:
         command.append("--allow-dirty")
     subprocess.run(command, cwd=root, check=True)
+    artifact = target / "package" / f"{identity}.crate"
     with tempfile.TemporaryDirectory(prefix="vigilo-package-") as temporary:
-        with tarfile.open(target / "package" / f"{identity}.crate", "r:gz") as archive:
+        with tarfile.open(artifact, "r:gz") as archive:
             archive.extractall(temporary, filter="data")
         source = Path(temporary) / identity
         arguments = ["cargo", "test", "--locked", "--offline", "--target-dir", str(target)]
         subprocess.run([*arguments, "--lib", "--bins"], cwd=source, check=True)
         subprocess.run([*arguments, "--doc", "operations"], cwd=source, check=True)
+    return artifact
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-dirty", action="store_true",
                         help="permit packaging local uncommitted changes")
+    parser.add_argument("--checksum-output", type=Path,
+                        help="write the verified crate's SHA-256 checksum")
     arguments = parser.parse_args()
-    verify(Path(__file__).resolve().parents[2], arguments.allow_dirty)
+    artifact = verify(Path(__file__).resolve().parents[2], arguments.allow_dirty)
+    if arguments.checksum_output:
+        with artifact.open("rb") as package:
+            checksum = hashlib.file_digest(package, "sha256").hexdigest()
+        arguments.checksum_output.write_text(f"{checksum}\n")
 
 
 if __name__ == "__main__":

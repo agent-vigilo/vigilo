@@ -77,16 +77,19 @@ only the latest release. Release History links to exact snapshots, including
 earlier beta releases.
 
 [Publish Vigilo Crate](../.github/workflows/publish-crate.yaml) calls
-[Deploy Web](../.github/workflows/deploy-web.yaml) after publishing succeeds.
-Deploy Web confirms the published release and builds with the tagged
-commit's npm lockfile. It writes the snapshot's identity marker after its
+[Deploy Web](../.github/workflows/deploy-web.yaml) after verifying the
+published crate's checksum. Build validates the current site and archive with
+the version from the crate manifest. Deploy Web confirms publication and builds
+with the tagged commit's npm lockfile. It writes the snapshot's identity marker after its
 files upload and updates `docs-versions.json` last. The default docs move
 forward in release order. An older-line patch updates its line in the picker
 and leaves the default docs on the newer release.
 
 The workflow uses the configured AWS role through GitHub OIDC. It needs
 `s3:GetObject` for the release manifest and snapshot markers, the existing
-site upload permissions, and CloudFront invalidation access. The static
+site upload permissions, and CloudFront invalidation access, including
+`cloudfront:GetInvalidation`. The workflow waits for invalidation and checks the
+public manifest, exact snapshot, and live docs before it succeeds. The static
 site routes directory URLs to their `index.html` under both `/docs/` and
 `/releases/`. The root site sync excludes that archive prefix.
 

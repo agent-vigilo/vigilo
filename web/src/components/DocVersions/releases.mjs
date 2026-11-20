@@ -2,6 +2,7 @@
 export const versionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 export const docsHome = '/docs/guides/';
 export const manifestPath = '/docs-versions.json';
+export const releaseMetaName = 'vigilo-docs-version';
 
 export function releaseLine(version) {
   const [major, minor] = version.split('.');

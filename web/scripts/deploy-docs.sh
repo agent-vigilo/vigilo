@@ -116,4 +116,19 @@ fi
 
 aws s3api put-object --bucket "$bucket" --key docs-versions.json --body "$state/next.json" \
   --content-type application/json --cache-control 'public,max-age=0,must-revalidate' > /dev/null
-aws cloudfront create-invalidation --distribution-id "$distribution" --paths '/*'
+invalidation_id="$(aws cloudfront create-invalidation --distribution-id "$distribution" --paths '/*' \
+  --query 'Invalidation.Id' --output text)"
+aws cloudfront wait invalidation-completed --distribution-id "$distribution" --id "$invalidation_id"
+
+fetch_public() {
+  local key=$1 output=$2
+  curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+    --max-time 15 --retry-max-time 45 --output "$output" "https://$bucket/$key"
+}
+
+fetch_public docs-versions.json "$state/public-manifest.json"
+fetch_public "$prefix/snapshot.json" "$state/public-snapshot.json"
+fetch_public "$prefix/docs/guides/" "$state/public-archive.html"
+fetch_public docs/ "$state/public-latest.html"
+node "$tooling" verify-deployment "$state/next.json" "$version" "$state/public-manifest.json" \
+  "$state/public-snapshot.json" "$state/public-archive.html" "$state/public-latest.html"

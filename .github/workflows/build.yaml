@@ -82,7 +82,7 @@ jobs:
       - name: Install cargo-llvm-cov
         if: matrix.coverage
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Test core evaluator release policy
+      - name: Test release policies
         run: python3 -m unittest discover -s scripts/releases -p 'test_*.py'
       - name: Run service-free tests
         if: ${{ !matrix.coverage }}
@@ -540,9 +540,12 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run test:docs
-      - run: npm run build
-      - name: Verify versioned documentation build
-        env:
-          VIGILO_DOCS_RELEASE: 0.1.0
-          VIGILO_DOCS_ARCHIVE: '1'
-        run: npm run build
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify current and archived docs for the crate version
+        run: |
+          VIGILO_DOCS_RELEASE="$(python3 ../scripts/releases/crate.py)"
+          export VIGILO_DOCS_RELEASE
+          npm run build
+          VIGILO_DOCS_ARCHIVE=1 npm run build

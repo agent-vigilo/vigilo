@@ -1,9 +1,10 @@
 import {useEffect, useRef, useState, type MouseEvent, type ReactNode} from 'react';
 import * as Popover from '@radix-ui/react-popover';
+import Head from '@docusaurus/Head';
 import {useLocation} from '@docusaurus/router';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 
-import {archiveBase, destination, docsHome, docsPath, manifestPath, releaseLine, releaseStatus, versionPattern} from './releases.mjs';
+import {archiveBase, destination, docsHome, docsPath, manifestPath, releaseMetaName, releaseLine, releaseStatus, versionPattern} from './releases.mjs';
 import styles from './styles.module.css';
 
 type Release = {version: string};
@@ -55,6 +56,12 @@ async function switchRelease(event: MouseEvent<HTMLAnchorElement>, base: string,
     // The release landing page stays available if its route list cannot be loaded.
   }
   window.location.assign(target);
+}
+
+export function DocReleaseMetadata(): ReactNode {
+  const {siteConfig} = useDocusaurusContext();
+  const release = siteConfig.customFields?.docsRelease as string | null;
+  return release ? <Head><meta name={releaseMetaName} content={release} /></Head> : null;
 }
 
 export function DocVersionPicker(): ReactNode {
