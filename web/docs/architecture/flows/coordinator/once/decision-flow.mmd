@@ -27,7 +27,7 @@ flowchart TD
     FinalizeCandidate{Restricted discovery finds candidate within budget?}
     ReadSummaries[Read candidate summaries in one batch per database]
     FinalizeClaim{Candidate has exact valid seals?}
-    FinalizeRun[Restricted lease claim; scope atomic counts, gate and completion event]
+    FinalizeRun[Claim lease, lock run and recheck expiry before atomic result and event write]
     FinalizeIsolated[Scope deferral heartbeat and retain healthy summary reads]
     Aggregate[Restricted ready-shard discovery with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}

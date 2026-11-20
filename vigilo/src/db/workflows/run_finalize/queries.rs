@@ -105,17 +105,18 @@ pub(super) async fn finalize_claimed_run(
     let scorecard = serde_json::to_value(&summary.scorecard)?;
     let mut tx = db.begin().await?;
     crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
-    // Preserve the former standalone statement's clock boundary: BEGIN and
-    // scope installation must not make an already-expired lease look current.
+    // Reject leases that have already expired, then recheck the wall clock
+    // after the row lock. Waiting for the lock can consume the remaining lease.
     let finalized = sqlx::query_as::<_, FinalizedRun>(
         r#"
-        WITH run_row AS (
+        WITH locked_run AS MATERIALIZED (
             SELECT
                 id,
                 tenant_id,
                 run_key,
                 expected_execution_count,
-                aggregation_policy_hash
+                aggregation_policy_hash,
+                coordinator_leased_until
             FROM runs
             WHERE id = $1::uuid
               AND status = 'finalizing'::run_status
@@ -136,6 +137,10 @@ pub(super) async fn finalize_claimed_run(
                   )
               )
             FOR UPDATE
+        ),
+        run_row AS (
+            SELECT * FROM locked_run
+            WHERE coordinator_leased_until > clock_timestamp()
         ),
         inserted_scorecard AS (
             INSERT INTO run_scorecards (

@@ -282,7 +282,7 @@ async fn finalize_control_cancellation(
 
     let mut tx = db.begin().await?;
     crate::db::scope::set_system(&mut tx, state.tenant_id, state.run.id).await?;
-    let run = update_run_cancelled(
+    let (run, summary_committed) = update_run_cancelled(
         &mut tx,
         state.run.id,
         &progress,
@@ -300,7 +300,9 @@ async fn finalize_control_cancellation(
         attempts_cancelled: counts.attempts_cancelled,
         outbox_events_enqueued: 0,
     };
-    outcome.outbox_events_enqueued = enqueue_cancelled_event(&mut tx, &outcome).await?;
+    if summary_committed {
+        outcome.outbox_events_enqueued = enqueue_cancelled_event(&mut tx, &outcome).await?;
+    }
 
     tx.commit().await?;
     Ok(outcome)

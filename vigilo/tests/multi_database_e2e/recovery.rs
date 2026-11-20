@@ -7,6 +7,200 @@ use super::*;
 pub(super) mod storage_proxy;
 
 #[tokio::test]
+async fn split_dispatch_replays_after_execution_commit_and_control_rollback() -> anyhow::Result<()>
+{
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let once = ["coordinator", "--max-dispatch-per-cycle", "1", "once"];
+    for (cases, dispatched_before, expected_status) in [(1, 0, "pending"), (101, 1, "running")] {
+        let run = create_run(
+            &fixture.config,
+            RunCreateInput {
+                default_execution_alias: SHARD_ALIAS,
+                shard_assignment_policy: "single-default",
+                agent_url: &fixture.agent.url,
+                profile_id: "dispatch_commit_handoff",
+                case_count: cases,
+                case_mode: CaseMode::Passing,
+                evaluator_ref: SENTIMENT_EVALUATOR_REF,
+            },
+        )?;
+        if dispatched_before != 0 {
+            run_vigilo_ok(&fixture.config, SHARD_ALIAS, "single-default", once)?;
+        }
+        let events = || {
+            sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id, dedupe_key FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.chunk.ready' ORDER BY id",
+            )
+            .bind(run)
+            .fetch_all(&fixture.shard)
+        };
+        assert_eq!(events().await?.len(), dispatched_before);
+        sqlx::raw_sql(
+            "CREATE FUNCTION reject_dispatch_cursor() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN RAISE EXCEPTION 'test interruption before control cursor commit'; END $$;
+             CREATE TRIGGER reject_dispatch_cursor BEFORE UPDATE ON run_shard_dispatch_cursors
+             FOR EACH ROW EXECUTE FUNCTION reject_dispatch_cursor();",
+        )
+        .execute(&fixture.primary)
+        .await?;
+        let interrupted = run_vigilo_output(&fixture.config, SHARD_ALIAS, "single-default", once);
+        sqlx::raw_sql(
+            "DROP TRIGGER reject_dispatch_cursor ON run_shard_dispatch_cursors;
+             DROP FUNCTION reject_dispatch_cursor();",
+        )
+        .execute(&fixture.primary)
+        .await?;
+        let interrupted = interrupted?;
+        assert!(!interrupted.status.success());
+        assert!(
+            [&interrupted.stdout, &interrupted.stderr]
+                .iter()
+                .any(|output| String::from_utf8_lossy(output)
+                    .contains("test interruption before control cursor commit")),
+            "{interrupted:?}"
+        );
+        let persisted = events().await?;
+        assert_eq!(persisted.len(), dispatched_before + 1);
+        let (status, open): (String, i64) = sqlx::query_as(
+            "SELECT status::text, (SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1 AND status='open') FROM runs WHERE id=$1",
+        )
+        .bind(run)
+        .fetch_one(&fixture.primary)
+        .await?;
+        assert_eq!((status.as_str(), open), (expected_status, 1));
+
+        // A fresh coordinator repairs control without creating new readiness.
+        run_vigilo_ok(&fixture.config, SHARD_ALIAS, "single-default", once)?;
+        assert_eq!(events().await?, persisted);
+        let (open, starts): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1 AND status='open'),
+                    (SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.started')",
+        )
+        .bind(run)
+        .fetch_one(&fixture.primary)
+        .await?;
+        assert_eq!((open, starts), (0, 1));
+        let terminal = drive_run_to_status(
+            &fixture,
+            "replay split dispatch",
+            SHARD_ALIAS,
+            "single-default",
+            run,
+            "completed",
+        )
+        .await?;
+        assert_eq!(terminal["data"]["gate_status"], "pass");
+        assert_eq!(execution_count(&fixture.shard, run).await?, cases as i64);
+        assert_eq!(events().await?, persisted);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn routed_cancellation_drains_cursor_after_dispatch_releases_claim() -> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "cancel_held_dispatch",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    let mut claim = fixture.primary.begin().await?;
+    let claimed: i16 = sqlx::query_scalar(
+        "SELECT run_shard FROM run_shard_dispatch_cursors
+         WHERE run_id=$1 AND status='open' FOR UPDATE SKIP LOCKED",
+    )
+    .bind(run)
+    .fetch_one(&mut *claim)
+    .await?;
+    assert_eq!(claimed, 0);
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *claim)
+        .await?;
+    let mut cancel = tokio::process::Command::from(vigilo_command(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+    ));
+    cancel
+        .kill_on_drop(true)
+        .args(["run", "cancel", &run.to_string()]);
+
+    let output = tokio::time::timeout(Duration::from_secs(30), async {
+        let release = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                     WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(holder)
+                .fetch_one(&fixture.primary)
+                .await?;
+                if waiting {
+                    let revoked: bool = sqlx::query_scalar(
+                        "SELECT execution_control='revoked' FROM runs WHERE id=$1",
+                    )
+                    .bind(run)
+                    .fetch_one(&fixture.primary)
+                    .await?;
+                    assert!(
+                        revoked,
+                        "cancellation must commit revocation before waiting on the cursor"
+                    );
+                    return claim.rollback().await;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let (output, ()) = tokio::try_join!(
+            async { Ok::<_, anyhow::Error>(cancel.output().await?) },
+            async {
+                release.await?;
+                Ok::<_, anyhow::Error>(())
+            }
+        )?;
+        Ok::<_, anyhow::Error>(output)
+    })
+    .await??;
+    assert!(output.status.success(), "{output:?}");
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+    let (status, open, cancelled_events): (String, i64, i64) = sqlx::query_as(
+        "SELECT status::text,
+           (SELECT count(*) FROM run_shard_dispatch_cursors WHERE run_id=$1 AND status='open'),
+           (SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.cancelled')
+         FROM runs WHERE id=$1",
+    )
+    .bind(run)
+    .fetch_one(&fixture.primary)
+    .await?;
+    assert_eq!(
+        (status.as_str(), open, cancelled_events),
+        ("cancelled", 0, 1)
+    );
+    assert_eq!(
+        run_chunk_status_count(&fixture.shard, run, "cancelled").await?,
+        1
+    );
+    assert_eq!(execution_count(&fixture.shard, run).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn draining_shard_recovers_expired_lease_and_resumes_on_target() -> anyhow::Result<()> {
     let Some(fixture) = E2eFixture::setup().await? else {
         return Ok(());

@@ -270,8 +270,9 @@ Finalization fans in:
   bounds candidate inspections, not guaranteed successful finalizations; the
   default is `64`.
 - The control database claims the run without waiting behind active dispatch
-  lifecycle locks. The global outcome and `run.completed` event are written
-  only while that coordinator still owns an unexpired finalization lease.
+  lifecycle locks. The final write rechecks expiry after locking the run row.
+  A coordinator whose lease expired while waiting leaves the outcome for a
+  later claim.
 - The coordinator verifies every shard scorecard has the same policy hash and gate set, merges exact counters, evaluates run gates, and atomically stores `run_scorecards`, `runs.gate_status`, and the completion event.
 - A failed placement read defers that run without discarding summaries already
   read from healthy placements. The run cannot finalize until every routed

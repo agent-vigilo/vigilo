@@ -768,6 +768,137 @@ async fn colocated_dispatch_progresses_when_all_connections_hold_claims(pool: Pg
 }
 
 #[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn revocation_fences_dispatch_holding_cursor_without_run_lock(pool: PgPool) {
+    use crate::{
+        db::workflows::run_control,
+        operations::ExecutionControl,
+    };
+
+    for running in [false, true] {
+        let run = seed_pending_run(&pool, &[(0, 1)]).await;
+        if running {
+            mark_run_running(&pool, run).await;
+        }
+        let mut claim = claim_next_dispatch_route(&pool, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.route.run_id, run);
+
+        // Claim the cursor first, then commit the public control intent on an
+        // independent connection before dispatch can lock the parent run.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_control::request(&pool, run, ExecutionControl::Revoked),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            prepare_dispatch_run_snapshot_with(
+                &mut claim.control_tx,
+                &claim.route,
+                Uuid::now_v7(),
+                60,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        claim.control_tx.rollback().await.unwrap();
+        assert!(
+            claim_next_dispatch_route(&pool, &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(run_started_event_count(&pool, run).await, 0);
+        assert_eq!(chunk_ready_event_count(&pool, run).await, 0);
+        assert_eq!(dispatched_chunk_count(&pool, run, 0).await, 0);
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn revocation_waits_for_inflight_dispatch_then_stops_next_window(pool: PgPool) {
+    use crate::{
+        db::workflows::run_control,
+        operations::ExecutionControl,
+    };
+
+    let run = seed_pending_run(&pool, &[(0, 2)]).await;
+    let router = fixed_dispatch_router(&pool, 5);
+    let mut claim = claim_next_dispatch_route(&pool, &[])
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot =
+        prepare_dispatch_run_snapshot_with(&mut claim.control_tx, &claim.route, Uuid::now_v7(), 60)
+            .await
+            .unwrap()
+            .unwrap();
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *claim.control_tx)
+        .await
+        .unwrap();
+    let execution = router
+        .execution_route_from_placements(&snapshot.shard_placement, &snapshot.database_placement)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let revoke = run_control::request(&pool, run, ExecutionControl::Revoked);
+        let finish_dispatch = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                     WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(holder)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            dispatch_admitted_run_window(
+                &router,
+                claim.control_tx,
+                &execution,
+                1,
+                &claim.route,
+                &snapshot,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        };
+        let (revoked, dispatched) = tokio::join!(revoke, finish_dispatch);
+        assert_eq!(
+            revoked.unwrap().execution_control,
+            ExecutionControl::Revoked
+        );
+        assert_eq!(dispatched.chunks_marked_dispatched, 1);
+        assert!(dispatched.has_remaining_chunks);
+    })
+    .await
+    .unwrap();
+    assert_eq!(cursor_status(&pool, run, 0).await, "open");
+    assert!(
+        claim_next_dispatch_route(&pool, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(run_started_event_count(&pool, run).await, 1);
+    assert_eq!(chunk_ready_event_count(&pool, run).await, 1);
+    assert_eq!(dispatched_chunk_count(&pool, run, 0).await, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn running_dispatch_does_not_wait_on_parent_run_share_lock(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1)]).await;

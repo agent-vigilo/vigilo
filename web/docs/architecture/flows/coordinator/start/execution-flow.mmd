@@ -101,7 +101,8 @@ sequenceDiagram
             Vigilo->>ControlDB: Read scoped run placements, commit before remote I/O
             Vigilo->>ExecutionDB: Read scoped shard-summary batch per database
             alt Summary reads succeed and all shard summaries are sealed and valid
-                Vigilo->>ControlDB: Claim through restricted lease function, write fenced global result
+                Vigilo->>ControlDB: Claim through restricted lease function
+                Vigilo->>ControlDB: Lock run, recheck lease expiry and commit result with completion event
                 ControlDB-->>Vigilo: Finalization count
             else Placement read fails or summary is unsealed or invalid
                 Vigilo->>ControlDB: Scoped candidate heartbeat update, release transaction

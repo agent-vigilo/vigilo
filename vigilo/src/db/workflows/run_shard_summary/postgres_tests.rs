@@ -814,6 +814,23 @@ async fn undispatched_cancellation_settles_without_promoting_unfinished_evidence
         .unwrap();
     assert!(again.already_cancelled);
     assert_eq!(again.chunks_cancelled, 0);
+    let events: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.cancelled'",
+    )
+    .bind(run)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 1);
+    for (summary_field, event_field) in [
+        ("chunks_cancelled_by_request", "chunks_cancelled"),
+        ("executions_cancelled_by_request", "executions_cancelled"),
+        ("attempts_cancelled_by_request", "attempts_cancelled"),
+    ] {
+        assert_eq!(again.run.summary[summary_field], events[0][event_field]);
+    }
+    assert_eq!(again.run.summary, cancelled.run.summary);
+
     assert_eq!(
         super::advance_pending_summaries(&pool, &aggregation)
             .await

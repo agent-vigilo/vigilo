@@ -25,7 +25,7 @@ flowchart TD
     RecoveryIsolated[Count placement failure and continue aliases]
     Dispatch[Claim cursor, read scoped snapshot and route, fence admission, and commit with the cursor if colocated]
     DispatchIsolated[Leave cursor open and exclude failed alias]
-    Finalize[Scoped routed reads from discovery; scoped final commit from lease claim]
+    Finalize[Read routed summaries, claim lease and recheck expiry under run lock before final commit]
     FinalizeIsolated[Scope deferral heartbeat; inspect next run]
     Aggregate[Restricted ready-shard discovery with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}

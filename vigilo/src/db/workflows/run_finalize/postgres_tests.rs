@@ -259,6 +259,106 @@ async fn stale_or_expired_finalization_owner_cannot_commit(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn finalization_rechecks_lease_after_waiting_for_run_lock(pool: PgPool) {
+    use std::time::Duration;
+
+    let run = Uuid::now_v7();
+    let owner = Uuid::now_v7();
+    seed_run(&pool, run, Uuid::now_v7(), Uuid::now_v7(), "finalizing").await;
+    seed_dispatch_cursor(&pool, run, 0, "drained").await;
+    sqlx::query("UPDATE runs SET expected_execution_count=1 WHERE id=$1")
+        .bind(run)
+        .execute(&pool)
+        .await
+        .unwrap();
+    set_finalization_lease(&pool, run, owner, "4 seconds").await;
+    let summaries = [terminal_summary(run, 0, "completed")];
+
+    let mut blocker = pool.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid() FROM runs WHERE id=$1 FOR UPDATE")
+        .bind(run)
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+
+    let (old, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+        let release = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+                     AND $1=ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(pid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            sqlx::query(
+                "SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM coordinator_leased_until
+                   - clock_timestamp()))::double precision + 0.01) FROM runs WHERE id=$1",
+            )
+            .bind(run)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+            blocker.commit().await.unwrap();
+        };
+        tokio::join!(
+            finalize_claimed_run_from_summaries(
+                &pool,
+                Uuid::nil(),
+                run,
+                owner,
+                "aggregation-hash",
+                &summaries,
+            ),
+            release
+        )
+    })
+    .await
+    .expect("finalization must queue behind the held run lock");
+    assert!(
+        old.unwrap().is_none(),
+        "expired owner finalized after waiting"
+    );
+
+    let replacement = Uuid::now_v7();
+    assert!(
+        claim_finalization_candidate(&pool, run, replacement, 60)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        finalize_claimed_run_from_summaries(
+            &pool,
+            Uuid::nil(),
+            run,
+            replacement,
+            "aggregation-hash",
+            &summaries,
+        )
+        .await
+        .unwrap()
+        .is_some()
+    );
+    let effects: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM run_scorecards WHERE run_id=$1),
+                (SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.completed')",
+    )
+    .bind(run)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(effects, (1, 1));
+}
+
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx finalization tests"]
 async fn select_finalization_candidate_backlog_matches_control_cursor_gate(pool: PgPool) {
     let ready_run_id = Uuid::now_v7();

@@ -29,5 +29,5 @@ sequenceDiagram
     end
     Coordinator->>Control: Claim quiescent revocation and retain work identity
     Coordinator->>Execution: Scope cleanup, settle unfinished work and receipts
-    Coordinator->>Control: Scope final summary and event, acknowledge matching revision/token
+    Coordinator->>Control: Commit final summary and event once, acknowledge matching revision/token
     Note over Coordinator,Execution: A partition delays settlement, application is not a global stop.

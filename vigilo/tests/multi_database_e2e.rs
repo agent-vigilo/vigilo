@@ -753,6 +753,30 @@ async fn run_cancellation_updates_routed_storage() -> anyhow::Result<()> {
         0
     );
 
+    let state = || {
+        sqlx::query_as::<_, (Value, Value)>(
+            "SELECT r.summary,e.payload FROM runs r JOIN outbox_events e ON e.aggregate_id=r.id
+             WHERE r.id=$1 AND e.event_type='run.cancelled'",
+        )
+        .bind(cancel_run_id)
+        .fetch_one(&fixture.primary)
+    };
+    let committed = state().await?;
+    assert_eq!(committed.0["chunks_cancelled_by_request"], 1);
+    assert_eq!(committed.1["chunks_cancelled"], 1);
+    // Retry through a fresh process as if the first reply had been lost.
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["run", "cancel", &cancel_run_id.to_string()],
+    )?;
+    assert_eq!(state().await?, committed);
+    assert_eq!(
+        outbox_event_count(&fixture.primary, cancel_run_id, "run.cancelled").await?,
+        1
+    );
+
     Ok(())
 }
 

@@ -7,7 +7,7 @@ config:
     edgeLabelBackground: 'transparent'
 ---
 flowchart TD
-    Start([Cancel run]) --> Valid{Accessible active run?}
+    Start([Cancel run]) --> Valid{Accessible cancelable or cancelled run?}
     Valid -- No --> Error([Not found or terminal-state error])
     Valid -- Yes --> Commit[Atomically record revocation and destinations]
     Commit --> Deliver[Bounded direct DB delivery under claimed work identity]
@@ -18,5 +18,5 @@ flowchart TD
     Quiet -- No --> Finish[Workers stop new work and preserve safe results]
     Finish --> Pending
     Quiet -- Yes --> Settle[Scope claimed cleanup; cancel unfinished work and commit receipts]
-    Settle --> Event[Scope summary and event; acknowledge settlement claim]
+    Settle --> Event[Commit summary and event once, then acknowledge settlement]
     Event --> Done([Terminal cancellation])

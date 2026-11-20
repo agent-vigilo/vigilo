@@ -335,7 +335,9 @@ pub(super) async fn update_run_cancelled(
     counts: &CancellationCounts,
     execution_route_count: usize,
     shard_summary_count: usize,
-) -> anyhow::Result<Run> {
+) -> anyhow::Result<(Run, bool)> {
+    // The first committed cancellation records its counts with the event.
+    // A concurrent or retried request must preserve that record.
     let run = sqlx::query_as::<_, Run>(
         r#"
         UPDATE runs r
@@ -376,6 +378,7 @@ pub(super) async fn update_run_cancelled(
             coordinator_heartbeat_at = now(),
             updated_at = now()
         WHERE r.id = $1::uuid
+          AND r.summary->'cancellation_pending' IS DISTINCT FROM 'false'::jsonb
         RETURNING
             r.id, r.run_key, r.name, r.description,
             r.dataset_id, r.dataset_version,
@@ -428,10 +431,16 @@ pub(super) async fn update_run_cancelled(
     .bind(counts.attempts_cancelled)
     .bind(i32::try_from(execution_route_count)?)
     .bind(i32::try_from(shard_summary_count)?)
-    .fetch_one(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
-    Ok(run)
+    if let Some(run) = run {
+        return Ok((run, true));
+    }
+    let run = select_run_in_tx(tx, run_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("run '{}' disappeared during cancellation", run_id))?;
+    Ok((run, false))
 }
 
 pub(super) async fn select_run_execution_progress(
