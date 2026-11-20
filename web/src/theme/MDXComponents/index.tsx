@@ -1,3 +1,4 @@
+import Link from '@docusaurus/Link';
 import MDXComponents from '@theme-original/MDXComponents';
 
 import {
@@ -7,6 +8,7 @@ import {
 
 export default {
   ...MDXComponents,
+  Link,
   GlossarySection,
   GlossaryTerm,
 };

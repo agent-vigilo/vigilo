@@ -539,4 +539,10 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run test:docs
       - run: npm run build
+      - name: Verify versioned documentation build
+        env:
+          VIGILO_DOCS_RELEASE: 0.1.0
+          VIGILO_DOCS_ARCHIVE: '1'
+        run: npm run build

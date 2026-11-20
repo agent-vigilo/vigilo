@@ -537,7 +537,7 @@ evaluators:
 - `dimension` (string): profile-owned aggregation bucket.
 - `blocking` (bool): makes a host-derived failed judgment a hard blocking result.
 - `weight` (f64): finite value greater than or equal to `0.0`; the binding's contribution inside its dimension.
-- `normalization` (object): required host interpretation for a raw `binary`, `numeric`, or `ordinal` measurement. Numeric policies support linear, piecewise-linear, and threshold mappings. See [Measurement Normalization](./measurement-normalization) for every supported shape and copyable examples.
+- `normalization` (object): required host interpretation for a raw `binary`, `numeric`, or `ordinal` measurement. Numeric policies support linear, piecewise-linear, and threshold mappings. See [Measurement Normalization](./measurement-normalization.mdx) for every supported shape and copyable examples.
 - `pass_threshold` (f64): required finite value in `0.0..=1.0`. The host derives `passed` when `normalized_score >= pass_threshold`; otherwise it derives `failed`.
 - `config` (object, optional)
 
@@ -657,7 +657,7 @@ See the repository example profile:
 
 ## Related
 
-- [Dataset format](./dataset-format)
+- [Dataset format](./dataset-format.mdx)
 - [Glossary](/docs/glossary)
 - Repository example: `example/README.md`
 

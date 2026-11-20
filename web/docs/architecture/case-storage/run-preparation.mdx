@@ -23,7 +23,7 @@ vigilo run create --profile-file profile.yaml --dataset-upload-id <upload-id> \
 vigilo run status <uuid>
 ```
 
-The upload ID identifies a finalized [dataset catalog entry](./ingestion).
+The upload ID identifies a finalized [dataset catalog entry](./ingestion.mdx).
 The profile is YAML or JSON, supplied through `--profile` or `--profile-file`,
 with an 8 MiB input and encoded limit. Storage configuration resolves the same
 recorded physical owner as the dataset; credentials remain outside SQL and files.
@@ -69,7 +69,7 @@ preparation. Gate count files contain sorted entries, including zero counts for
 used shards where a gate selects no cases.
 
 Chunk files, indexes, gate files, and the configuration use the
-[storage formats and budgets](./formats). The configuration freezes the full
+[storage formats and budgets](./formats.mdx). The configuration freezes the full
 profile, agent settings, evaluator execution plan, logical dataset identity, and
 executability counts. The run-plan manifest links those objects to the finalized
 dataset and records per-shard totals and settlement hashes. The control run

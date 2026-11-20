@@ -134,7 +134,7 @@ limit; each case record must fit the admitted batch budget including its stored
 envelope and header. Preparation spools canonical records and detects duplicate
 UUIDs with 1 MiB sort runs and merges of at most 32 readers. One preparation/upload
 holds the process's 8 GiB validation-spool reservation. Remote transfer uses the
-separate shared [object I/O budgets](./formats/#resource-budgets). Batch case and
+separate shared [object I/O budgets](./formats.mdx#resource-budgets). Batch case and
 byte caps both apply; they do not change execution chunk size.
 
 Checkpoint preparation retains small headers, references, and offsets into the

@@ -81,3 +81,16 @@ jobs:
             exit 1
           fi
           cargo publish -p vigilo --locked
+
+  deploy-docs:
+    name: Deploy Vigilo release docs
+    needs: publish
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy-web.yaml
+    with:
+      release_tag: ${{ github.event.release.tag_name }}
+      release_sha: ${{ github.sha }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}

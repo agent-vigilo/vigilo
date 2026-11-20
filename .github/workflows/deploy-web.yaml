@@ -1,41 +1,56 @@
 name: Deploy Web
 
 on:
-  release:
-    types:
-      - published
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+      release_sha:
+        required: true
+        type: string
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
 
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published Vigilo release tag (blank selects the deployed latest release)
+        type: string
+      docs_correction_sha:
+        description: Optional exact SHA of a web-only correction for the latest release
+        type: string
+      apply_archive_policy:
+        description: Apply the archived release lines from web/docs-release-policy.json
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: deploy-web-production
+  queue: max
+
 jobs:
   deploy:
-    name: Deploy Docusaurus Website to S3
+    name: Deploy Vigilo Documentation
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: web
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build Docusaurus Website
-        run: npm run build
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -43,22 +58,11 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Upload static assets with long cache
-        run: |
-          aws s3 sync build/ s3://agentvigilo.com \
-            --delete \
-            --exclude "*.html" \
-            --cache-control "public,max-age=31536000,immutable"
-
-      - name: Upload HTML with short cache
-        run: |
-          aws s3 sync build/ s3://agentvigilo.com \
-            --exclude "*" \
-            --include "*.html" \
-            --cache-control "public,max-age=0,must-revalidate"
-
-      - name: Invalidate CloudFront
-        run: |
-          aws cloudfront create-invalidation \
-            --distribution-id E3UIV4SDTZNCBE \
-            --paths "/*"
+      - name: Publish versioned docs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VIGILO_RELEASE_TAG: ${{ inputs.release_tag }}
+          VIGILO_RELEASE_SHA: ${{ inputs.release_sha }}
+          VIGILO_DOCS_CORRECTION_SHA: ${{ inputs.docs_correction_sha }}
+          VIGILO_APPLY_ARCHIVE_POLICY: ${{ inputs.apply_archive_policy }}
+        run: bash web/scripts/deploy-docs.sh

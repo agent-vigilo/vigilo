@@ -1,0 +1,9 @@
+export const versionPattern: RegExp;
+export const docsHome: string;
+export const manifestPath: string;
+export function releaseLine(version: string): string;
+export function releaseStatus(version: string, latest: string | undefined, archivedLines: string[]): 'Latest' | 'Archived' | undefined;
+export function archiveBase(version: string): string;
+export function compareVersions(left: string, right: string): number;
+export function docsPath(pathname: string, baseUrl: string): string;
+export function destination(base: string, path: string, routes: string[], fragment?: string): string;

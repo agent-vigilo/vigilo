@@ -4,10 +4,10 @@
 
 > **Warning: pre-v1 release — API subject to change**
 >
-> Vigilo is under active development. Public APIs, CLI commands, configuration
-> formats, and storage schemas may change before 1.0, including breaking changes.
-> Pin the version you deploy and review release notes before updating. Do not
-> assume backward compatibility between pre-v1 releases.
+> Expect instability and breaking changes between pre-v1 releases. Public APIs,
+> CLI commands, configuration formats, and storage schemas can change. Only
+> the latest beta release receives fixes. Pin the version you deploy and review
+> release notes before updating.
 
 Test your agents against your own cases and criteria. Inspect failures, compare
 results, and use pass/fail gates to decide what ships.

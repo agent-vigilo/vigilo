@@ -18,7 +18,11 @@ npm --prefix web ci
 npm --prefix web start
 ```
 
-The development server reloads pages as they change. Keep page titles, sidebar
+The development server reloads pages as they change. Open a docs page and use
+the **Unreleased** version control next to the breadcrumbs. Published docs
+display the exact release and load available choices from the release manifest.
+
+Keep page titles, sidebar
 labels, and visible headings consistent. Document behavior in present tense and
 update paired diagrams when flows or ownership change. Repository READMEs link
 to the canonical guides instead of duplicating them.
@@ -51,7 +55,9 @@ hidden tabs; reduced-motion preferences leave the static lighting and planes.
 
 ```bash
 npm --prefix web run typecheck
+npm --prefix web run test:docs
 npm --prefix web run build
+VIGILO_DOCS_RELEASE=0.1.0 VIGILO_DOCS_ARCHIVE=1 npm --prefix web run build
 ```
 
 The build checks documentation links and validates the generated sitemap.
@@ -61,9 +67,38 @@ Output is written to `web/build`. Preview it with:
 npm --prefix web run serve
 ```
 
-## Deployment
+## Documentation Releases
 
-[Deploy Web](../.github/workflows/deploy-web.yaml) builds the site on a published
-release or manual workflow dispatch, uploads static files to S3, and invalidates
-the CloudFront distribution. The workflow assumes the configured AWS role through
-GitHub OIDC. HTML and static assets use separate cache policies.
+`/docs` serves the latest published Vigilo release. Each exact release has a
+rendered snapshot under `/releases/<version>/docs/` with its own navigation,
+diagrams, examples, and search index. The docs picker lists the latest patch
+of each visible major release line from v1 onward. During beta, the picker lists
+only the latest release. Release History links to exact snapshots, including
+earlier beta releases.
+
+[Publish Vigilo Crate](../.github/workflows/publish-crate.yaml) calls
+[Deploy Web](../.github/workflows/deploy-web.yaml) after publishing succeeds.
+Deploy Web confirms the published release and builds with the tagged
+commit's npm lockfile. It writes the snapshot's identity marker after its
+files upload and updates `docs-versions.json` last. The default docs move
+forward in release order. An older-line patch updates its line in the picker
+and leaves the default docs on the newer release.
+
+The workflow uses the configured AWS role through GitHub OIDC. It needs
+`s3:GetObject` for the release manifest and snapshot markers, the existing
+site upload permissions, and CloudFront invalidation access. The static
+site routes directory URLs to their `index.html` under both `/docs/` and
+`/releases/`. The root site sync excludes that archive prefix.
+
+### Manual deployment
+
+- To retry a release, run **Deploy Web** with its published `vigilo/vX.Y.Z`
+  tag. A completed snapshot is reused after its identity is verified.
+- To correct the latest docs or update the marketing pages, supply
+  `docs_correction_sha`. The commit must descend from the latest release
+  tag and differ only under `web/`. This rebuilds the live site and preserves
+  the tagged snapshot.
+- To retire a past line from the picker, add the line to
+  `docs-release-policy.json` and run **Deploy Web** with
+  `apply_archive_policy` enabled. Release History and existing snapshot links
+  remain available.
