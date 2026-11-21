@@ -345,6 +345,9 @@ jobs:
           EOF
       - name: Reset coverage data
         run: cargo llvm-cov clean --workspace
+      - name: Build HTTP request evaluator fixture
+        if: matrix.group == 'http'
+        run: cargo build -p http-request-fixture --target wasm32-wasip2 --release --locked
       - name: Build registry evaluator fixtures
         if: matrix.group == 'registry'
         run: cargo build -p sentiment-basic-en -p http-request-fixture --target wasm32-wasip2 --release --locked
