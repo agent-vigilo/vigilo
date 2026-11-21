@@ -95,6 +95,27 @@ cargo test --workspace --locked --lib --bins
   its full dependency set is available. Run `npm --prefix web run typecheck` and
   `npm --prefix web run build` for web documentation changes.
 
+### Local Build And Test Efficiency
+
+- After reproducing the reported failure, iterate on the smallest package and
+  test target that exercise the change. Keep the relevant features, fixtures, and
+  environment. Check the test output to confirm that the intended cases ran. Use
+  `cargo check` for compile-only feedback and run tests to verify behavior.
+- Reuse the existing Cargo target directory and build configuration for comparable
+  runs. Preserve incremental artifacts unless diagnosing a cache issue or measuring
+  a clean build. Run Cargo commands that share a target directory in sequence.
+  Independent lightweight checks can run alongside them when resources permit.
+- If builds or services compete for CPU or memory, lower local build parallelism
+  with `--jobs` or use fewer test threads where the suite permits. Preserve any
+  concurrency, instrumentation, and service topology required by the test.
+- Reuse healthy local test services where the suite supports it, while preserving
+  required fixture isolation, fresh state, and cleanup. Run all applicable final
+  checks on the completed diff. After further edits, rerun the checks the edits
+  affect.
+- For recurring slow feedback, time compilation, test execution, and service
+  startup separately. Use Cargo's `--timings` when compilation dominates before
+  changing profiles, compiler settings, or hardware.
+
 ## Documentation
 
 - Before v1, public documentation describes one greenfield architecture in present
