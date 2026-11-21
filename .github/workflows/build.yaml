@@ -86,7 +86,23 @@ jobs:
         run: python3 -m unittest discover -s scripts/releases -p 'test_*.py'
       - name: Run service-free tests
         if: ${{ !matrix.coverage }}
-        run: cargo test --workspace --locked --lib --bins --verbose
+        shell: python3 {0}
+        run: |
+          import os
+          import subprocess
+          import sys
+
+          # Fixed database bindings reject environment defaults used by SQLx.
+          env = os.environ.copy()
+          for key in (
+              'PGHOSTADDR', 'PGHOST', 'PGPORT', 'PGUSER', 'PGDATABASE', 'PGPASSWORD',
+              'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY', 'PGSSLMODE', 'PGAPPNAME', 'PGOPTIONS',
+          ):
+              env.pop(key, None)
+          sys.exit(subprocess.run(
+              ['cargo', 'test', '--workspace', '--locked', '--lib', '--bins', '--verbose'],
+              env=env,
+          ).returncode)
       - name: Verify independent library consumer
         if: ${{ !matrix.coverage }}
         run: |
