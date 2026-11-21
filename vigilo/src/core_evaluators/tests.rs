@@ -43,7 +43,7 @@ fn discovery_orders_collection_sequences_numerically_and_excludes_other_releases
         assets: vec![],
     };
     let selected = collection_releases(vec![
-        release("vigilo/v9.0.0", false, false),
+        release("v9.0.0", false, false),
         release("evaluators/2026.10.28.2", false, false),
         release("evaluators/2026.10.29.1", true, false),
         release("evaluators/2026.10.28.10", false, false),
@@ -416,7 +416,7 @@ async fn discovery_rejects_missing_assets_forged_catalogs_and_hidden_releases() 
 #[tokio::test]
 async fn discovery_paginates_and_stops_at_an_explicit_limit() {
     let mut unrelated = release_json("2026.10.28.1");
-    unrelated["tag_name"] = "vigilo/v0.1.0".into();
+    unrelated["tag_name"] = "v0.1.0".into();
     let full_page = serde_json::json!(vec![unrelated; 100]);
     let selected = discover_fixture(
         None,

@@ -29,13 +29,12 @@ tag=${VIGILO_RELEASE_TAG:-}
 if [[ -z "$tag" ]]; then
   tag="$(node -p 'require(process.argv[1]).releases[0]?.tag ?? ""' "$state/current.json")"
 fi
-if [[ ! "$tag" =~ ^vigilo/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-  echo "Select a published Vigilo release tag, such as vigilo/v0.1.0." >&2
+if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  echo "Select a published Vigilo release tag, such as v0.1.0." >&2
   exit 1
 fi
 
-encoded_tag=${tag//\//%2F}
-gh api "repos/$GITHUB_REPOSITORY/releases/tags/$encoded_tag" \
+gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
   --jq 'select(.draft == false and .published_at != null) | .tag_name' | grep -Fxq "$tag"
 commit="$(git rev-parse --verify "refs/tags/$tag^{commit}")"
 if [[ -n "${VIGILO_RELEASE_SHA:-}" && "$commit" != "$VIGILO_RELEASE_SHA" ]]; then

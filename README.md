@@ -236,7 +236,7 @@ test agent dependencies described above. Configure the repository secret
 
 ## Crate Releases
 
-Publishing a GitHub release tagged `vigilo/vX.Y.Z` runs **Publish Vigilo Crate**.
+Publishing a GitHub release tagged `vX.Y.Z` runs **Publish Vigilo Crate**.
 The workflow checks out the release commit, verifies the tag against
 `vigilo/Cargo.toml`, and requires a successful **Build** workflow for that exact
 commit (a push or manual run). It publishes only the `vigilo` crate with Cargo's
@@ -253,7 +253,7 @@ Release procedure:
 
 1. Commit and push the release changes, including the crate version and lockfile.
 2. Wait for **Build** to pass for the commit being released.
-3. Tag that commit as `vigilo/vX.Y.Z` and publish its GitHub release.
+3. Tag that commit as `vX.Y.Z` and publish its GitHub release.
 4. Approve the `crates-io` environment deployment when required, then check the
    publish job's result.
 
