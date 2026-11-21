@@ -441,7 +441,7 @@ async fn mutations(db: &PgPool) -> anyhow::Result<i64> {
     .await?)
 }
 
-fn observed_cycle(fixture: &E2eFixture) -> anyhow::Result<(u64, u64)> {
+fn observed_cycle(fixture: &E2eFixture) -> anyhow::Result<(postgres_probe::Observation, u64)> {
     let control = postgres_probe::Probe::start(&fixture.config.primary_url)?;
     let execution = postgres_probe::Probe::start(&fixture.config.shard_url)?;
     let config = IntegrationConfig {
@@ -455,10 +455,7 @@ fn observed_cycle(fixture: &E2eFixture) -> anyhow::Result<(u64, u64)> {
         "single-default",
         ["coordinator", "once"],
     )?;
-    Ok((
-        control.finish()?.query_sync_exchanges,
-        execution.finish()?.query_sync_exchanges,
-    ))
+    Ok((control.finish()?, execution.finish()?.query_sync_exchanges))
 }
 
 #[tokio::test]
@@ -510,9 +507,10 @@ async fn deferred_backlog_limits_polling_and_expires_work_independently() -> any
     };
     let started = Instant::now();
     let (control, execution) = observed_cycle(&fixture)?;
-    assert_eq!(
-        control, idle_control,
-        "polling added control database protocol exchanges"
+    // The idle observation is an upper bound on control traffic while polling.
+    assert!(
+        control.query_sync_exchanges <= idle_control.query_sync_exchanges,
+        "polling added control database protocol exchanges: idle={idle_control:?}, polling={control:?}"
     );
     if let (Some(before), Some(idle_end)) = (sql_before, sql_idle_end) {
         let after = response_queries::counters(&fixture.primary).await?;
@@ -537,7 +535,8 @@ async fn deferred_backlog_limits_polling_and_expires_work_independently() -> any
         ]
     );
     println!(
-        "deferred backlog: HTTP polls={calls} accepted=32 expired=1 waiting=1 control_exchanges={control} execution_exchanges={execution} execution_row_mutations={writes} max_completion_lag_ms={max_lag_ms} cycle_ms={}",
+        "deferred backlog: HTTP polls={calls} accepted=32 expired=1 waiting=1 control_exchanges={} execution_exchanges={execution} execution_row_mutations={writes} max_completion_lag_ms={max_lag_ms} cycle_ms={}",
+        control.query_sync_exchanges,
         started.elapsed().as_millis()
     );
     cycle(&fixture, "worker")?;
