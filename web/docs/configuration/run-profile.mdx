@@ -56,11 +56,12 @@ An execution passes when:
 
 - `aggregate_score >= defaults.min_execution_score`
 - evaluator completeness is satisfied
-- no host-derived blocking result fails
-- at least one scoreable binding result exists
+- when `defaults.fail_on_any_blocking_failure` is `true`, no host-derived blocking result fails
+- at least one required binding has a valid normalized score
 
 A run passes when every expected execution has an aggregate, no chunk failed or
-was cancelled, and no execution failed or errored. Check both `runs.status` for
+was cancelled, no execution failed or errored, and every configured scorecard
+gate passes. Check both `runs.status` for
 operational lifecycle and <GlossaryTerm term="gate-status">`runs.gate_status`</GlossaryTerm>
 for policy outcome; a terminal run is not necessarily a passing run.
 
@@ -84,10 +85,15 @@ agent:
   provider: llama.cpp
   name: qwen2.5-0.5b-instruct
   model: qwen2.5-0.5b-instruct-q4_k_m.gguf
-  http:
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
   config:
     request_format: openai_compatible_chat_completions
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
 case_groups: []
 ```
 
@@ -99,7 +105,8 @@ case_groups: []
 - `defaults` (object): run-level behavior defaults.
 - `persistence` (object): persistence policy controls.
 - `scorecard` (object): run-level dimension and evaluator gates.
-- `agent` (object): required worker-side target invocation configuration.
+- `agent` (object): required identity and configuration of the target.
+- `harness` (object): required harness kind, invocation endpoint and completion method.
 - `case_groups` (array): per-task evaluator and aggregation definitions.
 
 ## `defaults`
@@ -126,17 +133,26 @@ persistence:
   persist_evaluator_evidence: true
 ```
 
-- `mode` (enum): `full` | `summary`. `full` stores execution-level case snapshots and evaluator binding config on each execution. `summary` redacts payloads, metadata, and evaluator config but retains tags referenced by scorecard gates.
-- `persist_raw_outputs` (enum): `all` | `failures_only` | `none`. Controls `evaluator_results.raw_evaluator_output`; `failures_only` retains host-failed and errored invocation output.
-- `persist_evaluator_evidence` (bool): controls `evaluator_diagnostics.evidence`. When `false`, diagnostic evidence and raw evaluator output are redacted.
+- `mode` (enum, default `full`): `full` | `summary`. `full` stores execution-level case snapshots and evaluator binding config on each execution. `summary` redacts payloads, metadata, and evaluator config but retains tags referenced by scorecard gates.
+- `persist_raw_outputs` (enum, default `all`): `all` | `failures_only` | `none`. Controls `evaluator_results.raw_evaluator_output`; `failures_only` retains host-failed and errored invocation output.
+- `persist_evaluator_evidence` (bool, default `true`): controls `evaluator_diagnostics.evidence`. When `false`, diagnostic evidence and raw evaluator output are redacted.
+
+Omitting `persistence` or individual settings selects these defaults. The
+[response evidence persistence contract](/docs/architecture/response-evidence/)
+uses the same full/summary distinction.
 
 These settings affect execution/result artifact retention. Dataset case blobs and dataset-version membership remain durable so workers can execute retries and runs remain reproducible by content hash. The run profile snapshot is also retained because workers load it to invoke the configured agent and evaluators.
 
-Do not put long-lived secrets directly in `agent.http.headers` in shared storage. Header values are retained in the immutable run configuration used at runtime. Use local development values or short-lived tokens appropriate to the run.
+Use `harness.http.credential` with [worker credential bindings](./agent-credentials.mdx) for authentication. Static `harness.http.headers` values are retained in the immutable run configuration and must contain only nonsecret values.
 
 ## `agent`
 
-The agent block identifies the target under evaluation and provides the HTTP endpoint workers call before running evaluators.
+The agent block identifies the target under evaluation. The harness block selects the invocation endpoint and completion method.
+
+`harness.http.credential` optionally names an operator-authorized credential binding.
+The worker resolves and injects its value without storing it in the run profile.
+See [Agent Credentials](./agent-credentials.mdx) for standalone and service providers.
+
 
 ```yaml
 agent:
@@ -146,10 +162,6 @@ agent:
   model: qwen2.5-0.5b-instruct-q4_k_m.gguf
   prompt_config_id: qwen-sentiment-json
   prompt_config_version: 1.0.0
-  http:
-    method: POST
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
-    timeout_secs: 120
   config:
     request_format: openai_compatible_chat_completions
     temperature: 0.0
@@ -158,15 +170,22 @@ agent:
       type: json_object
     system_prompt: |
       Return only JSON with this exact shape: {"label":"<label>"}.
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    method: POST
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
+    timeout_secs: 120
 ```
 
 - `provider` (string): provider or platform for the evaluated target.
 - `name` (string): logical agent name.
-- `version` (string, optional): deployment or release version.
+- `version` (string): exact deployment or release version.
 - `model` (string, optional): provider-specific model identifier.
 - `prompt_config_id` (string, optional): prompt/config identity persisted with the run.
 - `prompt_config_version` (string, optional): prompt/config version persisted with the run.
-- `http` (object): required worker invocation endpoint.
 - `config` (object, optional): unstructured agent configuration included in invocation metadata. Set `request_format: openai_compatible_chat_completions` for OpenAI-compatible servers such as llama.cpp.
 
 Agent HTTP body limits are optional positive byte counts:
@@ -175,6 +194,11 @@ Agent HTTP body limits are optional positive byte counts:
 agent:
   provider: example
   name: agent
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
   http:
     url: http://agent:8080/invoke
     timeout_secs: 30
@@ -182,15 +206,176 @@ agent:
     max_response_bytes: 2097152
 ```
 
-These fields limit the serialized request and received response bodies. Omission
+These fields limit the serialized request and the evidence body. Omission
 uses the worker ceiling. Zero is invalid; a value above the executing worker's
 ceiling fails before HTTP invocation. Run validation cannot determine every worker's
 local ceiling. See [runtime limits](./runtime-limits.mdx#agent-http-bodies) for flags,
 defaults, and failure behavior.
 
+## `harness`
+
+A run binds one target agent to one evaluation harness. Case input varies by case,
+and case groups select evaluators and scoring. The harness specifies `kind`,
+`http` and an explicit completion kind. The CLI runtime supports `inline` and
+`polling`. An embedded runtime with a callback issuer supports `callback`.
+For both deferred kinds, set `capabilities.idempotent_submission` to `true`
+or `false` to match the harness's behavior. Inline completion omits `capabilities`.
+
+| Harness kind | HTTP endpoint and response |
+| --- | --- |
+| `direct_probe` | Invokes the target directly. Select the Vigilo case or Chat Completions request format, or set `agent.config.request_format: native` for the native invocation envelope. |
+| `delegated_trial` | Invokes a separate harness that drives a session with the requested agent. It uses the native invocation envelope. |
+
+```yaml
+agent:
+  provider: acme
+  name: support-agent
+  version: "1.2.0"
+
+harness:
+  kind: delegated_trial
+  completion:
+    kind: inline
+  http:
+    url: https://trials.example.com/execute
+    timeout_secs: 120
+  forward_case_context: false
+```
+
+The native request includes `schema_version: "1.0.0"`, `invocation_id`,
+`requested_agent`, `deadline_at` and `case.input`. Set `forward_case_context: true`
+to include case context. The harness reports `status: completed` with an evidence
+object containing `content_type`, `encoding` (`utf8` or `base64`) and `body`, or
+`status: failed` with a structured `error`. It echoes the schema version and
+invocation ID. A successful Delegated Trial requires `executed_agent` with matching
+`provider`, `name` and `version`. Vigilo checks that identity before scoring.
+
+For Direct Probe, `require_executed_agent: true` requires the returned identity.
+With a native outcome it is read from `executed_agent`. With a provider-specific
+response, use `executed_agent_pointer` to select the identity object. Vigilo checks
+any identity selected by that pointer, including when its presence is optional.
+
+Native submissions honor the worker and profile request limits. The outcome
+envelope is capped at 8 MiB. Decoded evidence is capped at 4 MiB and honors the
+worker and profile response limits. Response mapping applies to the decoded
+evidence. The configured endpoint or harness owns any internal tools,
+conversation or simulation. Inline invocations return the complete outcome in
+the original HTTP response.
+
+### Polling completion
+
+Use polling for work that continues after the submission request returns. Polling
+uses the native contract for Direct Probe and Delegated Trial.
+
+```yaml
+harness:
+  kind: delegated_trial
+  http:
+    url: https://trials.example.com/execute
+    timeout_secs: 15
+    credential: trial-api
+  completion:
+    kind: polling
+    deadline_secs: 600
+    status_url: https://trials.example.com/status/{provider_reference}
+  capabilities:
+    idempotent_submission: true
+    cancellation:
+      url: https://trials.example.com/cancel
+      credential: trial-api
+```
+
+- The submission endpoint returns HTTP 202 with `status: accepted`, the original
+  `schema_version` and `invocation_id`, and an opaque `provider_reference` of up
+  to 256 UTF-8 bytes. If the receipt is lost, Vigilo retries with the same ID and
+  request body only when the profile declares idempotent submission. Otherwise
+  the invocation waits for its deadline.
+- The coordinator sends a GET to the status URL, with the provider reference
+  encoded as a full path segment or query value. Use a query value for dot-segment
+  references such as `.` or `..`. HTTP 200 carries
+  `status: pending` or a native final outcome with the original identity.
+- The worker releases its lease while the invocation waits. Accepted evidence
+  is saved on the execution shard and resumes scoring on the same attempt.
+  `deadline_secs` bounds the entire remote invocation and accepts 1 through
+  86,400 seconds, with a default of 600.
+  `http.timeout_secs` bounds the submission request.
+- The first status check is due after five seconds. Later checks use jittered
+  backoff with a 60-second cap and honor accepted server retry advice. Each
+  status request has a five-second ceiling and respects the invocation deadline.
+  The coordinator admits at most 32 due requests with eight concurrent slots
+  per cycle. Deadline processing has its own budget.
+- Optional cancellation sends a separate POST with `schema_version`,
+  `invocation_id` and `provider_reference` when available. An empty HTTP 202
+  acknowledges the stop request. Remote delivery has up to three attempts
+  within one minute. Local settlement proceeds independently.
+
+### Callback completion
+
+Both harness kinds can use `completion.kind: callback` with the native invocation
+contract in an embedded runtime. Configure `completion.deadline_secs` to bound the
+remote work. It accepts 1 through 86,400 seconds, with a default of 600.
+Set `capabilities.idempotent_submission: true` when the harness deduplicates
+retry submissions by invocation ID.
+
+The embedding application provides the HTTPS callback address and a separate,
+invocation-scoped bearer credential. The harness receives them in `callback.url`
+and `callback.token` and sends the final native outcome with the credential in
+the Authorization header. The submission's HTTP 202 receipt may omit
+`provider_reference`. A final outcome may arrive before that receipt.
+
+The application authenticates the callback and bounds the body as it reads it,
+then passes the verified invocation identity and body to the library. A retry
+with identical bytes acknowledges the stored outcome while its authority remains
+valid. Conflicting bodies and stale deliveries cannot change evidence or reopen
+an invocation. See [execution lifecycle](/docs/architecture/state/execution-lifecycle/).
+
+### Agent invocation diagnostics
+
+When an attempt's authoritative terminal update commits, its available diagnostics
+are merged into `execution_attempts.outcome_summary.agent_invocation` in the same
+batch. Calls interrupted before the commit may have no diagnostic record; there is
+no extra pre-call or mid-call write. Operational diagnostics are separate from evaluator-visible response evidence. The attempt summary is
+independent of evaluator evidence/raw-output retention and remains available when
+an evaluator fails after a successful agent call.
+
+| Field | Meaning |
+| --- | --- |
+| `run_id`, `execution_id`, `attempt_id` | Runtime identities for this call |
+| `endpoint_ref` | Fixed-size BLAKE3 fingerprint of the exact configured URL; no URL text is copied |
+| `elapsed_ms` | Total invocation time, including preparation and credential resolution |
+| `latency_ms` | End-to-end HTTP send and body-read time; `null` when HTTP was not started |
+| `http_status` | Response status when received, otherwise `null` |
+| `failure_category` | Structured agent failure category, or `null` for a successful agent call |
+| `usage` | Supported returned token counters, otherwise `null` |
+
+HTTP latency includes network and server time; it is not model inference time.
+Response mapping runs after invocation diagnostics are captured.
+An HTTP status of 200 can accompany a body-limit or response-validation failure.
+Preflight and credential-resolution failures have no HTTP status or latency.
+Evaluator failures and low scores do not change a successful agent call's category.
+
+Workers send `X-Vigilo-Attempt-Id` with the allocated attempt UUID so agent logs can
+correlate the request. Profiles and credential bindings cannot override this header.
+It is a correlation identifier, not an idempotency guarantee. Arbitrary response
+request-ID headers are not copied into operational diagnostics.
+
+Only `openai_compatible_chat_completions` interprets response `usage.prompt_tokens`,
+`usage.completion_tokens`, and `usage.total_tokens`. Counters must be unsigned
+integers; missing/null counters stay `null`, while an explicitly returned zero stays
+zero. Malformed supported counters discard the usage observation. Unknown fields
+are ignored, and native-agent usage objects are not guessed. Usage is neither a
+quality score nor an inferred cost.
+
+The operational record contains fixed fields and bounded values, without bodies,
+headers, credentials, or arbitrary agent configuration. IDs and endpoint fingerprints
+are attempt evidence, not metric labels. Successful evaluator-visible metadata also
+includes agent identity/configuration fields; these are not copied into
+the bounded operational record. Diagnostics share the batched terminal update, with no separate SQL query or
+transaction.
+
 ### Agent invocation failures and retries
 
-`agent.http.max_retry_after_secs` bounds accepted server retry advice. It defaults
+`harness.http.max_retry_after_secs` bounds accepted server retry advice. It defaults
 to `600`; configured values must be between `1` and `86400` seconds. It is a
 per-attempt scheduling bound, not a total run deadline. `defaults.max_attempts`
 remains the maximum number of attempts, including the initial attempt.
@@ -229,21 +414,73 @@ quality score. A valid answer that fails evaluation is scored normally. A timeou
 does not prove the remote agent stopped; retries can repeat external effects.
 These policies do not change the supported response mapping.
 
+### Remote execution and duplicate requests
+
+For inline completion, a timeout means Vigilo did not receive a complete response within its deadline.
+The endpoint may already have accepted the request, performed side effects, or
+completed the work. A worker crash or lost lease can create the same uncertainty.
+A retry can therefore repeat remote work; Vigilo does not guarantee exactly-once
+inline agent execution. Polling profiles can configure remote cancellation.
+
+| Identity | Across retries of one execution | Visible to endpoint |
+| --- | --- | --- |
+| `run_id`, `execution_id` | Remain stable | `vigilo_case` body |
+| `attempt_id` | Changes for each allocated attempt | `vigilo_case` body, inline native `invocation_id`, and `X-Vigilo-Attempt-Id` header |
+| Deferred `invocation_id` | Stable across safe resubmission of the same invocation | Native submission, receipt, outcome, and cancellation |
+
+Chat Completions requests omit Vigilo execution identifiers from the body. Their
+attempt header identifies one invocation, not the logical execution. All three
+identifiers remain in Vigilo's invocation diagnostics when those diagnostics are
+persisted. Creating a new run creates separate logical executions; it is not a
+retry of the original execution.
+
+The HTTP client does not retry invocation failures internally; the worker workflow
+schedules eligible retries using the durable attempt budget. Retries are recovery attempts,
+not independent evaluation samples. Database ownership checks reject stale worker
+writes, but cannot undo an external action or deduplicate an agent request.
+
+Vigilo does not synthesize an `Idempotency-Key` or implement provider-specific
+remote deduplication. A custom endpoint accepting the Vigilo case request can use
+`run_id` plus `execution_id` within its own authenticated namespace as a logical
+key, but must define atomic acceptance, concurrent duplicate handling, payload
+conflict detection, stored-result reuse, and retention covering the entire retry
+and recovery window. Attempt IDs must not be used as stable deduplication keys.
+Neither a correlation header nor a static profile header establishes those
+properties. Use isolated test environments for agents with external side effects
+unless the endpoint's deduplication contract is independently verified.
+
 By default, workers send a Vigilo case request containing `run_id`, `execution_id`, `attempt_id`, `agent`, `input`, and non-oracle case metadata. With `request_format: openai_compatible_chat_completions`, workers send an OpenAI-compatible `model` and `messages` payload.
 
-The response may be either plain text or JSON. JSON responses can return the evaluator-ready output directly, or under `actual`/`output`:
+Responses are captured as bounded original bytes. Vigilo does not automatically
+unwrap `actual`, `output`, or provider-specific fields. Select raw evidence or
+configure [explicit response mapping](#explicit-response-contracts).
 
-```json
-{
-  "actual": {
-    "text": "This seems positive.",
-    "structured": { "label": "positive" },
-    "tool_calls": [],
-    "trace": [],
-    "metadata": { "latency_ms": 42 }
-  }
-}
-```
+### Request format support
+
+| Request format | Supported input | Boundary |
+| --- | --- | --- |
+| `vigilo_case` (default) | Case input as JSON, context, tags, metadata, and execution identifiers | Sends the Vigilo envelope, not an arbitrary provider request; excludes `expected` |
+| `openai_compatible_chat_completions` | Ordered string-content messages, optional system prompt, model, and selected options | Text-only request adapter; always sends `stream: false` |
+| `native` | Case input as JSON, optional context, and the requested agent identity | Uses the [native invocation contract](#harness) for the request and final outcome |
+
+For Chat Completions, `input.messages` must be an array of objects containing only
+`role` and string `content`. Omitted `role` defaults to `user`; malformed roles,
+content arrays, and additional message fields are rejected rather than discarded.
+This adapter does not send tool history or multimodal request blocks. Without
+`messages`, it uses string `user_message`, then string `prompt`, then serialized
+input JSON. A nonempty `agent.config.system_prompt` precedes those messages.
+`agent.model` defaults to `agent.name`.
+
+The forwarded configuration keys are `temperature`, `top_p`, `min_p`, `max_tokens`,
+`stop`, `seed`, `response_format`, `presence_penalty`, `frequency_penalty`, and
+`repeat_penalty`. Temperature defaults to `0.0` and must be numeric. Other forwarded
+values are validated by the endpoint; provider support varies. Other config keys
+are not forwarded as request options. In particular, setting `stream`, `tools`, or
+`max_completion_tokens` does not enable those options.
+
+There are no native OpenAI Responses or Anthropic Messages request adapters.
+An endpoint accepting the Vigilo envelope can return those response shapes;
+response mapping is independent of request format.
 
 ## `case_groups`
 
@@ -300,7 +537,7 @@ evaluators:
 - `dimension` (string): profile-owned aggregation bucket.
 - `blocking` (bool): makes a host-derived failed judgment a hard blocking result.
 - `weight` (f64): finite value greater than or equal to `0.0`; the binding's contribution inside its dimension.
-- `normalization` (object): required host interpretation for a raw `binary`, `numeric`, or `ordinal` measurement. Numeric policies support linear, piecewise-linear, and threshold mappings. See [Measurement Normalization](./measurement-normalization) for every supported shape and copyable examples.
+- `normalization` (object): required host interpretation for a raw `binary`, `numeric`, or `ordinal` measurement. Numeric policies support linear, piecewise-linear, and threshold mappings. See [Measurement Normalization](./measurement-normalization.mdx) for every supported shape and copyable examples.
 - `pass_threshold` (f64): required finite value in `0.0..=1.0`. The host derives `passed` when `normalized_score >= pass_threshold`; otherwise it derives `failed`.
 - `config` (object, optional)
 
@@ -420,6 +657,186 @@ See the repository example profile:
 
 ## Related
 
-- [Dataset format](./dataset-format)
+- [Dataset format](./dataset-format.mdx)
 - [Glossary](/docs/glossary)
 - Repository example: `example/README.md`
+
+## Explicit Response Contracts
+
+The `vigilo::response` library module defines independently versioned response
+configuration and evidence schemas. Both accept the exact schema identity `1.0.0`;
+unknown versions and unknown configuration fields are rejected. `profile_version`
+is an author-supplied profile revision, not a response-schema selector.
+
+`agent.response` explicitly selects response interpretation. Profiles without it,
+or with `interpretation.format: raw`, expose only original bytes. JSON mapping runs
+once per attempt after successful body capture. It never guesses fields or falls
+back to another response shape. Mapping failures preserve original evidence and
+fail evaluators requiring mapped evidence, without retrying the agent.
+
+A JSON mapping describes explicit producers in declaration order:
+
+```yaml
+response:
+  schema_version: 1.0.0
+  interpretation:
+    format: json
+    mapping:
+      items:
+        - mode: single
+          item:
+            type: message
+            content:
+              - media_type: text/plain
+                source:
+                  representation: inline_text
+                  selection:
+                    pointer: /answer
+                    required: true
+```
+
+`format: raw` has no mapping. For JSON interpretation, `single` selects one item
+from the response root; `each` requires a `source` selection and applies its item
+template relative to each array element in order. JSON Pointer uses RFC 6901 syntax:
+empty selects the current root, `~0` escapes `~`, and `~1` escapes `/`. URI fragments
+are rejected. Selectors are required by default. Optional absence differs from a
+present null or wrong-type value.
+
+Item templates are `message`, `tool_call`, or `tool_result`. Message `role` and tool
+`name` use explicit `literal` or `field` string mappings. Content representations
+are `inline_text`, `json_value`, `json_string`, `base64`, or `original_body`.
+Except for `original_body`, they require a `selection`. `inline_text` requires a
+JSON string and preserves its decoded text without trimming. `json_value` retains
+the exact selected JSON fragment as a range of the original body, including number
+precision and internal whitespace. `json_string` requires a string containing valid
+JSON and exposes its decoded bytes. `base64` requires strict standard RFC 4648
+encoding with padding where needed. `original_body` refers to the complete body.
+No representation fetches URLs or guesses an encoding.
+Completion `status` and `stop_reason` mappings use a selection plus an explicit
+string-to-category `values` table. Unlisted values have no implicit fallback.
+
+Authoring limits are 128 item producers, 256 content templates, 4096 UTF-8 bytes
+per pointer, and 255 bytes per media type. Configured media types use bare
+`type/subtype` syntax without parameters; the server-declared Content-Type is a
+separate value. These authoring limits do not authorize unbounded response expansion.
+
+### Representative response formats
+
+Local fixtures exercise these explicit selections against synthetic, non-streaming
+JSON responses. They do not make live provider calls or certify every provider variant.
+
+| Response shape | Selected evidence |
+| --- | --- |
+| OpenAI Chat Completions | First-choice text; ordered function tool calls with string-encoded JSON arguments |
+| OpenAI Responses | Output text, refusal text, incomplete status/reason; function call ID, name, and string-encoded JSON arguments |
+| Anthropic Messages | Ordered text blocks; explicitly positioned `tool_use` ID, name, and JSON-object input |
+
+These shapes follow the [OpenAI response reference](https://developers.openai.com/api/reference/resources/responses/methods/create),
+[Chat Completions reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/list),
+and [Anthropic tool-call reference](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls).
+The mappings are examples for fixed shapes, not automatic provider adapters.
+
+For example, Chat Completions text uses `/choices/0/message/content` with
+`inline_text`. Its `/choices/0/message/tool_calls` array can use `each`, selecting
+`/id`, `/function/name`, and `/function/arguments` with `json_string` relative to
+each call. Anthropic tool input uses `json_value`, not `json_string`.
+
+One `each` template cannot dispatch on heterogeneous block types. Fixed-position
+selectors can describe a known mixed layout, but cannot adapt when that layout
+changes. Missing required fields, null or wrong-type values, and unexpected mapped
+stop reasons fail mapping. A refusal remains response evidence, not an invocation
+failure. Unselected fields remain in the original body. Selecting only the first
+choice does not evaluate other choices. Tool evidence does not execute tools.
+Streaming event assembly and remote media fetching are not provided by JSON mapping.
+
+### Mapping Engine
+
+`vigilo::response_mapping::map_response` applies the configuration to a shared
+`CapturedBody` independently of worker execution. No configuration, or `format: raw`,
+returns original evidence with absent mapped items. JSON interpretation rejects
+invalid JSON and duplicate object keys, including in unselected fields.
+
+Producers run in declaration order; each array producer preserves array order.
+Content templates also retain their order. Optional missing selections omit the
+corresponding value or content part; present values must satisfy the declared type.
+Tool calls must produce both a name and arguments. Unrelated arrays are not merged
+chronologically, and one array producer applies the same template to every element.
+
+Mapping is atomic: a failure returns no mapped items or decoded resources, while
+original evidence remains available to the caller. Errors contain categories and
+available producer/element indexes, without body excerpts. Mapped resources own
+shared bytes, not evaluator handles. Invocation-scoped authorization remains the
+host's responsibility.
+
+The caller supplies `Limits`. Defaults bound input to 4 MiB, JSON structure to
+100,000 nodes and 64 levels, parsing/decoding byte work to 32 MiB, output to 4096
+items and 8192 parts, logical output bytes to 16 MiB, and decoded resources to 63.
+Repeated references count against logical output size. A cooperative one-second
+deadline bounds processing; synchronous callers in async services use a bounded
+blocking executor. Limits also cover embedded JSON decoding. The implementation
+identity is `vigilo-response-mapping-v1@1`, independent of the schema version.
+
+### Original Response Capture
+
+HTTP capture preserves immutable bytes after content decompression and before BOM
+handling, text decoding, JSON parsing, or response interpretation. Declared
+Content-Type is retained independently of content; missing content type stays absent.
+No byte content or header value appears in the resource's debug representation.
+
+Supported content encodings are identity, gzip (including concatenated members),
+and zlib-wrapped deflate. Unsupported or stacked encodings, corrupt checksums,
+truncated compressed streams, and trailing deflate bytes fail explicitly. HTTP
+transfer framing is handled by the client. Automatic client decompression is disabled
+so capture owns encoding validation and budgets.
+
+The response byte limit applies to decompressed bytes during collection. Encoded
+input is separately bounded by that limit plus 64 KiB of encoding overhead. The
+original HTTP deadline includes body collection and decompression; a failed capture
+returns no partial evidence. Content-Type metadata is limited to 1024 bytes and
+ambiguous multiple values are rejected. No remote artifact references are fetched.
+
+Successful invocations share captured bytes and atomic mapping results across
+evaluators. Binary, empty, and malformed JSON bodies remain scoreable through raw
+access. Only an explicitly selected JSON mapping requires valid JSON. No inferred
+text, structured output, or trace is populated in `actual`. See [Evaluator Compatibility](../guides/evaluator-compatibility.mdx#response-evidence-contract)
+for resource read limits and availability.
+
+## Evaluator HTTP authorization
+
+Operator-managed `evaluator_http_policies` rows grant permissions to an exact
+installed evaluator ID. Installing an evaluator grants no network access. Rules
+contain an exact `uri`, uppercase `method`, `allow`/`deny` action and optional
+`networks` (IP CIDR strings). Missing rules deny access; a matching deny overrides
+all matching allows. Rules are not supplied by evaluator code or inferred from
+package metadata. Administrators manage these rows through trusted database access.
+
+Matching uses scheme, hostname, effective port and path. Query parameters do not
+expand destination permissions. Wildcards, trailing-dot hosts, userinfo, fragments,
+encoded destination paths and dot segments are rejected. HTTPS defaults to port
+443. Empty networks allow public addresses only; explicit CIDRs restrict the
+connection addresses. HTTP requires explicit network ranges. Private, loopback,
+link-local and special-use addresses require explicit grants. IPv4-mapped IPv6
+addresses are checked as IPv4. Network permission never bypasses exact URL matching.
+
+Run preparation freezes each evaluator's HTTP grants into the immutable execution
+plan. Current policy can restrict that authority, but cannot add destinations,
+methods or network ranges to an existing run. Using expanded grants requires a new run.
+Secret values are not stored in the plan; credential rotation remains independent.
+
+Workers share a bounded cache of 256 evaluator snapshots and load misses or expired
+entries in one bounded control-database read. No policy SQL runs inside evaluator
+HTTP calls. `--evaluator-http-policy-max-age-seconds` (environment variable
+`VIGILO_EVALUATOR_HTTP_POLICY_MAX_AGE_SECONDS`) defaults to 30, with a range of 1–3600.
+Expired entries cannot authorize new attempts when refresh fails. Each attempt uses
+its immutable intersection of accepted grants and current policy; retries resolve
+again and may reuse a still-fresh current revision. Both policies must permit the
+destination and the actual connection address.
+The attempt terminal summary records `evaluator_http_policy_revisions` alongside
+existing diagnostics in the same database update.
+
+The host checks destination authorization before resolving host-owned credentials,
+validates every resolved address, and pins permitted addresses for the connection.
+Redirects and ambient proxies cannot bypass the grant. Evaluators receive bounded
+status, filtered headers and body bytes, including non-success HTTP statuses.
+See [evaluator HTTP limits](./runtime-limits.mdx#evaluator-http) and
+[credential bindings](./agent-credentials.mdx#evaluator-credentials).

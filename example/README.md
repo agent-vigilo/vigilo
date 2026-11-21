@@ -4,14 +4,19 @@ This example demonstrates a file-based run profile and dataset that target a loc
 
 ## Files
 
-- `profile.yaml`: Qwen sentiment evaluation profile using `agent.http`
+- `profile.yaml`: Qwen sentiment evaluation profile using `harness.http`
 - `dataset.yaml`: minimal sentiment classification dataset
 
-The profile points at `http://agent_vigilo_agent:8080/v1/chat/completions`, the llama.cpp-backed agent service in `infra/dev/docker-compose.single.yml`. Workers send an OpenAI-compatible chat completions request and map the agent response into the evaluator `actual` envelope.
+The profile points at `http://agent_vigilo_agent:8080/v1/chat/completions`, the llama.cpp-backed agent service in `infra/dev/docker-compose.single.yml`. Workers send an OpenAI-compatible chat completions request and preserve the complete response body. The profile explicitly maps the answer into `input.response-evidence` for the evaluator.
+
+The example uses the Direct Probe harness and the Deterministic (Code Scorer)
+sentiment evaluator. See the [component vocabulary](https://agentvigilo.com/docs/glossary#harnesses-and-evaluators).
 
 The example uses one `quality` dimension. Each execution must meet `defaults.min_execution_score`, then the run-level `quality_release` scorecard gate requires complete coverage, no errors or abstentions, and a mean quality score of at least `0.85`.
 
-The evaluator returns an ordinal sentiment label. `profile.yaml` explicitly maps `positive`, `neutral`, and `negative` to scores; see the [normalization reference](../web/docs/configuration/measurement-normalization.mdx) for every measurement type.
+The agent rewrites each message while preserving its sentiment. The profile explicitly
+maps `/choices/0/message/content` to `text/plain`; the evaluator scores the returned
+text rather than the case prompt. The evaluator returns an ordinal sentiment label. `profile.yaml` explicitly maps `positive`, `neutral`, and `negative` to scores; see the [normalization reference](../web/docs/configuration/measurement-normalization.mdx) for every measurement type.
 
 Each example dataset case sets `case_group: sentiment_classification`, which explicitly routes the case to the matching profile case group. If `case_group` is omitted, Vigilo falls back to `task_type` and tag matching.
 

@@ -15,6 +15,9 @@ keywords:
 
 # System Structure
 
+The library owns runtime implementation; the CLI adapter owns process interaction,
+and standalone Rust hosts can read typed run status through the operation API.
+
 This section describes the static structure of Agent Vigilo: the CLI runtime, coordinator, worker, PostgreSQL placement model, immutable object storage, RabbitMQ message broker, evaluator registry, and Wasmtime evaluator boundary.
 
 Agent Vigilo is structured as a distributed AI evaluation system. Runs are created through the CLI, dispatched by coordinators, processed by workers, evaluated through isolated Wasm components, persisted through routed PostgreSQL workflows, and signaled through durable outbox publication.
@@ -37,7 +40,7 @@ Agent Vigilo is structured as a distributed AI evaluation system. Runs are creat
         <p>External actors and systems around Agent Vigilo, including engineers, CI/CD, agent clients, agent targets, evaluator packages, PostgreSQL, and RabbitMQ.</p>
       </div>
       <div className="card__footer">
-        <a className="button button--primary button--block" href="/docs/architecture/structure/context/">Open Context</a>
+        <Link className="button button--primary button--block" to="/docs/architecture/structure/context/">Open Context</Link>
       </div>
     </div>
   </div>
@@ -48,7 +51,7 @@ Agent Vigilo is structured as a distributed AI evaluation system. Runs are creat
         <p>Deployable runtime boundaries for the CLI, coordinator, worker, database, queue, evaluator packages, and agent target integration.</p>
       </div>
       <div className="card__footer">
-        <a className="button button--primary button--block" href="/docs/architecture/structure/containers/">Open Containers</a>
+        <Link className="button button--primary button--block" to="/docs/architecture/structure/containers/">Open Containers</Link>
       </div>
     </div>
   </div>
@@ -56,10 +59,10 @@ Agent Vigilo is structured as a distributed AI evaluation system. Runs are creat
     <div className="card">
       <div className="card__body">
         <h3>Vigilo Components</h3>
-        <p>Internal CLI and command runtime components for setup, evaluator publishing, run creation, querying, service startup, and shared runtime context.</p>
+        <p>Shared library operations and CLI adapters for setup, evaluator publishing, run creation, querying, service execution, and runtime ownership.</p>
       </div>
       <div className="card__footer">
-        <a className="button button--primary button--block" href="/docs/architecture/structure/components/vigilo/">Open Vigilo Components</a>
+        <Link className="button button--primary button--block" to="/docs/architecture/structure/components/vigilo/">Open Vigilo Components</Link>
       </div>
     </div>
   </div>
@@ -70,7 +73,7 @@ Agent Vigilo is structured as a distributed AI evaluation system. Runs are creat
         <p>Dispatch, finalization, and outbox publisher components, including durable RabbitMQ publication and ledger/queue outbox handling.</p>
       </div>
       <div className="card__footer">
-        <a className="button button--primary button--block" href="/docs/architecture/structure/components/coordinator/">Open Coordinator Components</a>
+        <Link className="button button--primary button--block" to="/docs/architecture/structure/components/coordinator/">Open Coordinator Components</Link>
       </div>
     </div>
   </div>
@@ -81,7 +84,7 @@ Agent Vigilo is structured as a distributed AI evaluation system. Runs are creat
         <p>Chunk claiming, run-context caching, agent-target invocation, sandboxed Wasm evaluator execution, result persistence, and message settlement.</p>
       </div>
       <div className="card__footer">
-        <a className="button button--primary button--block" href="/docs/architecture/structure/components/worker/">Open Worker Components</a>
+        <Link className="button button--primary button--block" to="/docs/architecture/structure/components/worker/">Open Worker Components</Link>
       </div>
     </div>
   </div>
@@ -92,7 +95,7 @@ Agent Vigilo is structured as a distributed AI evaluation system. Runs are creat
         <p>Entry point for comparing CLI, coordinator, and worker internals before going into a specific component diagram.</p>
       </div>
       <div className="card__footer">
-        <a className="button button--primary button--block" href="/docs/architecture/structure/components/">Open Components</a>
+        <Link className="button button--primary button--block" to="/docs/architecture/structure/components/">Open Components</Link>
       </div>
     </div>
   </div>

@@ -287,3 +287,23 @@ pub(crate) async fn delete_execution_attempt_by_id(
 
     Ok(result.rows_affected())
 }
+
+/// Loads one retained response explicitly. Status/results queries intentionally
+/// omit these bytes. Decoding verifies bounds and integrity before exposing data.
+pub(crate) async fn select_response_evidence(
+    db: &PgPool,
+    run_id: Uuid,
+    run_shard: i16,
+    attempt_id: Uuid,
+) -> anyhow::Result<Option<crate::contracts::response_retention::RetainedResponse>> {
+    let row = sqlx::query_as::<_, (Uuid, serde_json::Value, Vec<u8>)>(
+        "SELECT execution_id, response_evidence, response_evidence_bytes FROM execution_attempts WHERE run_id=$1 AND run_shard=$2 AND id=$3 AND response_evidence IS NOT NULL",
+    ).bind(run_id).bind(run_shard).bind(attempt_id).fetch_optional(db).await?;
+    row.map(|(execution_id, metadata, bytes)| {
+        let packet =
+            crate::contracts::response_retention::RetainedResponse::from_storage(metadata, bytes)?;
+        packet.validate_owner(run_id, execution_id, attempt_id)?;
+        Ok(packet)
+    })
+    .transpose()
+}

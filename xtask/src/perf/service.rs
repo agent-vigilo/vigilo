@@ -103,6 +103,18 @@ pub fn integration_self_test(root: &Path) -> Result<()> {
     let database_url = harness.create_database("sentinel")?;
     let scope = harness.create_sample_scope(database_url, "sentinel")?;
 
+    let probe = super::postgres_probe::Probe::start(&scope.database_url)?;
+    let mut probe_client = PgClient::connect(&probe.url, NoTls)?;
+    probe_client.simple_query("SELECT 17")?;
+    drop(probe_client);
+    let protocol = probe.finish()?;
+    if protocol.query_sync_exchanges != 1
+        || protocol.frontend_bytes == 0
+        || protocol.connections != Some(1)
+    {
+        bail!("protocol probe did not observe exactly one simple query");
+    }
+
     let first = harness.begin_measurement(&scope)?;
     harness.storage_reader()?.probe()?;
     let response = HttpClient::new()
@@ -803,6 +815,7 @@ impl ServiceHarness {
         let queue = self.queue_counts(&scope.vhost)?;
         let http = self.agent.snapshot();
         Ok(ExternalMeasurements {
+            postgres_protocol: None,
             storage_counters,
             sql_calls: Some(sql_calls),
             sql_databases,
@@ -2014,6 +2027,11 @@ fn database_url(admin_url: &str, name: &str) -> Result<String> {
     let mut url = Url::parse(admin_url)?;
     require_loopback_url(&url)?;
     url.set_path(&format!("/{name}"));
+    // Fixture SQL uses the same explicit standalone identity as runtime pools.
+    url.query_pairs_mut().append_pair(
+        "options",
+        "-cvigilo.tenant_id=00000000-0000-0000-0000-000000000000",
+    );
     Ok(url.to_string())
 }
 
@@ -2382,7 +2400,7 @@ mod tests {
             database_url("postgres://user:secret@localhost:5432/admin", "owned")
                 .unwrap()
                 .as_str(),
-            "postgres://user:secret@localhost:5432/owned"
+            "postgres://user:secret@localhost:5432/owned?options=-cvigilo.tenant_id%3D00000000-0000-0000-0000-000000000000"
         );
         assert_eq!(
             redact_url("postgres://user:secret@localhost/db"),

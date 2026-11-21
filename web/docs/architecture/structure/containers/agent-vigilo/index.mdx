@@ -31,13 +31,17 @@ RabbitMQ <GlossaryTerm term="broker">broker</GlossaryTerm>, object storage, and 
 
 - The CLI, coordinator, and worker are modes of the same Rust application but
   run as separate processes in distributed deployments.
+- Rust applications embed the library and call typed operations, coordinator
+  cycles and worker services in process. The application owns its Tokio runtime,
+  authentication, presentation and shutdown; it does not launch a CLI subprocess.
+  See the [library boundary](/docs/architecture/structure/components/vigilo/).
 - Database placements hold durable authority. RabbitMQ carries at-least-once
   broker deliveries but does not replace database claims or leases.
 - The coordinator inserts outbox event records in PostgreSQL and publishes them
   as broker messages. Workers claim the chunks named by those messages before
   doing work.
-- The external agent target is outside the Vigilo trust and persistence
-  boundary. Wasm evaluators execute inside worker processes.
+- The agent target and Delegated Trial harness are external systems. Wasm
+  evaluators execute inside worker processes.
 
 ## Related
 

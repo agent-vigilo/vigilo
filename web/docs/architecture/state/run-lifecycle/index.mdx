@@ -35,7 +35,8 @@ How `runs.status` and `runs.gate_status` move through creation, dispatch, finali
 - Before dispatch and finalization, the coordinator recovers expired worker chunk leases or marks exhausted chunks failed.
 - Finalization requires drained dispatch cursors and the exact routed set of sealed shard summaries. Evaluation failure leaves a shard `running` while any planned chunk remains unsettled, including retry waits.
 - Finalization verifies run, shard, policy, and planned membership identities; merges the sealed scorecards; and commits the report, gate, and completion event under the current coordinator lease. Missing or invalid candidates are deferred while other candidates continue.
-- Cancellation applies to `creating`, `pending`, `running`, and `finalizing`.
+- Cancellation applies to `creating`, `pending`, `running`, and `finalizing`. It records durable revocation before placement delivery and waits for quiescence before terminal cleanup.
+- Execution permission (`enabled`, `paused`, `revoked`) is separate from lifecycle status. Revision-fenced delivery and existing worker heartbeats enforce changes; pause does not discard completed results.
   Partial creation installs closed local admission tombstones, fencing delayed
   seed writes. Shared immutable files and committed result evidence remain.
 

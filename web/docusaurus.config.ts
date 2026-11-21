@@ -1,21 +1,37 @@
+import {readFileSync} from 'node:fs';
+import path from 'node:path';
 import {themes as prismThemes} from 'prism-react-renderer';
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+import {archiveBase, versionPattern} from './src/components/DocVersions/releases.mjs';
 
 // This runs in Node.js - Don't use client-side code here (browser APIs, JSX...)
+
+const docsRelease = process.env.VIGILO_DOCS_RELEASE;
+if (docsRelease && !versionPattern.test(docsRelease)) {
+  throw new Error('VIGILO_DOCS_RELEASE must be a stable Vigilo release version');
+}
+const archive = process.env.VIGILO_DOCS_ARCHIVE === '1';
+if (archive && !docsRelease) throw new Error('An archive build requires VIGILO_DOCS_RELEASE');
+const baseUrl = archive ? `${archiveBase(docsRelease!)}/` : '/';
+const packageManifest = readFileSync(path.resolve(__dirname, '../vigilo/Cargo.toml'), 'utf8');
+const packageSection = packageManifest.match(/^\[package\]\s*\n([^[]*)/m)?.[1];
+const previewVersion = packageSection?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+if (!previewVersion) throw new Error('The Vigilo crate must declare an explicit version');
 
 const config: Config = {
   title: 'Agent Vigilo',
   tagline: 'Distributed Evaluation and Deployment Gating for Generative AI Systems',
   favicon: 'img/favicon.svg',
+  staticDirectories: ['static', '../vigilo/fixtures'],
   headTags: [
     {
       tagName: 'link',
-      attributes: {rel: 'alternate icon', type: 'image/x-icon', href: '/img/favicon.ico'},
+      attributes: {rel: 'alternate icon', type: 'image/x-icon', href: `${baseUrl}img/favicon.ico`},
     },
     {
       tagName: 'link',
-      attributes: {rel: 'apple-touch-icon', sizes: '180x180', href: '/img/apple-touch-icon.png'},
+      attributes: {rel: 'apple-touch-icon', sizes: '180x180', href: `${baseUrl}img/apple-touch-icon.png`},
     },
   ],
 
@@ -28,7 +44,8 @@ const config: Config = {
   url: 'https://agentvigilo.com',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
-  baseUrl: '/',
+  baseUrl,
+  customFields: {docsRelease: docsRelease ?? null, docsBeta: (docsRelease ?? previewVersion).startsWith('0.')},
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
@@ -57,13 +74,13 @@ const config: Config = {
           sidebarPath: './sidebars.ts',
           // Please change this to your repo.
           // Remove this to remove the "edit this page" links.
-          editUrl:
-            'https://github.com/agent-vigilo/vigilo/tree/main/web/docs/',
+          editUrl: archive ? undefined : 'https://github.com/agent-vigilo/vigilo/tree/main/web/docs/',
         },
         blog: false,
+        pages: archive ? {exclude: ['index.tsx']} : {},
         sitemap: {
           changefreq: null,
-          ignorePatterns: ['/search', '/docs/category/guides'],
+          ignorePatterns: [`${baseUrl}search`, `${baseUrl}docs`, `${baseUrl}docs/category/guides`],
           priority: null,
         },
         theme: {
@@ -81,7 +98,7 @@ const config: Config = {
         hashed: true,
         indexDocs: true,
         indexBlog: false,
-        indexPages: true,
+        indexPages: !archive,
         language: ['en'],
       },
     ],
@@ -134,6 +151,7 @@ const config: Config = {
         alt: 'Agent Vigilo',
         src: 'img/logo.svg',
         srcDark: 'img/logo-dark.svg',
+        href: archive ? 'https://agentvigilo.com/' : undefined,
       },
       items: [
         {

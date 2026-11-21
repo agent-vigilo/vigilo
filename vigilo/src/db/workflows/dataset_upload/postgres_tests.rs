@@ -14,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 #[path = "postgres_tests/batches.rs"]
 mod batch_tests;
+#[path = "postgres_tests/scoped.rs"]
+mod scoped;
 use crate::{
     blob_storage::{
         Budget,
@@ -194,6 +196,7 @@ struct State {
     objects: HashMap<String, Vec<u8>>,
     creates: HashMap<String, u32>,
     stop_after_batch: bool,
+    idle_pool: Option<PgPool>,
     stop_after_index: bool,
     fail_delete: bool,
     observe_upload: Option<(PgPool, Uuid)>,
@@ -204,6 +207,20 @@ struct State {
 }
 #[derive(Clone, Default)]
 struct Memory(Arc<Mutex<State>>);
+impl Memory {
+    async fn assert_no_database_transaction(&self) {
+        let pool = self.0.lock().unwrap().idle_pool.clone();
+        if let Some(pool) = pool {
+            let connection =
+                tokio::time::timeout(std::time::Duration::from_secs(1), pool.acquire())
+                    .await
+                    .expect("dataset I/O retained the sole scoped database connection")
+                    .unwrap();
+            drop(connection);
+        }
+    }
+}
+
 fn error(kind: ErrorKind) -> StorageError {
     StorageError {
         kind,
@@ -224,6 +241,7 @@ impl Transport for Memory {
         _: usize,
         _: std::time::Duration,
     ) -> std::result::Result<(), StorageError> {
+        self.assert_no_database_transaction().await;
         if r.key.contains("/batch/") {
             let delay = self.0.lock().unwrap().delay_batch_once.take();
             if let Some(delay) = delay {
@@ -271,6 +289,7 @@ impl Transport for Memory {
         r: &ObjectRef,
         _: std::time::Duration,
     ) -> std::result::Result<Download, StorageError> {
+        self.assert_no_database_transaction().await;
         let s = self.0.lock().unwrap();
         let bytes = s
             .objects
@@ -284,6 +303,7 @@ impl Transport for Memory {
         })
     }
     async fn delete_object(&self, key: &str) -> std::result::Result<(), StorageError> {
+        self.assert_no_database_transaction().await;
         let mut state = self.0.lock().unwrap();
         if state.fail_delete {
             state.fail_delete = false;

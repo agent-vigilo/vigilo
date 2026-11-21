@@ -10,14 +10,12 @@ use anyhow::{
     Result,
     ensure,
 };
-use sqlx::{
-    PgPool,
-    types::Json,
-};
+use sqlx::types::Json;
 
 use super::{
     Lease,
     Object,
+    access::Access,
     bounded,
     guard,
     validate_object,
@@ -81,7 +79,12 @@ fn same_object(old: &Object, expected: &Object) -> bool {
 
 /// Register a bounded group in one fenced transaction. Returns acknowledged
 /// states in input order; any conflicting slot rolls back the entire group.
-pub(crate) async fn plan(db: &PgPool, lease: Lease, objects: &[Object]) -> Result<Vec<bool>> {
+pub(crate) async fn plan<'a>(
+    db: impl Into<Access<'a>> + Send,
+    lease: Lease,
+    objects: &[Object],
+) -> Result<Vec<bool>> {
+    let db = db.into();
     let argument = argument(objects)?;
     bounded(async {
         let mut tx = db.begin().await?;
@@ -116,7 +119,12 @@ pub(crate) async fn plan(db: &PgPool, lease: Lease, objects: &[Object]) -> Resul
 /// Commit only files whose complete bytes have been verified by the caller.
 /// A replay may contain an acknowledged prefix followed by contiguous new files.
 /// Any gap, missing key, changed identity or lost authority leaves all progress intact.
-pub(crate) async fn acknowledge(db: &PgPool, lease: Lease, objects: &[Object]) -> Result<()> {
+pub(crate) async fn acknowledge<'a>(
+    db: impl Into<Access<'a>> + Send,
+    lease: Lease,
+    objects: &[Object],
+) -> Result<()> {
+    let db = db.into();
     argument(objects)?;
     bounded(async {
         let mut tx = db.begin().await?;

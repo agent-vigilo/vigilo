@@ -13,7 +13,6 @@ use crate::models::evaluator::{
     EvaluatorDraft,
     EvaluatorPatch,
     EvaluatorState,
-    EvaluatorSummary,
 };
 
 /// Minimal evaluator metadata needed to bind a run profile to executable code.
@@ -39,8 +38,11 @@ pub(crate) struct EvaluatorRuntimeMetadata {
 ///
 /// Identities are passed as `(namespace, name, version)` tuples and resolved in
 /// one query so run creation and execution do not perform per-evaluator lookups.
-pub(crate) async fn select_evaluator_runtime_metadata_by_identities(
-    db: &PgPool,
+pub(crate) async fn select_evaluator_runtime_metadata_by_identities<
+    'e,
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+>(
+    db: E,
     identities: &[(String, String, String)],
 ) -> anyhow::Result<Vec<EvaluatorRuntimeMetadata>> {
     if identities.is_empty() {
@@ -89,10 +91,10 @@ pub(crate) async fn select_evaluator_runtime_metadata_by_identities(
 }
 
 /// Inserts a newly published evaluator artifact.
-pub(crate) async fn insert_evaluator(
-    db: &PgPool,
+pub(crate) async fn insert_evaluator<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
     draft: &EvaluatorDraft,
-) -> anyhow::Result<Evaluator> {
+) -> anyhow::Result<Option<Evaluator>> {
     let wasm_size_bytes = draft.wasm_bytes.len() as i64;
 
     let evaluator = sqlx::query_as::<_, Evaluator>(
@@ -105,6 +107,7 @@ pub(crate) async fn insert_evaluator(
             description, tags, metadata
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        ON CONFLICT DO NOTHING
         RETURNING
             id, namespace, name, version, content_hash, wasm_bytes,
             wasm_size_bytes, interface_name, interface_version,
@@ -130,7 +133,7 @@ pub(crate) async fn insert_evaluator(
     .bind(&draft.description)
     .bind(&draft.tags)
     .bind(&draft.metadata)
-    .fetch_one(db)
+    .fetch_optional(db)
     .await?;
 
     Ok(evaluator)
@@ -189,8 +192,8 @@ pub(crate) async fn select_latest_evaluator_by_name(
 }
 
 /// Finds an evaluator by namespace, name, and version.
-pub(crate) async fn select_evaluator(
-    db: &PgPool,
+pub(crate) async fn select_evaluator<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
     namespace: &str,
     name: &str,
     version: &str,
@@ -218,8 +221,11 @@ pub(crate) async fn select_evaluator(
 }
 
 /// Finds an evaluator by namespace and content hash.
-pub(crate) async fn select_evaluator_by_content_hash(
-    db: &PgPool,
+pub(crate) async fn select_evaluator_by_content_hash<
+    'e,
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+>(
+    db: E,
     namespace: &str,
     content_hash: &str,
 ) -> anyhow::Result<Option<Evaluator>> {
@@ -244,75 +250,9 @@ pub(crate) async fn select_evaluator_by_content_hash(
     Ok(evaluator)
 }
 
-/// Lists evaluators in a namespace for management and discovery views.
-pub(crate) async fn list_evaluators(
-    db: &PgPool,
-    namespace: &str,
-) -> anyhow::Result<Vec<Evaluator>> {
-    let evaluators = sqlx::query_as::<_, Evaluator>(
-        r#"
-        SELECT
-            id, namespace, name, version, content_hash, wasm_bytes,
-            wasm_size_bytes, interface_name, interface_version,
-            wit_world, abi_contract_hash, abi_adapter,
-            runtime, runtime_version, runtime_fingerprint,
-            description, tags, metadata, state, state_reason, created_at, updated_at
-        FROM evaluators
-        WHERE namespace = $1
-        ORDER BY name ASC, version DESC
-        "#,
-    )
-    .bind(namespace)
-    .fetch_all(db)
-    .await?;
-
-    Ok(evaluators)
-}
-
-/// Searches evaluator summaries in a namespace using a bounded text match.
-pub(crate) async fn search_evaluator_summaries(
-    db: &PgPool,
-    namespace: &str,
-    query: Option<&str>,
-    limit: i64,
-) -> anyhow::Result<Vec<EvaluatorSummary>> {
-    let limit = limit.clamp(1, 20);
-
-    let pattern = query
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("%{}%", value));
-
-    let evaluators = sqlx::query_as::<_, EvaluatorSummary>(
-        r#"
-        SELECT
-            namespace, name, version, description, tags, metadata, state, state_reason
-        FROM evaluators
-        WHERE namespace = $1
-          AND (
-              $2::text IS NULL
-              OR name ILIKE $2
-              OR COALESCE(description, '') ILIKE $2
-              OR COALESCE(state_reason, '') ILIKE $2
-              OR tags::text ILIKE $2
-              OR metadata::text ILIKE $2
-          )
-        ORDER BY name ASC, version DESC
-        LIMIT $3
-        "#,
-    )
-    .bind(namespace)
-    .bind(pattern)
-    .bind(limit)
-    .fetch_all(db)
-    .await?;
-
-    Ok(evaluators)
-}
-
 /// Updates an evaluator lifecycle state unless it has already been removed.
-pub(crate) async fn update_evaluator_state(
-    db: &PgPool,
+pub(crate) async fn update_evaluator_state<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
     namespace: &str,
     name: &str,
     version: &str,

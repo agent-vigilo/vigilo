@@ -23,18 +23,22 @@ flowchart TD
     MessageHandler["fa:fa-envelope-open-text <br/> <b>Chunk Message Handler</b> <br/> <small>[Component: Rust]</small> <br/> <small>Parses chunk-ready payloads and routes invalid, stale, successful, and retryable outcomes.</small>"]:::component
     MessageSettlement["fa:fa-check-double <br/> <b>Message Settlement</b> <br/> <small>[Component: Rust / AMQP]</small> <br/> <small>Acknowledges handled messages, delays planned execution retries, or requeues bounded recoverable failures.</small>"]:::component
 
-    ChunkWorkflow["fa:fa-handshake <br/> <b>Chunk Lease Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Uses message route hints, validates local write epochs, and claims or settles owned leases.</small>"]:::component
+    ChunkWorkflow["fa:fa-handshake <br/> <b>Chunk Lease Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Verifies local accepted identity before scope, validates epochs, and claims or settles owned leases.</small>"]:::component
     RunContextCache["fa:fa-boxes-stacked <br/> <b>Run Context Cache</b> <br/> <small>[Component: Rust / Moka]</small> <br/> <small>Caches verified run snapshots and pinned evaluator execution plans.</small>"]:::component
     EvaluatorLoader["fa:fa-cubes <br/> <b>Evaluator Loader Service</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Loads exact pinned artifacts, resolves ABI adapters, and warms prepared evaluators.</small>"]:::component
     CaseBatchLoader["fa:fa-table-list <br/> <b>Case Batch Loader</b> <br/> <small>[Component: Rust / Storage Adapter]</small> <br/> <small>Verifies immutable configuration and assigned case files within byte budgets.</small>"]:::component
 
     ExecutionProcessor["fa:fa-list-check <br/> <b>Execution Processing Workflow</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Allocates due attempts under a shared run-state guard, skips retry waits, and runs chunk cases with bounded parallelism.</small>"]:::component
-    AgentClient["fa:fa-brain <br/> <b>Agent Invocation Client</b> <br/> <small>[Component: Rust / HTTP]</small> <br/> <small>Sends evaluator-safe case input to the configured target and normalizes agent output.</small>"]:::component
+    AgentClient["fa:fa-brain <br/> <b>Inline Harness Transport</b> <br/> <small>[Component: Rust / HTTP]</small> <br/> <small>Invokes Direct Probe or Delegated Trial, validates target identity and captures bounded evidence.</small>"]:::component
+    DeferredInvocation["<b>Deferred Invocation</b><br/><small>Commits submission intent and resumes the original attempt from a saved outcome.</small>"]:::component
     WasmSemaphore["fa:fa-gauge-high <br/> <b>Wasm Evaluation Semaphore</b> <br/> <small>[Component: Rust / Tokio]</small> <br/> <small>Caps active evaluator invocations across the worker process.</small>"]:::component
-    EvaluatorExecutor["fa:fa-microchip <br/> <b>Evaluator Runtime Executor</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Dispatches versioned ABI adapters in fresh stores with memory, fuel, timeout, and log limits.</small>"]:::component
+    EvaluatorExecutor["fa:fa-microchip <br/> <b>Evaluator Runtime Executor</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Runs Code Scorers and Model-as-a-Judge implementations through the same ABI and fresh-store limits.</small>"]:::component
     CompletenessAggregator["fa:fa-list-check <br/> <b>Completeness & Aggregation</b> <br/> <small>[Component: Rust]</small> <br/> <small>Verifies required evaluator scores before calculating authoritative dimension and aggregate scores.</small>"]:::component
     ResultPersistence["fa:fa-database <br/> <b>Result Persistence Workflow</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Appends evaluator results and upserts aggregates with child-row authority checks.</small>"]:::component
-    TerminalTransitions["fa:fa-shield-halved <br/> <b>Terminal Transition Guard</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Marks attempts completed, retry-scheduled, or terminal only when chunk, current-attempt, and live-lease authority still match.</small>"]:::component
+    TerminalTransitions["fa:fa-shield-halved <br/> <b>Terminal Transition Guard</b> <br/> <small>[Component: Rust / SQLx]</small> <br/> <small>Persists invocation diagnostics with terminal state under chunk, current-attempt, and live-lease authority.</small>"]:::component
+
+    Credentials["Credential Provider<br/>Trusted local sources or external service protocol<br/>Transient headers, bounded resolution"]:::component
+    AgentClient --> Credentials
 
     %% worker boundary
     subgraph WorkerRuntime["&nbsp;"]
@@ -53,6 +57,8 @@ flowchart TD
         InputByteCache
         ExecutionProcessor
         AgentClient
+        DeferredInvocation
+        Credentials
         WasmSemaphore
         EvaluatorExecutor
         CompletenessAggregator
@@ -65,8 +71,18 @@ flowchart TD
     Database[("<b>Database Placements</b> <br/> <small>[Container: PostgreSQL]</small> <br/> <small>Store control evaluator metadata plus routed execution chunks, attempts, results, and aggregates.</small>")]:::component
     Queue[("<b>Queue</b> <br/> <small>[Container: RabbitMQ]</small> <br/> <small>Delivers run.chunk.ready broker messages to workers.</small>")]:::component
     TargetAgent["fa:fa-brain <br/> <b>Agent / AI Provider</b> <br/> <small>[External System]</small> <br/> <small>The model, agent wrapper, or HTTP endpoint being evaluated.</small>"]:::external
+    Trial["<b>Delegated Trial Harness</b><br/><small>[External System]</small>"]:::external
+
+    CredentialSources["<b>Operator Secret Sources</b><br/>Environment or mounted files"]:::external
+    CredentialService["<b>Credential Service</b><br/>External authorization and secret management"]:::external
+    Credentials -->|"Local provider"| CredentialSources
+    Credentials -->|"Service provider: authenticated versioned HTTP"| CredentialService
 
     %% edges
+    HostedWorker["Typed worker handle<br/>Explicit identity, retained caches and host cancellation"]:::component
+    HostedWorker -->|"Runs one delivery or a bounded stream"| WorkerConsumer
+    HostedWorker -->|"Retains execution authority"| RuntimeContext
+    HostedWorker --> Shutdown["Cancel admission, drain work and join<br/>Dropped work stops its owned lease heartbeat"]:::component
     Vigilo -->|"Runs worker start or once through"| CommandFacade
     CommandFacade -->|"Starts continuous mode with"| ServiceLoop
     CommandFacade -->|"Runs one bounded receive pass through"| WorkerConsumer
@@ -75,7 +91,7 @@ flowchart TD
     CommandFacade -->|"Creates shared access through"| RuntimeContext
     WorkerConsumer -->|"Uses messaging client from"| RuntimeContext
     MessageHandler -->|"Uses database and messaging clients from"| RuntimeContext
-    AgentClient -->|"Uses shared HTTP client from"| RuntimeContext
+    AgentClient -->|"Uses ordinary HTTP client from"| RuntimeContext
     EvaluatorLoader -->|"Uses registry cache and Wasm runtime from"| RuntimeContext
     EvaluatorExecutor -->|"Uses Wasm runtime from"| RuntimeContext
 
@@ -85,7 +101,7 @@ flowchart TD
 
     WorkerConsumer -->|"Delivers messages to"| MessageHandler
     MessageHandler -->|"Claims chunk ownership with"| ChunkWorkflow
-    ChunkWorkflow -->|"Reads and updates chunk leases in <br> <small>[SQL/TCP]</small>"| Database
+    ChunkWorkflow -->|"Scopes verified chunk reads and lease updates in <br> <small>[SQL/TCP]</small>"| Database
 
     MessageHandler -->|"Loads verified profile and execution plan through"| RunContextCache
     RunContextCache -->|"Reads compact immutable references from <br> <small>[SQL/TCP]</small>"| Database
@@ -100,8 +116,21 @@ flowchart TD
     InputByteCache -->|"Bounded verified reads on miss"| Objects
     MessageHandler -->|"Processes claimed case batch with"| ExecutionProcessor
 
-    ExecutionProcessor -->|"Invokes agent for chunk cases with bounded concurrency through"| AgentClient
-    AgentClient -->|"Sends case input and receives output from <br> <small>[TEXT/HTTP]</small>"| TargetAgent
+    ExecutionProcessor -->|"Invokes an inline harness through"| AgentClient
+    ExecutionProcessor -->|"Submits or resumes deferred work through"| DeferredInvocation
+    DeferredInvocation -->|"Stores intent and reads saved outcomes"| Database
+    DeferredInvocation -->|"Submits a Direct Probe"| TargetAgent
+    DeferredInvocation -->|"Submits a Delegated Trial"| Trial
+    DeferredInvocation -->|"Restores accepted evidence"| CapturedBody
+    AgentClient -->|"Direct Probe <br> <small>[HTTP]</small>"| TargetAgent
+    AgentClient -->|"Submits case input and receives the outcome <br> <small>[HTTP]</small>"| Trial
+    Trial -->|Drives the session with| TargetAgent
+    CapturedBody["<b>Original Response Bytes</b><br/>Immutable shared allocation; bounded content decoding."]:::component
+    ResponseResources["<b>Response Resource Table</b><br/>Evaluator-store ownership; scoped handles and read budgets."]:::component
+    AgentClient -->|"Captures complete decoded bodies"| CapturedBody
+    CapturedBody -->|"Shares bytes without copying"| ResponseResources
+    EvaluatorExecutor -->|"Owns and drops per invocation"| ResponseResources
+    EvaluatorExecutor -->|"Reads bounded ranges into guest memory"| ResponseResources
     ExecutionProcessor -->|"Acquires active-evaluation permits from"| WasmSemaphore
     WasmSemaphore -->|"Admits bounded evaluator calls into"| EvaluatorExecutor
     EvaluatorExecutor -->|"Gets prepared evaluators from"| EvaluatorLoader
@@ -126,3 +155,19 @@ flowchart TD
     %% links
     click Vigilo "/docs/architecture/structure/components/vigilo/"
     click Coordinator "/docs/architecture/structure/components/coordinator/"
+
+    HttpPolicyCache["Owner-bound evaluator HTTP policy cache<br/>Shared capacity; 30-second default maximum age"]:::component
+    PolicyStore["Control database operator policy rows"]:::storage
+    ExecutionProcessor -->|"Freeze evaluator snapshots per attempt"| HttpPolicyCache
+    HttpPolicyCache -->|"Owner-scoped transaction; one bounded policy batch"| PolicyStore
+
+    EvaluatorHttp["Bounded evaluator HTTP<br/>Pinned DNS, deadlines and cancellation"]:::component
+    EvaluatorCredentials["Host credential provider<br/>Invocation-scoped cache"]:::component
+    EvaluatorExecutor -->|"Authorized requests under frozen snapshot"| EvaluatorHttp
+    EvaluatorHttp -->|"Resolve bound credential within budget"| EvaluatorCredentials
+
+    ResourceResolver["Host resource resolver<br/>Exact work identity and pinned storage binding<br/>Bounded resolution; no ambient fallback"]:::component
+    RunContextCache -->|"Injected mode; resolve before immutable reads"| ResourceResolver
+    ResourceResolver -->|"Request-bound storage signing"| Objects
+    ResourceResolver -->|"Bind accepted invocation identity"| EvaluatorCredentials
+    AgentClient -->|"Injected mode; resolve agent credentials"| ResourceResolver

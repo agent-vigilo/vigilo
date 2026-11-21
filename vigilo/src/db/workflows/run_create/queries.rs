@@ -17,7 +17,7 @@ pub(crate) async fn upsert_dataset_version(
 ) -> anyhow::Result<()> {
     sqlx::query("INSERT INTO dataset_versions(dataset_version_id,dataset_id,dataset_version) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
         .bind(dataset_version_id).bind(dataset_id).bind(dataset_version).execute(&mut **tx).await?;
-    let matches:bool=sqlx::query_scalar("SELECT dataset_id=$2 AND dataset_version=$3 FROM dataset_versions WHERE dataset_version_id=$1")
+    let matches:bool=sqlx::query_scalar("SELECT dataset_id=$2 AND dataset_version=$3 FROM dataset_versions WHERE tenant_id=current_setting('vigilo.tenant_id')::uuid AND dataset_version_id=$1")
         .bind(dataset_version_id).bind(dataset_id).bind(dataset_version).fetch_one(&mut **tx).await?;
     if !matches {
         return Err(seed_invariant_error(format!(
@@ -90,7 +90,8 @@ pub(crate) async fn insert_run_create(
         )
         ON CONFLICT (id) DO UPDATE
         SET updated_at = runs.updated_at
-        WHERE runs.run_key = EXCLUDED.run_key
+        WHERE runs.tenant_id = EXCLUDED.tenant_id
+          AND runs.run_key = EXCLUDED.run_key
           AND runs.name IS NOT DISTINCT FROM EXCLUDED.name
           AND runs.description IS NOT DISTINCT FROM EXCLUDED.description
           AND runs.dataset_id = EXCLUDED.dataset_id
@@ -169,7 +170,7 @@ pub(crate) async fn bulk_insert_run_chunks(
 
     for chunk_batch in chunks.chunks(RUN_CHUNK_INSERT_CHUNK_SIZE) {
         let mut query_builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO run_chunks (id, run_id, run_shard, dataset_version_id, profile_group_id, ordinal_start, ordinal_end, status) ",
+            "INSERT INTO run_chunks (tenant_id,execution_control,control_revision,id,run_id,run_shard,dataset_version_id,profile_group_id,ordinal_start,ordinal_end,status) SELECT r.tenant_id,r.execution_control,r.control_revision,v.* FROM runs r CROSS JOIN (",
         );
 
         query_builder.push_values(chunk_batch, |mut b, chunk| {
@@ -183,7 +184,7 @@ pub(crate) async fn bulk_insert_run_chunks(
                 .push_bind("pending");
         });
 
-        query_builder.push(
+        query_builder.push(") AS v(id,run_id,run_shard,dataset_version_id,profile_group_id,ordinal_start,ordinal_end,status) WHERE r.id=").push_bind(run_id).push(
             r#"
             ON CONFLICT (run_id, run_shard, id) DO UPDATE
             SET updated_at = run_chunks.updated_at
@@ -289,10 +290,7 @@ async fn validate_active_shard_capable_placement(
 ) -> anyhow::Result<()> {
     let placement = sqlx::query_as::<_, (String, String)>(
         r#"
-        SELECT role, status
-        FROM database_placements
-        WHERE alias = $1
-        FOR SHARE
+        SELECT role, status FROM vigilo_lock_database_placement($1)
         "#,
     )
     .bind(database_alias)

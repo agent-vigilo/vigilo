@@ -45,6 +45,7 @@ jobs:
         with:
           components: rustfmt
       - run: cargo +nightly fmt --all -- --check
+      - run: cargo +nightly fmt --manifest-path vigilo/tests/fixtures/library-consumer/Cargo.toml -- --check
 
   clippy:
     name: Clippy
@@ -57,6 +58,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo clippy -p vigilo --locked --features blob-storage-services --test blob_storage_services --test dataset_ingestion_services -- -D warnings
       - run: cargo clippy -p vigilo --locked --features agent-http-services --test agent_http_services -- -D warnings
+      - run: cargo clippy -p vigilo --locked --features evaluator-http-services --test evaluator_http_services --test evaluator_operations_services -- -D warnings
 
   unit-tests:
     name: Unit and Contract Tests (${{ matrix.os }})
@@ -80,11 +82,36 @@ jobs:
       - name: Install cargo-llvm-cov
         if: matrix.coverage
         uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Test core evaluator release policy
+      - name: Test release policies
         run: python3 -m unittest discover -s scripts/releases -p 'test_*.py'
       - name: Run service-free tests
         if: ${{ !matrix.coverage }}
-        run: cargo test --workspace --locked --lib --bins --verbose
+        shell: python3 {0}
+        run: |
+          import os
+          import subprocess
+          import sys
+
+          # Fixed database bindings reject environment defaults used by SQLx.
+          env = os.environ.copy()
+          for key in (
+              'PGHOSTADDR', 'PGHOST', 'PGPORT', 'PGUSER', 'PGDATABASE', 'PGPASSWORD',
+              'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY', 'PGSSLMODE', 'PGAPPNAME', 'PGOPTIONS',
+          ):
+              env.pop(key, None)
+          sys.exit(subprocess.run(
+              ['cargo', 'test', '--workspace', '--locked', '--lib', '--bins', '--verbose'],
+              env=env,
+          ).returncode)
+      - name: Verify independent library consumer
+        if: ${{ !matrix.coverage }}
+        run: |
+          python3 -c "import shutil; shutil.copyfile('Cargo.lock', 'vigilo/tests/fixtures/library-consumer/Cargo.lock')"
+          cargo run --manifest-path vigilo/tests/fixtures/library-consumer/Cargo.toml --offline
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      - name: Verify sealed operation proofs
+        run: cargo test -p vigilo --locked --doc operations
       - name: Run service-free tests with coverage
         if: matrix.coverage
         run: >-
@@ -154,7 +181,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql://postgres:password@localhost:5432/postgres
+      DATABASE_URL: postgresql://postgres:password@localhost:5432/postgres?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
       RUST_BACKTRACE: "1"
     steps:
       - uses: actions/checkout@v6
@@ -171,22 +198,22 @@ jobs:
           cargo llvm-cov run --no-report -p vigilo --locked --
           setup --skip-evaluators
         env:
-          DATABASE_URL: postgresql://postgres:password@localhost:5432/template1
+          DATABASE_URL: postgresql://postgres:password@localhost:5432/template1?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
       - name: Run PostgreSQL-backed SQLx tests with coverage
         run: >-
-          cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
+          cargo llvm-cov --no-report -p vigilo --locked --lib
           -- --ignored --nocapture --test-threads=4
       - name: Build portable evaluator fixture
         run: cargo build -p sentiment-basic-en --locked --target wasm32-wasip2 --release
       - name: Verify portable evaluator publication with coverage
         run: >-
-          cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
+          cargo llvm-cov --no-report -p vigilo --locked --lib
           --features evaluator-abi-fixtures --
           evaluators::postgres_tests::portable_publication_matches_source_and_preserves_conflict_guards
           --ignored --exact --nocapture
       - name: Verify core collection publication with coverage
         run: >-
-          cargo llvm-cov --no-report -p vigilo --locked --bin vigilo
+          cargo llvm-cov --no-report -p vigilo --locked --lib
           --features evaluator-abi-fixtures --
           core_evaluators::tests::collection_publication_replays_without_download_and_rejects_conflicts
           --ignored --exact --nocapture
@@ -221,7 +248,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgresql://postgres:password@localhost:5432/agent_vigilo
+      DATABASE_URL: postgresql://postgres:password@localhost:5432/agent_vigilo?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
       MESSAGING_URL: amqp://guest:guest@localhost:5672
     steps:
       - uses: actions/checkout@v6
@@ -276,8 +303,9 @@ jobs:
           --health-retries 5
           --health-start-period 20s
     env:
-      DATABASE_URL: postgresql://postgres:password@localhost:5432/agent_vigilo
-      VIGILO_TEST_SHARD_001_DATABASE_URL: postgresql://postgres:password@localhost:5433/agent_vigilo
+      # The PostgreSQL protocol probe accepts only numeric IPv4 loopback.
+      DATABASE_URL: postgresql://postgres:password@127.0.0.1:5432/agent_vigilo?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
+      VIGILO_TEST_SHARD_001_DATABASE_URL: postgresql://postgres:password@127.0.0.1:5433/agent_vigilo?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
       MESSAGING_URL: amqp://guest:guest@localhost:5672
       DEV_S3_ACCESS_KEY_ID: vigilo-ci-runtime
       DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-runtime-secret
@@ -313,7 +341,7 @@ jobs:
       - name: Reset coverage data
         run: cargo llvm-cov clean --workspace
       - name: Build the end-to-end evaluator
-        run: cargo build -p sentiment-basic-en --target wasm32-wasip2 --release --locked
+        run: cargo build -p sentiment-basic-en -p http-request-fixture --target wasm32-wasip2 --release --locked
       - name: Run routing integration tests with coverage
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
@@ -328,6 +356,15 @@ jobs:
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
           --features agent-http-services --test agent_http_services
+      - name: Run evaluator HTTP transport tests with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features evaluator-http-services --test evaluator_http_services
+      - name: Verify public evaluator registry and test authority with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features evaluator-http-services --test evaluator_operations_services
+          -- --nocapture
       - name: Generate end-to-end coverage report
         run: >-
           cargo llvm-cov report
@@ -364,7 +401,7 @@ jobs:
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      DATABASE_URL: postgresql://postgres:password@localhost:15432/postgres
+      DATABASE_URL: postgresql://postgres:password@localhost:15432/postgres?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
       DEV_S3_ACCESS_KEY_ID: vigilo-ci-storage
       DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-storage-secret
       DEV_S3_BUCKET: vigilo-ci-storage
@@ -394,6 +431,11 @@ jobs:
           cargo llvm-cov --no-report -p vigilo --locked
           --features blob-storage-services --test blob_storage_services
           -- signed_storage_contract --exact --nocapture
+      - name: Verify injected signing credentials with coverage
+        run: >-
+          cargo llvm-cov --no-report -p vigilo --locked
+          --features blob-storage-services --test blob_storage_services
+          -- injected_signing_provider_has_no_ambient_fallback --exact --nocapture
       - name: Verify transport faults with coverage
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
@@ -488,13 +530,13 @@ jobs:
           cargo build --target wasm32-wasip2 --release --locked "${package_args[@]}"
       - name: Verify evaluator ABI compatibility
         run: >-
-          cargo test -p vigilo --locked --bin vigilo
+          cargo test -p vigilo --locked --lib
           --features evaluator-abi-fixtures
-          evaluator_abi::tests::all_registered_evaluator_abis_execute_in_one_host
-          -- --exact
+          evaluator_abi::tests::
+          -- --nocapture
       - name: Verify portable evaluator identity and ABI validation
         run: >-
-          cargo test -p vigilo --locked --bin vigilo
+          cargo test -p vigilo --locked --lib
           --features evaluator-abi-fixtures
           context::wasm::tests::portable_artifacts_preserve_exact_bytes_and_verify_embedded_identity_and_host_abi
           -- --exact
@@ -514,4 +556,13 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run typecheck
-      - run: npm run build
+      - run: npm run test:docs
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify current and archived docs for the crate version
+        run: |
+          VIGILO_DOCS_RELEASE="$(python3 ../scripts/releases/crate.py)"
+          export VIGILO_DOCS_RELEASE
+          npm run build
+          VIGILO_DOCS_ARCHIVE=1 npm run build

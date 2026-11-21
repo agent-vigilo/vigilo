@@ -25,10 +25,21 @@ How executions and attempts become authoritative work records while workers proc
 - Executions are inserted or upserted only while the owning run is `running`; workers use a shared run-state guard so chunks for the same run can proceed concurrently.
 - Within a claimed chunk, workers can process multiple cases concurrently; each case still receives an authoritative attempt id and attempt number.
 - New attempts record the worker id, host label, internal queue message UUID, broker message id, lease expiration, and heartbeat timestamp.
-- A new worker attempt or recovered expired chunk lease marks any previous running attempt `stale`.
+- A new worker attempt or recovered expired chunk lease marks a previous running
+  attempt `stale`. A deferred invocation can wait without a worker lease.
+  Submission and polling use separate, short invocation claims.
+- A deferred submission moves the execution to `awaiting_agent`. An accepted
+  outcome or an elapsed deadline moves it to `awaiting_evaluators` so a worker
+  can reclaim the same attempt. The worker scores saved evidence on success
+  and settles failures or timeouts without a score.
+- A verified callback can finish the invocation before its submission receipt.
+  Vigilo checks the current attempt, placement epoch, and deadline on the
+  execution shard. Acceptance commits evidence and scoring readiness together.
+  Duplicate delivery acknowledges the saved outcome without reapplying it.
 - Terminal transitions first lock the still-live chunk, then require the execution's current attempt id and attempt number to match the worker's transition. Worker-owned transitions also require a live attempt lease for that worker.
 - Completed executions require an aggregate row. Worker failure transitions upsert an error aggregate when the failure is non-retryable or the attempt budget is exhausted. Chunk settlement instead retires unfinished authority and closes existing unresolved executions without inventing an aggregate; missing executions remain absent.
 - Retryable failed attempts that still have retry budget move the execution to `retry_scheduled` with a durable `retry_after`; the next chunk pass only creates a new attempt once that timestamp is due.
+- Retries retain the logical execution ID and allocate a new attempt ID. A timeout does not prove that remote work stopped; see [remote execution and duplicate requests](/docs/configuration/run-profile#remote-execution-and-duplicate-requests).
 - `defaults.max_attempts` is the hard execution retry limit. Exhausted open executions are closed as failed instead of being requeued indefinitely.
 
 After chunk settlement, current completed attempts with matching aggregates remain authoritative. Superseded or retired attempts remain stale evidence; unfinished evidence cannot contribute scores. See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
@@ -46,3 +57,21 @@ batch transition uses this policy rather than classifying error-message text, an
 preserves the later of bounded local backoff/jitter and server advice. Non-retryable
 failures create an error aggregate immediately; no numerical score is invented.
 See [agent retry policy](/docs/configuration/run-profile#agent-invocation-failures-and-retries).
+
+Credential resolution happens inside the allocated attempt. Transient resolver
+failures use the same durable retry budget; invalid bindings and authorization
+denials are terminal. Each retry resolves the current credential value again.
+Only the typed failure is persisted, not the credential or its grant. See
+[Agent Credentials](/docs/configuration/agent-credentials).
+
+Each inline invocation's bounded timing, identity, status, failure category, and supported
+usage counters are merged into `outcome_summary.agent_invocation` by the same
+authoritative terminal statement. A successful HTTP record survives a subsequent
+evaluator failure. This adds no query or transaction. See
+[invocation diagnostics](/docs/configuration/run-profile#agent-invocation-diagnostics).
+
+The terminal persistence boundary also accepts a shared response-evidence packet.
+It validates ownership and frozen provenance and stores its metadata and bytes in
+the same attempt update. Ordinary status reads omit the payload. See
+[Response Evidence](/docs/architecture/response-evidence/) for the persistence
+contract, execution availability, and cleanup ownership.

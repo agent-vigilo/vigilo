@@ -89,15 +89,16 @@ mod tests {
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx snapshot tests"]
     async fn select_worker_run_snapshot_verifies_execution_plan(pool: PgPool) {
         let run_id = Uuid::now_v7();
+        crate::db::test_support::seed_run_owner(&pool, run_id).await;
         let dataset_id = Uuid::now_v7();
         let dataset_version_id = Uuid::now_v7();
-        let profile = serde_yaml::from_str::<serde_json::Value>(include_str!(
-            "../../../../example/profile.yaml"
-        ))
-        .unwrap();
+        let profile =
+            serde_yaml::from_str::<serde_json::Value>(crate::contracts::run::PROFILE_FIXTURE)
+                .unwrap();
         let execution_plan = EvaluatorExecutionPlan::new(
             "aggregation-hash".to_string(),
             vec![ResolvedEvaluator {
+                http_rules: vec![],
                 evaluator_ref: "vigilo/sentiment-basic-en:0.1.0".to_string(),
                 evaluator_id: Uuid::now_v7(),
                 content_hash: "content-hash".to_string(),

@@ -14,12 +14,26 @@ flowchart TD
     AgentClient(["fa:fa-robot <br/> <b>Agentic Client</b> <br/> <small>[Software System]</small>"]):::actor
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
+    LibraryHost["Rust host<br/>Caller-owned runtime and presentation"]:::actor
+    StatusOperations["Typed inspection operations<br/>Status and results; scoped shared pools; no output state"]:::component
+    HostedRuntime["Hosted runtime<br/>Validated fixed roles and injected resources"]:::component
+    LibraryHost --> HostedRuntime
+    HostedRuntime --> StatusOperations
+    HostedRuntime -->|"Calls shared cycles in process"| Coordinator
+    HostedRuntime -->|"Calls shared worker services in process"| Worker
+    ExportReaders["Bounded export operations<br/>Separate ordinary/content/diagnostic access; fixed read-only pools"]:::component
+    LibraryHost --> ExportReaders
+    ExportReaders --> RunQueries
+    LibraryHost --> StatusOperations
+    CliRouter -->|status/results| StatusOperations
+    StatusOperations --> RunQueries
+
     %% components
     CliRouter["fa:fa-terminal <br/> <b>CLI App and Command Router</b> <br/> <small>[Component: Rust / Clap]</small> <br/> <small>Parses global options and dispatches setup, dataset, evaluator, run, database, rebalance, coordinator, and worker commands.</small>"]:::component
     RuntimeContext["fa:fa-layer-group <br/> <b>Runtime Context Provider</b> <br/> <small>[Component: Rust]</small> <br/> <small>Lazily initializes routed database access, storage adapters, messaging, output, registry cache, and Wasm runtime clients.</small>"]:::component
     OutputRenderer["fa:fa-file-lines <br/> <b>Output Renderer</b> <br/> <small>[Component: Rust]</small> <br/> <small>Writes structured command responses as JSON or TOON.</small>"]:::component
 
-    SetupManager["fa:fa-screwdriver-wrench <br/> <b>Setup Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Applies embedded schema migrations or an explicit SQL directory validates database placement, and installs the official core evaluator collection unless skipped.</small>"]:::component
+    SetupManager["fa:fa-screwdriver-wrench <br/> <b>Setup Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Applies embedded schema migrations or an explicit SQL directory, validates database placement, and installs the official core evaluator collection unless skipped.</small>"]:::component
     EvaluatorRegistry["fa:fa-box-archive <br/> <b>Evaluator Registry Manager</b> <br/> <small>[Component: Rust]</small> <br/> <small>Publishes, searches, inspects, tests, and changes evaluator registry state.</small>"]:::component
     EvaluatorPreparer["fa:fa-cubes <br/> <b>Evaluator Package Preparer</b> <br/> <small>[Component: Rust / Wasmtime]</small> <br/> <small>Resolves the static ABI adapter registry, typed-links versioned components, and computes artifact metadata.</small>"]:::component
 
@@ -39,6 +53,7 @@ flowchart TD
     %% command runtime boundary
     subgraph VigiloRuntime["&nbsp;"]
         CliRouter
+        StatusOperations
         RuntimeContext
         OutputRenderer
         SetupManager
@@ -65,6 +80,8 @@ flowchart TD
 
     CliRouter -->|"Uploads, resumes and cleans datasets"| DatasetIngestion
     DatasetIngestion -->|"Persists compact ownership and progress"| Database
+    LibraryHost -->|"Caller-bound dataset operations"| DatasetIngestion
+    HostedRuntime -->|"Fixed user pools and injected signing"| DatasetIngestion
     DatasetIngestion --> BlobAdapter
     RunPlanner -->|"Verifies datasets and publishes bounded plan files"| BlobAdapter
     BlobAdapter --> ObjectStorage
@@ -80,7 +97,9 @@ flowchart TD
     CliRouter -->|"Runs setup commands using"| SetupManager
     CliRouter -->|"Runs evaluator commands using"| EvaluatorRegistry
     CliRouter -->|"Runs run commands using"| RunPlanner
-    CliRouter -->|"Runs inspection and placement administration using"| RunQueries
+    LibraryHost -->|"RunClient prepares and accepts immutable work"| RunPlanner
+    HostedRuntime -->|"Caller-bound preparation and acceptance"| RunPlanner
+    CliRouter -->|"Runs export and placement administration using"| RunQueries
     CliRouter -->|"Starts and runs service mode using"| CoordinatorFacade
     CliRouter -->|"Starts and runs service mode using"| WorkerFacade
 
@@ -88,6 +107,8 @@ flowchart TD
 
     CliRouter -->|"Creates portable archives locally using"| EvaluatorPreparer
     EvaluatorPreparer -->|"Writes verified portable packages to"| EvaluatorPackages
+    LibraryHost -->|"Caller-bound registry and isolated test operations"| EvaluatorRegistry
+    HostedRuntime -->|"Fixed registry role and injected test authority"| EvaluatorRegistry
     EvaluatorRegistry -->|"Prepares packages with"| EvaluatorPreparer
     EvaluatorPackages -->|"Provides manifests and Wasm artifacts to"| EvaluatorPreparer
     EvaluatorRegistry -->|"Reads from and writes to <br> <small>[SQL/TCP]</small>"| Database
@@ -95,10 +116,10 @@ flowchart TD
 
     RunPlanner -->|"Validates executability with"| RunValidator
     RunPlanner -->|"Persists planned runs through"| RunPersistence
-    RunValidator -->|"Checks evaluator registry and profile data in <br> <small>[SQL/TCP]</small>"| Database
-    RunPersistence -->|"Writes compact plan checkpoints and idempotent execution metadata to <br> <small>[SQL/TCP]</small>"| Database
+    RunValidator -->|"Checks evaluator metadata under command context in <br> <small>[SQL/TCP]</small>"| Database
+    RunPersistence -->|"Scopes preparation checkpoints and exact acceptance before system admission <br> <small>[SQL/TCP]</small>"| Database
     RunQueries -->|"Reads and updates run state in <br> <small>[SQL/TCP]</small>"| Database
-    RunQueries -->|"Writes formatted results using"| OutputRenderer
+    RunQueries -->|"Formats CLI export/admin output using"| OutputRenderer
 
     CoordinatorFacade -->|"Runs loops and one-shot cycles with"| ServiceRunner
     WorkerFacade -->|"Runs loops and one-shot cycles with"| ServiceRunner

@@ -1,39 +1,37 @@
-//! Evaluator search command implementation.
-//!
-//! Queries registry summaries within one namespace and writes a structured
-//! response through the configured output buffer. Keep result shaping here
-//! small and stable so agents can parse `data` and `meta` consistently.
-
+//! Evaluator search presentation; the library owns bounded metadata-only queries.
 use super::*;
-
 pub(super) async fn exec(
     context: Context,
     namespace: String,
     limit: i64,
     query: Option<String>,
 ) -> anyhow::Result<()> {
-    info!(
-        "searching evaluators namespace `{}` for term `{}`",
-        namespace,
-        query.clone().unwrap_or_default(),
-    );
-
-    let db = context.dbr().await?.control().await?;
     let out = context.out().await?;
-    let evaluators =
-        evaluators::search_evaluator_summaries(db, &namespace, query.as_deref(), limit).await?;
-
-    let payload = json!({
-        "data": evaluators,
-        "meta": {
-            "namespace": namespace,
-            "query": query,
-            "limit": limit,
-            "count": evaluators.len(),
-        },
-    });
-
-    out.write_value(&payload)?;
-
+    let client = crate::operations::evaluators::EvaluatorClient::operator(
+        context.clone(),
+        DEFAULT_NAMESPACE,
+    )
+    .await?;
+    let mut values = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = client
+            .search(
+                &namespace,
+                query.as_deref(),
+                crate::operations::evaluators::PageLimits::new(
+                    (limit as usize - values.len()) as u32,
+                    8 * 1024 * 1024,
+                )?,
+                cursor.as_ref(),
+            )
+            .await?;
+        values.extend(page.items.into_iter().map(|e|json!({"namespace":e.namespace,"name":e.name,"version":e.version,"description":e.description,"tags":e.tags,"metadata":e.metadata,"state":e.state,"state_reason":e.state_reason})));
+        cursor = page.next;
+        if values.len() == limit as usize || cursor.is_none() {
+            break;
+        }
+    }
+    out.write_value(&json!({"data":values,"meta":{"namespace":namespace,"query":query,"limit":limit,"count":values.len()}}))?;
     Ok(())
 }

@@ -17,13 +17,13 @@ use crate::context::{
     wasm,
 };
 
-pub(super) mod coordinator;
+pub(crate) mod coordinator;
 pub(super) mod dataset;
 pub(super) mod evaluators;
 pub(super) mod run;
 pub(super) mod setup;
 pub(super) mod shard;
-pub(super) mod worker;
+pub(crate) mod worker;
 
 use super::{
     Executable,
@@ -39,6 +39,7 @@ pub(crate) struct CommandContextConfig {
     pub(crate) messaging: Option<crate::mq::Config>,
     pub(crate) wasm: wasm::Config,
     pub(crate) agent_http: crate::agent_client::limits::Limits,
+    pub(crate) agent_credentials: Option<std::path::PathBuf>,
     pub(crate) circuit_breaker: CircuitBreakerConfig,
     pub(crate) database_operation_timeout:
         Option<crate::context::database::DatabaseOperationTimeoutConfig>,
@@ -101,6 +102,7 @@ impl Command {
         control_database_alias: &str,
     ) -> anyhow::Result<CommandContextConfig> {
         let mut messaging = None;
+        let mut agent_credentials = None;
         let mut agent_http = crate::agent_client::limits::Limits::default();
         let mut wasm = WasmOptions::default();
         let mut circuit_breaker = CircuitBreakerOptions::default();
@@ -110,6 +112,7 @@ impl Command {
         match self {
             Self::Coordinator(command) => {
                 messaging = Some(command.messaging.config()?);
+                agent_credentials = command.agent_credentials.clone();
                 circuit_breaker = command.circuit_breaker;
                 database_operation_timeout = Some(command.database_operation_timeout.config()?);
             }
@@ -117,6 +120,7 @@ impl Command {
                 messaging = Some(command.messaging.config()?);
                 wasm = command.wasm;
                 agent_http = command.agent_http.config();
+                agent_credentials = command.agent_credentials.clone();
                 circuit_breaker = command.circuit_breaker;
                 database_operation_timeout = Some(command.database_operation_timeout.config()?);
             }
@@ -163,6 +167,7 @@ impl Command {
             messaging,
             wasm: wasm.config(),
             agent_http,
+            agent_credentials,
             circuit_breaker: circuit_breaker.config()?,
             database_operation_timeout,
             placement: PlacementConfig::new(

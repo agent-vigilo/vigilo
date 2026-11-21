@@ -1,8 +1,16 @@
 CREATE TABLE runs (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    execution_control execution_control NOT NULL DEFAULT 'enabled',
+    control_revision BIGINT NOT NULL DEFAULT 0 CHECK (control_revision >= 0),
+    control_settled_revision BIGINT NOT NULL DEFAULT 0 CHECK (control_settled_revision BETWEEN 0 AND control_revision),
+    control_settlement_token UUID,
+    control_settlement_until TIMESTAMPTZ,
+    CHECK ((control_settlement_token IS NULL) = (control_settlement_until IS NULL)),
+    control_reason TEXT CHECK (octet_length(control_reason) <= 256),
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     -- external/run-level identity
-    run_key TEXT NOT NULL UNIQUE,
+    run_key TEXT NOT NULL,
 
     -- human/lookup metadata
     name TEXT,
@@ -10,7 +18,7 @@ CREATE TABLE runs (
 
     -- what is being evaluated
     dataset_id UUID NOT NULL,
-    dataset_version_id UUID NOT NULL REFERENCES dataset_versions(dataset_version_id),
+    dataset_version_id UUID NOT NULL,
     dataset_version TEXT NOT NULL,
     evaluation_profile_id TEXT NOT NULL,
     evaluation_profile_version TEXT NOT NULL,
@@ -58,8 +66,13 @@ CREATE TABLE runs (
     completed_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    CONSTRAINT uq_runs_id_dataset_version_id UNIQUE (id, dataset_version_id)
+    CONSTRAINT uq_runs_id_dataset_version_id UNIQUE (id, dataset_version_id),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, run_key),
+    FOREIGN KEY (tenant_id, dataset_version_id) REFERENCES dataset_versions(tenant_id, dataset_version_id)
 );
+
+CREATE INDEX idx_runs_control_settlement ON runs(updated_at,id) WHERE execution_control='revoked' AND control_settled_revision<control_revision;
 
 CREATE INDEX idx_runs_status ON runs(status);
 
@@ -67,11 +80,11 @@ CREATE INDEX idx_runs_status_created_at ON runs(status, created_at);
 
 CREATE INDEX idx_runs_status_updated_at ON runs(status, updated_at);
 
-CREATE INDEX idx_runs_gate_status ON runs(gate_status);
+CREATE INDEX idx_runs_gate_status ON runs(tenant_id, gate_status);
 
-CREATE INDEX idx_runs_dataset ON runs(dataset_id, dataset_version);
+CREATE INDEX idx_runs_dataset ON runs(tenant_id, dataset_id, dataset_version);
 
-CREATE INDEX idx_runs_dataset_version_id ON runs(dataset_version_id);
+CREATE INDEX idx_runs_dataset_version_id ON runs(tenant_id, dataset_version_id);
 
 CREATE INDEX idx_runs_coordinator_lease ON runs(coordinator_leased_until)
     WHERE status IN ('creating', 'pending', 'running', 'finalizing');
@@ -191,3 +204,48 @@ COMMENT ON COLUMN runs.completed_at IS
 
 COMMENT ON COLUMN runs.updated_at IS
     'Timestamp of the last update to the run record.';
+
+-- Restricted scheduler entry point; relations bind to the installation schema.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_claim_finalization(p_run_id uuid, p_coordinator_id uuid, p_lease_seconds integer)
+RETURNS TABLE(id uuid, run_key text, aggregation_policy_hash text, tenant_id uuid)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+    IF p_run_id IS NULL OR p_coordinator_id IS NULL OR p_lease_seconds IS NULL
+       OR p_lease_seconds < 1 OR p_lease_seconds > 86400 THEN
+        RAISE EXCEPTION 'invalid finalization claim parameters' USING ERRCODE = '22023';
+    END IF;
+    RETURN QUERY
+WITH candidate AS (
+            SELECT r.id
+            FROM %1$I.runs r
+            WHERE r.id = p_run_id::uuid
+              AND r.status IN ('running'::%1$I.run_status, 'finalizing'::%1$I.run_status)
+              AND r.execution_control = 'enabled'
+              AND (
+                  r.status <> 'finalizing'::%1$I.run_status
+                  OR r.coordinator_leased_until IS NULL
+                  OR r.coordinator_leased_until < now()
+              )
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE %1$I.runs r
+        SET status = 'finalizing'::%1$I.run_status,
+            coordinator_id = p_coordinator_id,
+            coordinator_leased_until = now() + (p_lease_seconds::int * interval '1 second'),
+            coordinator_heartbeat_at = now(),
+            updated_at = now()
+        FROM candidate
+        WHERE r.id = candidate.id
+        RETURNING r.id, r.run_key, r.aggregation_policy_hash, r.tenant_id;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_claim_finalization(uuid,uuid,integer) FROM PUBLIC', installation_schema);
+END;
+$install$;

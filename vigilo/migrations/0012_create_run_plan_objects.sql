@@ -1,4 +1,5 @@
 CREATE TABLE run_plan_objects (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL REFERENCES run_plans(run_id) ON DELETE CASCADE,
     object_key TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('configuration', 'chunks', 'index', 'gates', 'manifest', 'probe')),
@@ -10,7 +11,8 @@ CREATE TABLE run_plan_objects (
     PRIMARY KEY (run_id, object_key),
     UNIQUE (run_id, kind, level, range_start),
     CHECK ((range_start IS NULL) = (range_end IS NULL)),
-    CHECK ((kind = 'probe') = (range_start IS NULL))
+    CHECK ((kind = 'probe') = (range_start IS NULL)),
+    CONSTRAINT fk_run_plan_objects_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX run_plan_unacknowledged ON run_plan_objects(run_id, object_key) WHERE NOT acknowledged;

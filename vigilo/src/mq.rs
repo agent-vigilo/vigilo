@@ -110,6 +110,11 @@ impl Config {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
 
+        Self::explicit(uri, namespace.as_deref())
+    }
+
+    /// Host configuration selects topology explicitly, without environment lookup.
+    pub(crate) fn explicit(uri: String, namespace: Option<&str>) -> Self {
         if let Some(namespace) = namespace {
             let prefix = format!("vigilo.{}", namespace);
             return Self {

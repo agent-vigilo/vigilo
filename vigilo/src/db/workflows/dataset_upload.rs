@@ -18,8 +18,10 @@ use sqlx::{
     types::Json,
 };
 use uuid::Uuid;
+pub(crate) mod access;
 pub(crate) mod batches;
 mod queries;
+use access::Access;
 // Abort/expiry SQL quarantines writes for 120 seconds. Changing the shared
 // operation default requires updating and re-verifying that cleanup contract.
 const _: () = assert!(crate::blob_storage::DEFAULT_OPERATION_SECONDS == 120);
@@ -33,6 +35,8 @@ use crate::contracts::case_storage::{
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub(crate) struct Upload {
+    #[serde(skip)]
+    pub tenant_id: Uuid,
     pub id: Uuid,
     pub status: String,
     pub storage_alias: String,
@@ -75,7 +79,10 @@ async fn bounded<T>(future: impl std::future::Future<Output = Result<T>>) -> Res
     tokio::time::timeout(std::time::Duration::from_secs(30), future).await?
 }
 
-pub(crate) async fn load(db: &PgPool, id: Uuid) -> Result<Upload> {
+pub(crate) async fn load<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
+    id: Uuid,
+) -> Result<Upload> {
     bounded(async {
         Ok(sqlx::query_as::<_, Upload>(queries::SELECT_UPLOAD)
             .bind(id)
@@ -84,7 +91,10 @@ pub(crate) async fn load(db: &PgPool, id: Uuid) -> Result<Upload> {
     })
     .await
 }
-pub(crate) async fn catalog(db: &PgPool, id: Uuid) -> Result<Option<Catalog>> {
+pub(crate) async fn catalog<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
+    id: Uuid,
+) -> Result<Option<Catalog>> {
     bounded(async {
         Ok(sqlx::query_as(queries::SELECT_CATALOG)
             .bind(id)
@@ -93,34 +103,39 @@ pub(crate) async fn catalog(db: &PgPool, id: Uuid) -> Result<Option<Catalog>> {
     })
     .await
 }
-pub(crate) async fn reusable(
-    db: &PgPool,
+pub(crate) async fn reusable<'a>(
+    db: impl Into<Access<'a>> + Send,
     alias: &str,
     binding: &str,
     identity: &DatasetIdentity,
     limits: &FormatLimits,
 ) -> Result<Option<Catalog>> {
+    let db = db.into();
     bounded(async {
-        Ok(sqlx::query_as(queries::FIND_REUSABLE)
+        let mut c = db.connection().await?;
+        let result = sqlx::query_as(queries::FIND_REUSABLE)
             .bind(alias)
             .bind(binding)
             .bind(&identity.dataset_hash)
             .bind(Json(limits))
-            .fetch_optional(db)
-            .await?)
+            .fetch_optional(&mut *c)
+            .await?;
+        c.finish().await?;
+        Ok(result)
     })
     .await
 }
 
 /// Creating/replaying an upload never changes its admitted identity or owner.
-pub(crate) async fn begin(
-    db: &PgPool,
+pub(crate) async fn begin<'a>(
+    db: impl Into<Access<'a>> + Send,
     id: Uuid,
     alias: &str,
     binding: &str,
     identity: &DatasetIdentity,
     limits: &FormatLimits,
 ) -> Result<Upload> {
+    let db = db.into();
     limits.validate()?;
     crate::contracts::case_storage::validate_digest(&identity.dataset_hash)?;
     ensure!(
@@ -132,15 +147,17 @@ pub(crate) async fn begin(
         "invalid dataset identity"
     );
     bounded(async {
+        let mut c = db.connection().await?;
         sqlx::query(queries::INSERT_UPLOAD)
             .bind(id)
             .bind(alias)
             .bind(binding)
             .bind(Json(identity))
             .bind(Json(limits))
-            .execute(db)
+            .execute(&mut *c)
             .await?;
-        let row = load(db, id).await?;
+        let row = load(&mut *c, id).await?;
+        db.verify(&row)?;
         ensure!(
             row.storage_alias == alias
                 && row.binding_hash == binding
@@ -148,20 +165,27 @@ pub(crate) async fn begin(
                 && row.limits.0 == *limits,
             "upload replay changed identity, batching, or storage owner"
         );
+        c.finish().await?;
         Ok(row)
     })
     .await
 }
-pub(crate) async fn claim(db: &PgPool, id: Uuid, cleanup: bool) -> Result<Lease> {
+pub(crate) async fn claim<'a>(
+    db: impl Into<Access<'a>> + Send,
+    id: Uuid,
+    cleanup: bool,
+) -> Result<Lease> {
+    let db = db.into();
     bounded(async {
+        let mut c = db.connection().await?;
         let owner = Uuid::now_v7();
         let generation: Option<i64> = sqlx::query_scalar(queries::CLAIM_UPLOAD)
             .bind(id)
             .bind(owner)
             .bind(cleanup)
-            .fetch_optional(db)
+            .fetch_optional(&mut *c)
             .await?;
-        Ok(Lease {
+        let lease = Lease {
             id,
             owner,
             generation: generation.ok_or_else(|| {
@@ -169,7 +193,9 @@ pub(crate) async fn claim(db: &PgPool, id: Uuid, cleanup: bool) -> Result<Lease>
                     "upload is leased, terminal, expired, or waiting for cleanup quarantine"
                 )
             })?,
-        })
+        };
+        c.finish().await?;
+        Ok(lease)
     })
     .await
 }
@@ -197,14 +223,17 @@ async fn guard(tx: &mut Transaction<'_, Postgres>, lease: Lease, cleanup: bool) 
     );
     Ok(row)
 }
-pub(crate) async fn release(db: &PgPool, lease: Lease) -> Result<()> {
+pub(crate) async fn release<'a>(db: impl Into<Access<'a>> + Send, lease: Lease) -> Result<()> {
+    let db = db.into();
     bounded(async {
+        let mut c = db.connection().await?;
         sqlx::query(queries::YIELD_UPLOAD)
             .bind(lease.id)
             .bind(lease.owner)
             .bind(lease.generation)
-            .execute(db)
+            .execute(&mut *c)
             .await?;
+        c.finish().await?;
         Ok(())
     })
     .await
@@ -212,12 +241,13 @@ pub(crate) async fn release(db: &PgPool, lease: Lease) -> Result<()> {
 
 /// Record exact ownership before I/O. A replay must match the same logical slot,
 /// including its bytes, range, schema and owner. SQL stores no payload or case IDs.
-pub(crate) async fn plan(
-    db: &PgPool,
+pub(crate) async fn plan<'a>(
+    db: impl Into<Access<'a>> + Send,
     lease: Lease,
     object: &Object,
     cleanup: bool,
 ) -> Result<bool> {
+    let db = db.into();
     bounded(async {
         let mut tx = db.begin().await?;
         let upload = guard(&mut tx, lease, cleanup).await?;
@@ -297,12 +327,13 @@ fn validate_object(upload: &Upload, lease: Lease, object: &Object, cleanup: bool
     );
     Ok(())
 }
-pub(crate) async fn acknowledge(
-    db: &PgPool,
+pub(crate) async fn acknowledge<'a>(
+    db: impl Into<Access<'a>> + Send,
     lease: Lease,
     object: &Object,
     cleanup: bool,
 ) -> Result<()> {
+    let db = db.into();
     bounded(async {
         let mut tx = db.begin().await?;
         let upload = guard(&mut tx, lease, cleanup).await?;
@@ -339,42 +370,56 @@ pub(crate) async fn acknowledge(
     })
     .await
 }
-pub(crate) async fn objects(
-    db: &PgPool,
+pub(crate) async fn objects<'a>(
+    db: impl Into<Access<'a>> + Send,
     id: Uuid,
     kind: &str,
     level: i16,
     after: i32,
 ) -> Result<Vec<Object>> {
+    let db = db.into();
     bounded(async {
-        Ok(sqlx::query_as(queries::SELECT_OBJECT_PAGE)
+        let mut c = db.connection().await?;
+        let result = sqlx::query_as(queries::SELECT_OBJECT_PAGE)
             .bind(id)
             .bind(kind)
             .bind(level)
             .bind(after)
-            .fetch_all(db)
-            .await?)
+            .fetch_all(&mut *c)
+            .await?;
+        c.finish().await?;
+        Ok(result)
     })
     .await
 }
-pub(crate) async fn pending_cleanup(
-    db: &PgPool,
+pub(crate) async fn pending_cleanup<'a>(
+    db: impl Into<Access<'a>> + Send,
     id: Uuid,
     probes_only: bool,
     limit: i64,
 ) -> Result<Vec<Object>> {
+    let db = db.into();
     ensure!((1..=256).contains(&limit), "invalid cleanup page limit");
     bounded(async {
-        Ok(sqlx::query_as(queries::SELECT_CLEANUP_PAGE)
+        let mut c = db.connection().await?;
+        let result = sqlx::query_as(queries::SELECT_CLEANUP_PAGE)
             .bind(id)
             .bind(probes_only)
             .bind(limit)
-            .fetch_all(db)
-            .await?)
+            .fetch_all(&mut *c)
+            .await?;
+        c.finish().await?;
+        Ok(result)
     })
     .await
 }
-pub(crate) async fn cleaned(db: &PgPool, lease: Lease, key: &str, cleanup: bool) -> Result<()> {
+pub(crate) async fn cleaned<'a>(
+    db: impl Into<Access<'a>> + Send,
+    lease: Lease,
+    key: &str,
+    cleanup: bool,
+) -> Result<()> {
+    let db = db.into();
     bounded(async {
         let mut tx = db.begin().await?;
         guard(&mut tx, lease, cleanup).await?;
@@ -388,7 +433,8 @@ pub(crate) async fn cleaned(db: &PgPool, lease: Lease, key: &str, cleanup: bool)
     })
     .await
 }
-pub(crate) async fn finalizing(db: &PgPool, lease: Lease) -> Result<()> {
+pub(crate) async fn finalizing<'a>(db: impl Into<Access<'a>> + Send, lease: Lease) -> Result<()> {
+    let db = db.into();
     bounded(async {
         let mut tx = db.begin().await?;
         let row = guard(&mut tx, lease, false).await?;
@@ -408,12 +454,13 @@ pub(crate) async fn finalizing(db: &PgPool, lease: Lease) -> Result<()> {
 
 /// Publish only a complete manifest under current authority. File and membership
 /// verification precedes this transaction; neither a stale lease nor abort can win.
-pub(crate) async fn publish(
-    db: &PgPool,
+pub(crate) async fn publish<'a>(
+    db: impl Into<Access<'a>> + Send,
     lease: Lease,
     manifest: &DatasetManifest,
     reference: &ObjectRef,
 ) -> Result<Catalog> {
+    let db = db.into();
     bounded(async {
         let mut tx = db.begin().await?;
         let row = guard(&mut tx, lease, false).await?;
@@ -476,16 +523,19 @@ pub(crate) async fn publish(
     })
     .await
 }
-pub(crate) async fn abort(db: &PgPool, id: Uuid) -> Result<()> {
+pub(crate) async fn abort<'a>(db: impl Into<Access<'a>> + Send, id: Uuid) -> Result<()> {
+    let db = db.into();
     bounded(async {
+        let mut c = db.connection().await?;
         let result = sqlx::query(queries::ABORT_UPLOAD)
             .bind(id)
-            .execute(db)
+            .execute(&mut *c)
             .await?;
         ensure!(
-            result.rows_affected() == 1 || load(db, id).await?.status == "aborted",
+            result.rows_affected() == 1 || load(&mut *c, id).await?.status == "aborted",
             "finalized or expired upload cannot be aborted"
         );
+        c.finish().await?;
         Ok(())
     })
     .await
@@ -500,7 +550,11 @@ pub(crate) async fn expire(db: &PgPool) -> Result<Vec<Uuid>> {
     })
     .await
 }
-pub(crate) async fn finish_cleanup(db: &PgPool, lease: Lease) -> Result<bool> {
+pub(crate) async fn finish_cleanup<'a>(
+    db: impl Into<Access<'a>> + Send,
+    lease: Lease,
+) -> Result<bool> {
+    let db = db.into();
     bounded(async {
         let mut tx = db.begin().await?;
         guard(&mut tx, lease, true).await?;
@@ -525,20 +579,35 @@ mod postgres_tests;
 
 /// Mint remote budgets before this renewal. A paused former owner cannot start
 /// I/O after the live lease window because its monotonic request deadline expires.
-pub(crate) async fn renew(db: &PgPool, lease: Lease, cleanup: bool) -> Result<()> {
+pub(crate) async fn renew<'a>(
+    db: impl Into<Access<'a>> + Send,
+    lease: Lease,
+    cleanup: bool,
+) -> Result<()> {
+    let db = db.into();
     bounded(async {
+        let mut c = db.connection().await?;
         let changed = sqlx::query(queries::RENEW_LIVE_UPLOAD)
             .bind(lease.id)
             .bind(lease.owner)
             .bind(lease.generation)
             .bind(cleanup)
-            .execute(db)
+            .execute(&mut *c)
             .await?;
         ensure!(
             changed.rows_affected() == 1,
             "dataset upload authority lost"
         );
+        c.finish().await?;
         Ok(())
     })
     .await
+}
+
+/// Read a finalized reference under the same caller domain as its upload.
+pub(crate) async fn catalog_for(db: Access<'_>, id: Uuid) -> Result<Option<Catalog>> {
+    let mut c = db.connection().await?;
+    let row = catalog(&mut *c, id).await?;
+    c.finish().await?;
+    Ok(row)
 }

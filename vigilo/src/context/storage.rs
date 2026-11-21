@@ -1,4 +1,4 @@
-//! Process-local storage configuration and bounded adapter reuse.
+//! Standalone process-local storage configuration and bounded adapter reuse.
 //!
 //! Durable references pin an owner's physical binding; credentials and local
 //! paths stay here. Runtime readers share transport and admission resources and

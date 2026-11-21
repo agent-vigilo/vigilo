@@ -1,4 +1,9 @@
-//! transitions queries for execution processing.
+//! Lease renewal and authoritative batched attempt settlement.
+//!
+//! These queries fence shard/chunk ownership and current-attempt authority before
+//! committing results, retries, and terminal state. Bounded invocation evidence is
+//! merged into the existing attempt update; it has no independent write path and
+//! cannot bypass the same ownership checks. Other chunks retain shared run access.
 
 use super::super::*;
 
@@ -9,18 +14,21 @@ use super::super::*;
 /// coordinator recovery or reassignment.
 pub(in crate::db::workflows::execution_processing) async fn heartbeat_running_attempts_for_chunk_query(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
     chunk_id: Uuid,
     worker_id: Uuid,
     lease_seconds: i32,
 ) -> anyhow::Result<u64> {
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE execution_attempts
-        SET leased_until = now() + ($5::int * interval '1 second'),
-            heartbeat_at = now(),
-            updated_at = now()
+        SET leased_until = statement_timestamp() + ($5::int * interval '1 second'),
+            heartbeat_at = statement_timestamp(),
+            updated_at = statement_timestamp()
         FROM executions
         WHERE execution_attempts.run_id = $1::uuid
           AND execution_attempts.run_shard = $2
@@ -38,9 +46,10 @@ pub(in crate::db::workflows::execution_processing) async fn heartbeat_running_at
     .bind(chunk_id)
     .bind(worker_id)
     .bind(lease_seconds)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
@@ -61,6 +70,7 @@ pub(in crate::db::workflows::execution_processing) async fn heartbeat_running_at
 /// - Writes terminal error aggregates when a failure is non-retryable or exhausted.
 pub(crate) async fn finalize_execution_terminal_transitions(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
     worker_id: Uuid,
@@ -70,6 +80,31 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     if transitions.is_empty() {
         return Ok(());
     }
+
+    for transition in transitions {
+        if let Some(evidence) = &transition.response_evidence {
+            evidence.validate_owner(run_id, transition.execution_id, transition.attempt_id)?;
+        }
+    }
+    let response_evidence = transitions
+        .iter()
+        .map(|transition| {
+            transition
+                .response_evidence
+                .as_ref()
+                .map(|evidence| evidence.metadata_json())
+                .transpose()
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let response_bytes = transitions
+        .iter()
+        .map(|transition| {
+            transition
+                .response_evidence
+                .as_ref()
+                .map(|evidence| evidence.payload())
+        })
+        .collect::<Vec<_>>();
 
     let execution_ids = transitions
         .iter()
@@ -96,6 +131,15 @@ pub(crate) async fn finalize_execution_terminal_transitions(
         .map(|transition| transition.requires_worker_lease)
         .collect::<Vec<_>>();
 
+    let agent_invocations = transitions
+        .iter()
+        .map(|t| {
+            t.agent_invocation
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let agent_failures = transitions
         .iter()
         .map(|t| {
@@ -150,7 +194,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     //                       - creates final error aggregate only after retries end.
     // execution_update      - moves executions to completed/retry_scheduled/failed.
     let mut tx = db.begin().await?;
-    crate::db::shard_write_fence::lock_shared(&mut tx, run_id, run_shard).await?;
+    crate::db::scope::lock_system_shard(&mut tx, tenant_id, run_id, run_shard).await?;
     // Take the chunk lock before any attempt mutation, just like persistence
     // and settlement. A separate statement refreshes the snapshot after waiting.
     let chunks = sqlx::query_as::<_, (Uuid, bool)>(
@@ -175,15 +219,19 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 $14::bool[],
                 $15::timestamptz[],
                 $16::int4[],
-                $17::int8[]
-            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs)
+                $17::int8[],
+                $18::jsonb[],
+                $19::jsonb[],
+                $20::bytea[],
+                $21::jsonb[]
+            ) AS t(execution_id, attempt_id, attempt_no, completed, error_message, requires_worker_lease, agent_failure, retryable, retry_not_before, jitter_ms, retry_delay_secs, agent_invocation, response_evidence, response_bytes, http_policy_revisions)
         ),
         transition_count AS (
             SELECT COUNT(*) AS expected_count
             FROM transition_input
         ),
         run_guard AS (
-            SELECT run_id AS id
+            SELECT run_id AS id, profile_hash, config_snapshot
             FROM run_snapshots
             WHERE run_id = $7::uuid
               AND run_shard = $8
@@ -193,7 +241,8 @@ pub(crate) async fn finalize_execution_terminal_transitions(
             SELECT
                 transition_input.*,
                 executions.run_id,
-                executions.run_shard
+                executions.run_shard,
+                COALESCE(execution_attempts.invocation_status = 'timed_out', false) AS invocation_timed_out
             FROM transition_input
             JOIN executions
               ON executions.run_id = $7::uuid
@@ -223,6 +272,13 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                  )
             JOIN run_guard
               ON run_guard.id = executions.run_id
+             AND (transition_input.response_evidence IS NULL OR (
+                 transition_input.response_evidence #>> '{provenance,case_hash}' = executions.case_hash
+                 AND transition_input.response_evidence #>> '{provenance,profile_hash}' = run_guard.profile_hash
+                 AND transition_input.response_evidence #>> '{provenance,execution_plan_hash}' = run_guard.config_snapshot->>'execution_plan_hash'
+                 AND transition_input.response_evidence->>'retention' = run_guard.config_snapshot #>> '{response_policy,retention}'
+                 AND transition_input.response_evidence->>'configuration_hash' = run_guard.config_snapshot #>> '{response_policy,configuration_hash}'
+             ))
         ),
         authority_check AS (
             SELECT transition_count.expected_count
@@ -290,6 +346,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
             UPDATE execution_attempts
             SET status = CASE
                     WHEN terminal_input.completed THEN 'completed'::attempt_status
+                    WHEN terminal_input.invocation_timed_out THEN 'timed_out'::attempt_status
                     WHEN terminal_input.agent_failure IS NOT NULL
                         THEN 'failed_agent_call'::attempt_status
                     ELSE 'failed_evaluation'::attempt_status
@@ -298,9 +355,18 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                     WHEN terminal_input.completed THEN NULL
                     ELSE terminal_input.error_message
                 END,
-                outcome_summary = CASE WHEN terminal_input.agent_failure IS NOT NULL
-                    THEN execution_attempts.outcome_summary || jsonb_build_object('agent_failure', terminal_input.agent_failure)
-                    ELSE execution_attempts.outcome_summary END,
+                response_evidence = COALESCE(terminal_input.response_evidence, execution_attempts.response_evidence),
+                response_evidence_bytes = COALESCE(terminal_input.response_bytes, execution_attempts.response_evidence_bytes),
+                invocation_evidence = NULL,
+                invocation_content_type = NULL,
+                outcome_summary = execution_attempts.outcome_summary
+                    || jsonb_build_object('evaluator_http_policy_revisions', terminal_input.http_policy_revisions)
+                    || CASE WHEN terminal_input.agent_failure IS NOT NULL
+                        THEN jsonb_build_object('agent_failure', terminal_input.agent_failure)
+                        ELSE '{}'::jsonb END
+                    || CASE WHEN terminal_input.agent_invocation IS NOT NULL
+                        THEN jsonb_build_object('agent_invocation', terminal_input.agent_invocation)
+                        ELSE '{}'::jsonb END,
                 completed_at = now(),
                 updated_at = now()
             FROM terminal_input, terminal_input_check
@@ -315,6 +381,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
                 terminal_input.attempt_id,
                 terminal_input.attempt_no,
                 terminal_input.completed,
+                terminal_input.invocation_timed_out,
                 terminal_input.error_message,
                 terminal_input.overall_status,
                 terminal_input.retry_not_before,
@@ -378,6 +445,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
             UPDATE executions
             SET status = CASE
                     WHEN attempt_update.completed THEN 'completed'::execution_status
+                    WHEN attempt_update.invocation_timed_out THEN 'timed_out'::execution_status
                     WHEN attempt_update.retry_scheduled THEN 'retry_scheduled'::execution_status
                     ELSE 'failed'::execution_status
                 END,
@@ -443,6 +511,10 @@ pub(crate) async fn finalize_execution_terminal_transitions(
     .bind(retry_not_before)
     .bind(jitter_ms)
     .bind(retry_delay_secs)
+    .bind(agent_invocations)
+    .bind(response_evidence)
+    .bind(response_bytes)
+    .bind(transitions.iter().map(|t| serde_json::to_value(&t.http_policy_revisions)).collect::<Result<Vec<_>, _>>()?)
     .fetch_one(&mut *tx)
     .await?;
 
@@ -469,6 +541,7 @@ pub(crate) async fn finalize_execution_terminal_transitions(
 /// the message until retry work is due.
 pub(crate) async fn summarize_chunk_execution_state(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
     case_ids: &[Uuid],
@@ -476,11 +549,14 @@ pub(crate) async fn summarize_chunk_execution_state(
     if case_ids.is_empty() {
         return Ok(ChunkExecutionState {
             open_execution_count: 0,
+            awaiting_agent_count: 0,
             retry_scheduled_count: 0,
             next_retry_after: None,
         });
     }
 
+    let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
     let state = sqlx::query_as::<_, ChunkExecutionState>(
         r#"
         SELECT
@@ -488,10 +564,12 @@ pub(crate) async fn summarize_chunk_execution_state(
                 WHERE status IN (
                     'pending'::execution_status,
                     'running'::execution_status,
+                    'awaiting_agent'::execution_status,
                     'awaiting_evaluators'::execution_status,
                     'retry_scheduled'::execution_status
                 )
             )::bigint AS open_execution_count,
+            COUNT(*) FILTER (WHERE status = 'awaiting_agent')::bigint AS awaiting_agent_count,
             COUNT(*) FILTER (
                 WHERE status = 'retry_scheduled'::execution_status
             )::bigint AS retry_scheduled_count,
@@ -507,8 +585,9 @@ pub(crate) async fn summarize_chunk_execution_state(
     .bind(run_id)
     .bind(run_shard)
     .bind(case_ids)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(state)
 }

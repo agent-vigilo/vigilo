@@ -13,26 +13,37 @@ sequenceDiagram
     participant ExecutionDB as Execution DBs
     participant Objects as Object Storage
     participant Queue as RabbitMQ
+    participant Harness as External Harness
 
     User->>Vigilo: vigilo coordinator once
     activate Vigilo
     Vigilo->>Vigilo: Load throughput knobs and generate coordinator id
     Vigilo->>Vigilo: Load database context
 
-    loop Bounded ready-plan recovery candidates with execution requested
-        Vigilo->>ControlDB: Claim available creation lease and generation
-        ControlDB-->>Vigilo: Compact plan references and admission progress, or no work
-        Vigilo->>Objects: Verify roots, configuration, gate counts and bounded chunk pages
-        Vigilo->>ExecutionDB: Replay compact admission and independently verify exact coverage
+    Vigilo->>ControlDB: Call restricted function to claim bounded pending controls
+    Vigilo->>ExecutionDB: Scope claimed work, apply revision or observe worker quiescence
+    Vigilo->>ControlDB: Scope acknowledgement or retry, match revision and claim
+    Vigilo->>ControlDB: Restricted function claims up to 16 quiescent revocations with work identity
+    Vigilo->>ExecutionDB: Scope cleanup transactions, settle quiescent revoked runs
+    Vigilo->>ControlDB: Scope settlement acknowledgement, match revision and token
+    Note over Vigilo,ExecutionDB: Controls use direct database calls, unavailable placements remain pending
+
+    loop Bounded ready-plan recovery candidates with accepted identity and execution enabled
+        Vigilo->>ControlDB: Call restricted admission claim, atomically assign lease and generation
+        ControlDB-->>Vigilo: Claimed work identity, lease and generation, or no work
+        Vigilo->>ControlDB: Bind claimed identity and read protected plan details
+        Vigilo->>Objects: Resolve exact accepted resource bindings, verify roots, configuration, gate counts and bounded chunk pages
+        Vigilo->>ExecutionDB: Scope each transaction, replay admission and independently verify coverage
         ExecutionDB-->>Vigilo: Verified placement coverage or candidate failure
-        Vigilo->>ControlDB: Checkpoint progress or atomically publish routes and activate
+        Vigilo->>ControlDB: Checkpoint progress, lock placements through restricted function and activate
         Note over Vigilo,ControlDB: Returned failures release ownership and defer the candidate
     end
 
-    Vigilo->>ControlDB: List serviceable execution placements
+    Vigilo->>ControlDB: Discover routed execution aliases through restricted function
     ControlDB-->>Vigilo: Execution database aliases
     loop Serviceable execution placements
-        Vigilo->>ExecutionDB: Recover expired chunk leases for alias
+        Vigilo->>ExecutionDB: Read expired leases with bounded lookahead and limit eligible standalone invocations
+        Vigilo->>ExecutionDB: Bind exact claimed batch, recheck ownership, recover or fail chunks and settle atomically
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Recovered chunks and poison chunks failed
         else Placement operation fails
@@ -41,45 +52,65 @@ sequenceDiagram
         end
     end
 
+    opt Due deferred invocation work
+        Vigilo->>ExecutionDB: Close due deadlines and claim bounded remote requests
+        Vigilo->>Harness: Poll status or safely resubmit under the request budget
+        Vigilo->>ExecutionDB: Save outcome or next check, queue ready chunk
+    end
+
     loop Dispatch bounded run-shard windows
-        Vigilo->>ControlDB: Count dispatchable cursor backlog
-        Vigilo->>ControlDB: Select and lock open run-shard cursor
-        ControlDB-->>Vigilo: Dispatch route or no work
-        Vigilo->>ExecutionDB: Upsert run snapshot and insert one chunk-ready outbox record per selected chunk
-        alt Execution placement write succeeds
-            ExecutionDB-->>Vigilo: Dispatch shard window result
-            Vigilo->>ControlDB: Release or mark dispatch cursor drained
-        else Execution placement fails
-            ExecutionDB-->>Vigilo: Database error
-            Note over Vigilo,ControlDB: Cursor stays open
-            Vigilo->>Vigilo: Classify, count, and exclude alias for this pass
+        Vigilo->>ControlDB: Read dispatch backlog through restricted function
+        Vigilo->>ControlDB: Claim cursor and bind returned work identity in one statement
+        ControlDB-->>Vigilo: Dispatch route or no work, retain cursor lock
+        Vigilo->>ControlDB: Read snapshot and routing records on the same scoped transaction
+        Vigilo->>Vigilo: Validate the execution route
+        alt Control and execution share the database
+            Vigilo->>ControlDB: Fence movement and validate admission on the cursor transaction
+            Vigilo->>ControlDB: Dispatch chunks, enqueue readiness and advance cursor in one commit
+        else Separate execution database
+            Vigilo->>ExecutionDB: Bind claimed identity, fence movement and validate admission
+            Vigilo->>ExecutionDB: Dispatch chunks and commit readiness records
+            alt Execution placement write succeeds
+                ExecutionDB-->>Vigilo: Dispatch shard window result
+                Vigilo->>ControlDB: Release or mark dispatch cursor drained
+            else Execution placement fails
+                ExecutionDB-->>Vigilo: Database error
+                Note over Vigilo,ControlDB: Cursor stays open
+                Vigilo->>Vigilo: Classify, count, and exclude alias for this pass
+            end
         end
     end
 
     loop Serviceable databases with bounded concurrency
-        Vigilo->>ExecutionDB: Discover bounded ready candidates
+        Vigilo->>ExecutionDB: Discover bounded ready candidates through restricted function
         loop Fair page admission within database page and time budgets
             Note over Vigilo,ExecutionDB: Bounded shard concurrency with one in-flight page per shard
-            Vigilo->>ExecutionDB: Try page claim, fence ownership, and commit progress or canonical checkpoint
+            Vigilo->>ExecutionDB: Bind discovered identity with page claim, fence ownership and atomically commit checkpoint
             ExecutionDB-->>Vigilo: Ready again, caught up, sealed, busy, or deferred
+            opt Busy or invalid page
+                Vigilo->>ExecutionDB: Rotate candidate in a separate scoped transaction
+            end
             Vigilo->>Vigilo: Visit unchecked candidates before revisiting remaining ready work
         end
         Vigilo->>Vigilo: Await admitted page operations under the database deadline
     end
 
     loop Finalize bounded terminal runs
-        Vigilo->>ControlDB: Count finalization candidate backlog
-        Vigilo->>ControlDB: Select finalization candidate
+        Vigilo->>ControlDB: Read finalization backlog through restricted function
+        Vigilo->>ControlDB: Select candidate through restricted discovery function
         ControlDB-->>Vigilo: Candidate or no work
         alt Candidate selected
-            Vigilo->>ExecutionDB: Read routed shard summaries in one batch per database
+            Vigilo->>ControlDB: Read scoped run placements, commit before remote I/O
+            Vigilo->>ExecutionDB: Read scoped shard-summary batch per database
             alt Every placement read succeeds and summaries are sealed and valid
                 ExecutionDB-->>Vigilo: Terminal summary rows
-                Vigilo->>ControlDB: Claim run, set gate, and enqueue completion event
+                Vigilo->>ControlDB: Claim through restricted lease function
+                Vigilo->>ControlDB: Lock run, recheck lease expiry and commit result with completion event
                 ControlDB-->>Vigilo: Finalized run or no update
             else Placement read fails or summary is unsealed or invalid
                 ExecutionDB-->>Vigilo: Partial summaries or database error
-                Vigilo->>Vigilo: Defer candidate and continue other runs
+                Vigilo->>ControlDB: Scoped candidate heartbeat update, release transaction
+                Vigilo->>Vigilo: Continue other runs
             end
         end
     end
@@ -88,20 +119,20 @@ sequenceDiagram
     Vigilo->>ControlDB: List serviceable outbox placements
     ControlDB-->>Vigilo: Database aliases
     loop Serviceable outbox placements
-        Vigilo->>ExecutionDB: Count and claim publishable rows for alias
+        Vigilo->>ExecutionDB: Read backlog and claim payload batch through restricted functions
         alt Placement operation succeeds
-            ExecutionDB-->>Vigilo: Joined event payload batch
+            ExecutionDB-->>Vigilo: Joined event payload batch with authoritative ledger ownership
             loop Bounded outbox publish concurrency
                 Vigilo->>Vigilo: Acquire messaging circuit admission
                 alt Messaging circuit is open
-                    Vigilo->>ExecutionDB: Reschedule delivery row for retry with claim token
+                    Vigilo->>ExecutionDB: Begin scoped retry transaction, validate owner and claim token, commit ledger and delivery update
                 else Circuit is closed or half-open probe
                     Vigilo->>Queue: Publish persistent mandatory event
                     Queue-->>Vigilo: Confirmed publish or returned/nacked publish
                     alt Publish confirmed and claim token current
-                        Vigilo->>ExecutionDB: Mark ledger published and delete delivery row
+                        Vigilo->>ExecutionDB: Begin scoped completion transaction, validate owner and claim token, commit ledger and delivery deletion
                     else Publish failed or unroutable
-                        Vigilo->>ExecutionDB: Reschedule delivery row for retry with claim token
+                        Vigilo->>ExecutionDB: Begin scoped retry transaction, validate owner and claim token, commit ledger and delivery update
                     else Claim token no longer current
                         Vigilo->>Vigilo: Ignore stale publisher result
                     end
@@ -111,6 +142,12 @@ sequenceDiagram
             ExecutionDB-->>Vigilo: Database error
             Vigilo->>Vigilo: Classify, count, and continue with next alias
         end
+    end
+
+    opt Due remote cancellation after local settlement
+        Vigilo->>ExecutionDB: Claim bounded cancellation deliveries
+        Vigilo->>Harness: Send bounded cancellation request
+        Vigilo->>ExecutionDB: Record acknowledgement or retry
     end
 
     Vigilo->>Vigilo: Log cycle totals and placement failure counters

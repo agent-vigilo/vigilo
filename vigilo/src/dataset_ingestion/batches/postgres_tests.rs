@@ -1,4 +1,6 @@
 //! Elapsed-time renewal and stale-authority checks against PostgreSQL.
+use sqlx::PgPool;
+
 use super::*;
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]

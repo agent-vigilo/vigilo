@@ -223,6 +223,8 @@ impl Fixture {
                 case_projection_hash: hash.finalize().to_hex().to_string(),
             });
             chunks.push(ClaimedChunk {
+                tenant_id: uuid::Uuid::nil(),
+                execution_control: crate::operations::ExecutionControl::Enabled,
                 write_epoch: 1,
                 id,
                 run_id: run,
@@ -266,7 +268,7 @@ impl Fixture {
             },
         );
         let profile: serde_json::Value =
-            serde_yaml::from_str(include_str!("../../../example/profile.yaml")).unwrap();
+            serde_yaml::from_str(crate::contracts::run::PROFILE_FIXTURE).unwrap();
         let execution =
             crate::contracts::evaluator_abi::EvaluatorExecutionPlan::new("1".repeat(64), vec![]);
         let profile_hash =

@@ -2,7 +2,10 @@
 //!
 //! Commands receive a cloned [`Context`] and request configured services on demand:
 //! database router, HTTP client, message queue client, output buffer,
-//! evaluator registry cache, and Wasm runtime. Service modules in `context::*`
+//! evaluator registry cache, and Wasm runtime. Worker credentials remain in a
+//! separate provider; per-run bindings share process transport and admission.
+//! Trusted hosts inject request-bound resources; standalone adapters load operator
+//! configuration without becoming a fallback for injected resolution. Service modules in `context::*`
 //! should remain thin initialization boundaries; domain behavior belongs in
 //! runtime, db, mq, or command modules. Message-queue configuration is present
 //! only for coordinator and worker commands.
@@ -14,10 +17,14 @@ pub(crate) mod http;
 pub(crate) mod messaging;
 pub(crate) mod output;
 pub(crate) mod registry;
+pub(crate) mod resources;
 pub(crate) mod storage;
 pub(crate) mod wasm;
 
 struct ContextInner {
+    callback_issuer: Option<Arc<dyn crate::operations::invocations::CallbackIssuer>>,
+    deferred_health: crate::deferred_runtime::EndpointHealth,
+    http_policies: vigilo::evaluator_http::cache::Cache,
     pub dbr: database::Context,
     pub http: http::Context,
     pub mq: messaging::Context,
@@ -28,7 +35,13 @@ struct ContextInner {
 }
 
 #[derive(Clone)]
-pub(crate) struct Context(Arc<ContextInner>, crate::agent_client::limits::Limits);
+pub(crate) struct Context(
+    Arc<ContextInner>,
+    crate::agent_client::limits::Limits,
+    Arc<crate::agent_client::credentials::Provider>,
+    Arc<crate::evaluator_requests::Service>,
+    resources::Configuration,
+);
 
 impl Context {
     pub fn new(
@@ -39,6 +52,9 @@ impl Context {
     ) -> Self {
         Self(
             Arc::new(ContextInner {
+                callback_issuer: None,
+                deferred_health: Default::default(),
+                http_policies: Default::default(),
                 storage: storage::Context::default(),
                 dbr: database::Context {
                     config: database_config,
@@ -64,7 +80,94 @@ impl Context {
                 },
             }),
             crate::agent_client::limits::Limits::default(),
+            Arc::new(crate::agent_client::credentials::Provider::default()),
+            Arc::new(crate::evaluator_requests::Service::default()),
+            resources::Configuration::default(),
         )
+    }
+
+    /// Reuses the application's shared router without initializing presentation or process state.
+    pub(crate) fn for_operations(router: Arc<database::DatabaseRouter>) -> Self {
+        let config = database::Config::new(
+            router.uri.clone(),
+            router.max_connections_per_pool,
+            router.acquire_timeout,
+            Default::default(),
+            router.placement_config.clone(),
+        );
+        let mut context = Self::new(config, None, Default::default(), output::OutputFormat::Json);
+        Arc::get_mut(&mut context.0)
+            .expect("unshared context")
+            .dbr
+            .cell = tokio::sync::OnceCell::new_with(Some(router));
+        context
+    }
+
+    /// Fix host-owned dependencies before sharing; no environment lookup occurs.
+    pub(crate) fn with_runtime_dependencies(
+        mut self,
+        messaging: crate::mq::Config,
+        wasm: wasm::Config,
+    ) -> Self {
+        let inner = Arc::get_mut(&mut self.0).expect("unshared runtime construction");
+        inner.mq.config = Some(messaging);
+        inner.wasm.config = wasm;
+        self
+    }
+    /// Share provider admission/transport across authority views, retaining a
+    /// separate router, policy cache and lazy runtime services for each domain.
+    pub(crate) fn authority_view(
+        &self,
+        router: Arc<database::DatabaseRouter>,
+        policy_age: u64,
+    ) -> anyhow::Result<Self> {
+        let mut view = Self::for_operations(router).with_http_policy_max_age(policy_age)?;
+        let inner = Arc::get_mut(&mut view.0).expect("unshared authority view");
+        inner.mq.config = self.0.mq.config.clone();
+        inner.wasm.config = self.0.wasm.config.clone();
+        inner.callback_issuer = self.0.callback_issuer.clone();
+        view.1 = self.1;
+        view.2 = self.2.clone();
+        view.3 = self.3.clone();
+        view.4 = self.4.clone();
+        Ok(view)
+    }
+
+    pub(crate) fn with_evaluator_http(
+        mut self,
+        service: crate::evaluator_requests::Service,
+    ) -> Self {
+        self.3 = Arc::new(service);
+        self
+    }
+    pub(crate) fn evaluator_http(
+        &self,
+        policy: Arc<vigilo::evaluator_http::Snapshot>,
+        execution: crate::agent_client::credentials::Execution,
+    ) -> anyhow::Result<(
+        Arc<crate::evaluator_requests::Invocation>,
+        crate::evaluator_requests::Cancellation,
+    )> {
+        self.3.invocation(policy, self.2.clone(), execution)
+    }
+
+    /// Configure freshness before sharing the process context.
+    pub(crate) fn with_http_policy_max_age(mut self, seconds: u64) -> anyhow::Result<Self> {
+        let cache = vigilo::evaluator_http::cache::Cache::new(
+            std::time::Duration::from_secs(seconds),
+            256,
+        )?;
+        Arc::get_mut(&mut self.0)
+            .ok_or_else(|| {
+                anyhow::anyhow!("policy cache must be configured before sharing context")
+            })?
+            .http_policies = cache;
+        Ok(self)
+    }
+
+    /// Shared worker cache; callers freeze returned policies for one attempt.
+    pub(crate) fn http_policies(&self) -> &vigilo::evaluator_http::cache::Cache {
+        &self.0.http_policies
     }
 
     /// Set process-local agent HTTP ceilings before dispatching the command.
@@ -76,16 +179,41 @@ impl Context {
         self
     }
 
-    pub(crate) fn agent_http_limits(&self) -> crate::agent_client::limits::Limits {
-        self.1
+    /// Attach operator-owned credential resolution without changing run profiles.
+    pub(crate) fn with_agent_credentials(
+        mut self,
+        provider: crate::agent_client::credentials::Provider,
+    ) -> Self {
+        self.2 = Arc::new(provider);
+        self
     }
 
-    pub(crate) async fn storage(
+    pub(crate) fn deferred_health(&self) -> &crate::deferred_runtime::EndpointHealth {
+        &self.0.deferred_health
+    }
+
+    pub(crate) fn with_callback_issuer(
+        mut self,
+        issuer: Option<Arc<dyn crate::operations::invocations::CallbackIssuer>>,
+    ) -> Self {
+        Arc::get_mut(&mut self.0)
+            .expect("unshared runtime construction")
+            .callback_issuer = issuer;
+        self
+    }
+
+    pub(crate) fn callback_issuer(
         &self,
-        binding: &str,
-        limits: &crate::contracts::case_storage::FormatLimits,
-    ) -> anyhow::Result<Arc<dyn crate::blob_storage::BlobStorage>> {
-        self.0.storage.get(binding, limits).await
+    ) -> Option<&dyn crate::operations::invocations::CallbackIssuer> {
+        self.0.callback_issuer.as_deref()
+    }
+
+    pub(crate) fn agent_credentials(&self) -> &crate::agent_client::credentials::Provider {
+        &self.2
+    }
+
+    pub(crate) fn agent_http_limits(&self) -> crate::agent_client::limits::Limits {
+        self.1
     }
 
     pub(crate) async fn dbr(&self) -> anyhow::Result<&database::DatabaseRouter> {

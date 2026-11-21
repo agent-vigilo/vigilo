@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::run_shard_summary;
 use crate::context::database::{
     self,
-    ExecutionRoute,
+    DispatchExecutionRoute,
 };
 
 mod queries;
@@ -27,6 +27,7 @@ use queries::claim_exact_dispatch_cursor;
 pub(crate) use queries::select_next_dispatch_route;
 pub(crate) use queries::{
     claim_next_dispatch_route,
+    claim_target_dispatch_route,
     count_dispatch_cursor_backlog,
     prepare_dispatch_run_snapshot_with,
 };
@@ -45,11 +46,17 @@ pub(crate) struct DispatchedRun {
     pub(crate) chunk_ready_event_records_inserted: i64,
     pub(crate) chunks_marked_dispatched: i64,
     pub(crate) run_started_event_records_inserted: i64,
+    pub(crate) has_remaining_chunks: bool,
 }
 
 /// Immutable run context copied from the control database before execution dispatch.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DispatchRunSnapshot {
+    /// Live routing records read with the claimed cursor's existing scope.
+    pub(crate) shard_placement: sqlx::types::Json<crate::models::shard_placement::ShardPlacement>,
+    pub(crate) database_placement:
+        sqlx::types::Json<crate::models::database_placement::DatabasePlacement>,
+    pub(crate) tenant_id: Uuid,
     pub(crate) run_id: Uuid,
     pub(crate) run_shard: i16,
     pub(crate) run_key: String,
@@ -75,6 +82,7 @@ pub(crate) struct DispatchRunSnapshot {
 /// Control-database route selected for one dispatch attempt.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct DispatchRoute {
+    pub(crate) tenant_id: Uuid,
     pub(crate) run_id: Uuid,
     pub(crate) run_shard: i16,
     pub(crate) database_alias: String,
@@ -108,6 +116,7 @@ impl From<&DispatchedRunWindow> for DispatchedRun {
             chunk_ready_event_records_inserted: dispatched.chunk_ready_event_records_inserted,
             chunks_marked_dispatched: dispatched.chunks_marked_dispatched,
             run_started_event_records_inserted: dispatched.run_started_event_records_inserted,
+            has_remaining_chunks: dispatched.has_remaining_chunks,
         }
     }
 }
@@ -171,7 +180,10 @@ fn dispatch_cursor_status(has_remaining_chunks: bool) -> &'static str {
 ///
 /// Query behavior:
 /// - Runs in one transaction so recovery and poison-chunk failure see a
-///   consistent lease snapshot.
+///   consistent lease snapshot. The restricted claim supplies an exact run/owner
+///   map for batch-scoped follow-up statements; no ownership lookup is needed.
+/// - Empty discovery ends the transaction without follow-up SQL. Nonempty
+///   discovery installs batch context once, regardless of the number of runs.
 /// - First query locks a bounded oldest-expired set below `max_recoveries`,
 ///   resets those chunks to `pending`, increments recovery metadata, and emits
 ///   idempotent recovery-scoped chunk-ready outbox records.
@@ -183,48 +195,83 @@ fn dispatch_cursor_status(has_remaining_chunks: bool) -> &'static str {
 ///   authority before commit; coordinators aggregate them asynchronously.
 /// - Recovery clears the chunk's opaque claim token, fencing a worker from
 ///   allocating attempts or persisting results after reassignment.
+#[cfg(test)]
 pub(crate) async fn recover_expired_chunk_leases(
     db: &PgPool,
     max_recoveries: i32,
     batch_size: i64,
 ) -> anyhow::Result<ChunkLeaseRecoveryStats> {
+    recover_expired_work(db, max_recoveries, batch_size, false)
+        .await
+        .map(|(stats, _)| stats)
+}
+
+/// Reuses the placement's chunk recovery read for bounded standalone discovery.
+pub(crate) async fn recover_expired_work(
+    db: &PgPool,
+    max_recoveries: i32,
+    batch_size: i64,
+    standalone: bool,
+) -> anyhow::Result<(
+    ChunkLeaseRecoveryStats,
+    Vec<super::execution_processing::deferred_jobs::Job>,
+)> {
+    use super::execution_processing::deferred_jobs;
     let mut tx = db.begin().await?;
 
     // Acquire shared movement admission before chunk locks. The following SQL
     // takes a fresh snapshot and rechecks local state after these nonblocking
     // claims, so a completed move cannot leave recovery writing the old owner.
-    let candidates = sqlx::query_as::<_, (Uuid, i16)>(
-        r#"
-        SELECT DISTINCT run_id,run_shard FROM (
-            (SELECT run_id,run_shard FROM run_chunks WHERE status = 'leased'
-                AND leased_until < now() AND recovery_count < $1
-                ORDER BY leased_until,run_id,id LIMIT $2)
-            UNION ALL
-            (SELECT run_id,run_shard FROM run_chunks WHERE status = 'leased'
-                AND leased_until < now() AND recovery_count >= $1
-                ORDER BY leased_until,run_id,id LIMIT $2)
-        ) candidates ORDER BY run_id,run_shard
-    "#,
-    )
-    .bind(max_recoveries)
-    .bind(batch_size)
-    .fetch_all(&mut *tx)
-    .await?;
-    let mut admitted_runs = Vec::new();
-    let mut admitted_shards = Vec::new();
-    for (run_id, shard) in candidates {
-        let admitted: bool = sqlx::query_scalar(
-            "SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1::uuid::text,$2::bigint))",
-        )
-        .bind(run_id)
-        .bind(i64::from(shard))
-        .fetch_one(&mut *tx)
-        .await?;
-        if admitted {
-            admitted_runs.push(run_id);
-            admitted_shards.push(shard);
+    type RecoveryRow = (
+        Uuid,
+        i16,
+        Uuid,
+        Option<sqlx::types::Json<deferred_jobs::Job>>,
+    );
+    let (candidates, jobs) = if standalone {
+        let rows: Vec<RecoveryRow> = sqlx::query_as(deferred_jobs::DISCOVER)
+            .bind(max_recoveries)
+            .bind(batch_size)
+            .bind(deferred_jobs::DISCOVERY_LIMIT)
+            .fetch_all(&mut *tx)
+            .await?;
+        let mut recoveries = Vec::new();
+        let mut jobs = Vec::new();
+        for (run, shard, tenant, job) in rows {
+            match job {
+                Some(sqlx::types::Json(job)) => jobs.push(job),
+                None => recoveries.push((run, shard, tenant)),
+            }
         }
+        (recoveries, jobs)
+    } else {
+        let rows = sqlx::query_as(
+            "SELECT run_id, run_shard, tenant_id FROM vigilo_claim_chunk_recovery($1,$2)",
+        )
+        .bind(max_recoveries)
+        .bind(batch_size)
+        .fetch_all(&mut *tx)
+        .await?;
+        (rows, Vec::new())
+    };
+    if candidates.is_empty() {
+        tx.commit().await?;
+        return Ok((ChunkLeaseRecoveryStats::default(), jobs));
     }
+    let mut owners = std::collections::BTreeMap::new();
+    let mut admitted_runs = Vec::with_capacity(candidates.len());
+    let mut admitted_shards = Vec::with_capacity(candidates.len());
+    for (run, shard, tenant) in candidates {
+        if let Some(previous) = owners.insert(run, tenant) {
+            anyhow::ensure!(
+                previous == tenant,
+                "conflicting recovery ownership for run {run}"
+            );
+        }
+        admitted_runs.push(run);
+        admitted_shards.push(shard);
+    }
+    crate::db::scope::set_system_batch(&mut tx, &owners).await?;
     let (recovered, failed_rows) = recover_expired_chunks(
         &mut tx,
         max_recoveries,
@@ -239,10 +286,13 @@ pub(crate) async fn recover_expired_chunk_leases(
     }
     tx.commit().await?;
 
-    Ok(ChunkLeaseRecoveryStats {
-        recovered_chunks: recovered,
-        failed_chunks: i64::try_from(failed_rows.len())?,
-    })
+    Ok((
+        ChunkLeaseRecoveryStats {
+            recovered_chunks: recovered,
+            failed_chunks: i64::try_from(failed_rows.len())?,
+        },
+        jobs,
+    ))
 }
 
 /// Starts a dispatchable run in the control database and returns its snapshot.
@@ -313,28 +363,60 @@ async fn dispatch_next_run_window(
     .await?)
 }
 
-/// Claims and dispatches one exact run-shard through fenced write admission.
+/// Dispatches one claimed run-shard through fenced write admission. Colocated
+/// work commits its cursor and execution writes together.
 pub(crate) async fn dispatch_admitted_run_window(
     database_router: &database::DatabaseRouter,
-    control_tx: Transaction<'static, Postgres>,
-    execution_route: &ExecutionRoute,
+    mut control_tx: Transaction<'static, Postgres>,
+    execution_route: &DispatchExecutionRoute,
     chunk_window_size: i64,
     route: &DispatchRoute,
     snapshot: &DispatchRunSnapshot,
 ) -> Result<Option<DispatchedRun>, RoutedDispatchError> {
-    let execution_tx = database_router
-        .begin_execution_admission(execution_route)
-        .await
-        .map_err(RoutedDispatchError::ExecutionWrite)?;
-
-    dispatch_routed_run_window_with_transactions(
-        control_tx,
-        execution_tx,
-        chunk_window_size,
-        route,
-        snapshot,
-    )
-    .await
+    validate_dispatch_snapshot_route(
+        route.run_id,
+        route.run_shard,
+        snapshot.run_id,
+        snapshot.run_shard,
+    )?;
+    let placement = execution_route.placement();
+    if snapshot.tenant_id != route.tenant_id
+        || placement.run_id != route.run_id
+        || placement.run_shard != route.run_shard
+        || placement.database_alias != route.database_alias
+        || placement.write_epoch != route.write_epoch
+        || placement.route_version != route.route_version
+    {
+        return Err(RoutedDispatchError::Invariant(anyhow::anyhow!(
+            "dispatch execution route or snapshot ownership mismatch"
+        )));
+    }
+    match execution_route {
+        DispatchExecutionRoute::Colocated(placement) => {
+            database_router
+                .admit_colocated_dispatch(placement, &mut control_tx)
+                .await
+                .map_err(RoutedDispatchError::ExecutionWrite)?;
+            let dispatched =
+                write_dispatch_window(&mut control_tx, chunk_window_size, route, snapshot).await?;
+            commit_dispatch_cursor(control_tx, dispatched.as_ref()).await?;
+            Ok(dispatched.as_ref().map(DispatchedRun::from))
+        }
+        DispatchExecutionRoute::Separate(execution_route) => {
+            let execution_tx = database_router
+                .begin_dispatch_admission(execution_route, route.tenant_id, &mut control_tx)
+                .await
+                .map_err(RoutedDispatchError::ExecutionWrite)?;
+            dispatch_routed_run_window_with_transactions(
+                control_tx,
+                execution_tx,
+                chunk_window_size,
+                route,
+                snapshot,
+            )
+            .await
+        }
+    }
 }
 
 #[cfg(test)]
@@ -364,18 +446,32 @@ async fn dispatch_routed_run_window(
     .await
 }
 
-/// Applies a dispatch window while the caller holds shard write admission.
-///
-/// The route is selected from the control database before the caller resolves the
-/// execution placement. This function keeps the shard-local dispatch statement
-/// constrained to that routed `run_id + run_shard`.
+/// Commits the separate execution placement before advancing its control cursor.
 async fn dispatch_routed_run_window_with_transactions(
-    mut control_tx: Transaction<'static, Postgres>,
+    control_tx: Transaction<'static, Postgres>,
     mut execution_tx: Transaction<'static, Postgres>,
     chunk_window_size: i64,
     route: &DispatchRoute,
     snapshot: &DispatchRunSnapshot,
 ) -> Result<Option<DispatchedRun>, RoutedDispatchError> {
+    let dispatched =
+        write_dispatch_window(&mut execution_tx, chunk_window_size, route, snapshot).await?;
+    execution_tx
+        .commit()
+        .await
+        .map_err(anyhow::Error::from)
+        .map_err(RoutedDispatchError::ExecutionWrite)?;
+    commit_dispatch_cursor(control_tx, dispatched.as_ref()).await?;
+    Ok(dispatched.as_ref().map(DispatchedRun::from))
+}
+
+/// Writes a bounded window while the caller retains placement admission.
+async fn write_dispatch_window(
+    execution_tx: &mut Transaction<'static, Postgres>,
+    chunk_window_size: i64,
+    route: &DispatchRoute,
+    snapshot: &DispatchRunSnapshot,
+) -> Result<Option<DispatchedRunWindow>, RoutedDispatchError> {
     validate_dispatch_snapshot_route(
         route.run_id,
         route.run_shard,
@@ -383,26 +479,26 @@ async fn dispatch_routed_run_window_with_transactions(
         snapshot.run_shard,
     )?;
 
-    let dispatched =
-        dispatch_run_window(&mut execution_tx, chunk_window_size, route, snapshot).await?;
+    let dispatched = dispatch_run_window(execution_tx, chunk_window_size, route, snapshot).await?;
 
     if let Some(dispatched) = &dispatched {
         run_shard_summary::insert_run_shard_summary_with(
-            &mut execution_tx,
+            execution_tx,
             dispatched.id,
             dispatched.run_shard,
         )
         .await
         .map_err(RoutedDispatchError::ExecutionWrite)?;
     }
+    Ok(dispatched)
+}
 
-    execution_tx
-        .commit()
-        .await
-        .map_err(anyhow::Error::from)
-        .map_err(RoutedDispatchError::ExecutionWrite)?;
-
-    if let Some(dispatched) = &dispatched {
+/// Advances or releases the held cursor together with all control-side writes.
+async fn commit_dispatch_cursor(
+    mut control_tx: Transaction<'static, Postgres>,
+    dispatched: Option<&DispatchedRunWindow>,
+) -> Result<(), RoutedDispatchError> {
+    if let Some(dispatched) = dispatched {
         let next_status = dispatch_cursor_status(dispatched.has_remaining_chunks);
         update_dispatch_cursor(
             &mut control_tx,
@@ -425,7 +521,7 @@ async fn dispatch_routed_run_window_with_transactions(
             .map_err(RoutedDispatchError::Control)?;
     }
 
-    Ok(dispatched.as_ref().map(DispatchedRun::from))
+    Ok(())
 }
 
 #[cfg(test)]

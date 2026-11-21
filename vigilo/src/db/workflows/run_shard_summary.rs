@@ -60,12 +60,14 @@ pub(crate) mod plan;
 mod queries;
 mod settlement;
 
+pub use aggregation::AggregationConfig;
 #[cfg(test)]
 pub(crate) use aggregation::advance_shard_summary;
 pub(crate) use aggregation::{
-    AggregationConfig,
     advance_pending_summaries,
+    advance_shard_summary_page,
 };
+pub(crate) use aggregation_scheduling::PageOutcome;
 #[cfg(test)]
 pub(crate) use plan::manifests as chunk_plan_manifests;
 pub(crate) use queries::{

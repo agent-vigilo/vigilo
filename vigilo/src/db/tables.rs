@@ -17,3 +17,5 @@ pub(crate) mod outbox_events;
 pub(crate) mod run_snapshots;
 pub(crate) mod runs;
 pub(crate) mod shard_placements;
+
+pub(crate) mod evaluator_http_policies;

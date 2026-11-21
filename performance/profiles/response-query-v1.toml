@@ -1,0 +1,21 @@
+schema_id = "profile/v1"
+id = "response-query-v1"
+description = "Worker statement and protocol observations for case-heavy and evaluator-heavy response processing."
+requires_workload_selection = false
+campaign_cap_secs = 1800
+schedule_seed = 253667031
+max_artifact_bytes = 67108864
+max_stdout_bytes = 262144
+max_stderr_bytes = 262144
+
+[[workloads]]
+id = "worker.execute-wasm.v1"
+tuple = "cases-8-evaluators-1"
+blocks = 2
+timing = "informative"
+
+[[workloads]]
+id = "worker.execute-wasm.v1"
+tuple = "cases-1-evaluators-8"
+blocks = 2
+timing = "informative"

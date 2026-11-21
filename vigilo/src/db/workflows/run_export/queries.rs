@@ -5,44 +5,9 @@ use uuid::Uuid;
 
 use crate::models::{
     evaluator_result::EvaluatorResult,
-    execution::Execution,
     execution_aggregate::ExecutionAggregate,
     execution_attempt::ExecutionAttempt,
 };
-
-pub(super) async fn select_executions(
-    db: &PgPool,
-    run_id: Uuid,
-    run_shard: i16,
-    after_execution_id: Option<Uuid>,
-    limit: i64,
-) -> anyhow::Result<Vec<Execution>> {
-    Ok(sqlx::query_as::<_, Execution>(
-        r#"
-        SELECT
-            id, run_id, run_shard, chunk_id, case_id, task_type, tags,
-            input_payload, expected_output, case_metadata,
-            evaluation_profile_id, evaluation_profile_version,
-            evaluator_manifest, expected_evaluator_count,
-            status::text as status, current_attempt_no, current_attempt_id,
-            last_error_message, retry_after, retry_count,
-            last_attempt_completed_at, created_at, started_at, completed_at,
-            updated_at
-        FROM executions
-        WHERE run_id = $1::uuid
-          AND run_shard = $2
-          AND ($3::uuid IS NULL OR id > $3::uuid)
-        ORDER BY id
-        LIMIT $4
-        "#,
-    )
-    .bind(run_id)
-    .bind(run_shard)
-    .bind(after_execution_id)
-    .bind(limit)
-    .fetch_all(db)
-    .await?)
-}
 
 pub(super) async fn select_attempts(
     db: &PgPool,

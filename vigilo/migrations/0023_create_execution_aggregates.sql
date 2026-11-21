@@ -1,6 +1,7 @@
 CREATE TABLE execution_aggregates (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     execution_id UUID NOT NULL,
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     attempt_id UUID NOT NULL,
 
@@ -26,7 +27,8 @@ CREATE TABLE execution_aggregates (
         ON DELETE CASCADE,
     CONSTRAINT uq_execution_aggregates_run_attempt UNIQUE (run_id, run_shard, attempt_id),
     CONSTRAINT chk_execution_aggregate_score_range
-      CHECK (aggregate_score IS NULL OR (aggregate_score >= 0.0 AND aggregate_score <= 1.0))
+      CHECK (aggregate_score IS NULL OR (aggregate_score >= 0.0 AND aggregate_score <= 1.0)),
+    CONSTRAINT fk_execution_aggregates_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 ) PARTITION BY LIST (run_shard);
 
 DO $$

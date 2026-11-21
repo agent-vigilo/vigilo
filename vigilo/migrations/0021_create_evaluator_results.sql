@@ -1,6 +1,7 @@
 CREATE TABLE evaluator_results (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     id UUID NOT NULL DEFAULT gen_random_uuid(),
-    run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     execution_id UUID NOT NULL,
     attempt_id UUID NOT NULL,
@@ -75,7 +76,8 @@ CREATE TABLE evaluator_results (
             AND abstention_category IS NOT NULL)
     ),
     CONSTRAINT uq_attempt_evaluator_binding
-        UNIQUE (run_id, run_shard, attempt_id, binding_id)
+        UNIQUE (run_id, run_shard, attempt_id, binding_id),
+    CONSTRAINT fk_evaluator_results_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 ) PARTITION BY LIST (run_shard);
 
 DO $$

@@ -31,15 +31,7 @@ use super::{
 };
 use crate::{
     context::Context,
-    contracts::{
-        evaluator::EvaluatorInput,
-        evaluator_ref::parse_fully_qualified_evaluator,
-    },
-    db::tables::evaluators,
-    models::evaluator::{
-        EvaluatorPatch,
-        EvaluatorState,
-    },
+    models::evaluator::EvaluatorState,
 };
 
 mod publish;
@@ -238,18 +230,34 @@ impl SubCommand {
 }
 
 async fn list(context: Context) -> anyhow::Result<()> {
-    let db = context.dbr().await?.control().await?;
-    let evaluators = evaluators::list_evaluators(db, DEFAULT_NAMESPACE).await?;
-
-    if evaluators.is_empty() {
-        warn!("no evaluators found");
-    } else {
-        for evaluator in evaluators {
+    let client =
+        crate::operations::evaluators::EvaluatorClient::operator(context, DEFAULT_NAMESPACE)
+            .await?;
+    let mut cursor = None;
+    let mut count = 0;
+    loop {
+        let page = client
+            .search(
+                DEFAULT_NAMESPACE,
+                None,
+                crate::operations::evaluators::PageLimits::new(20, 8 * 1024 * 1024)?,
+                cursor.as_ref(),
+            )
+            .await?;
+        for evaluator in page.items {
+            count += 1;
             info!(
                 "{}/{}:{} state={:?}",
-                evaluator.namespace, evaluator.name, evaluator.version, evaluator.state,
+                evaluator.namespace, evaluator.name, evaluator.version, evaluator.state
             );
         }
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    if count == 0 {
+        warn!("no evaluators found");
     }
 
     Ok(())

@@ -52,16 +52,21 @@ pub(crate) async fn settle_locked_chunk_with(
         matches!(disposition.as_str(), "completed" | "failed" | "cancelled"),
         "cannot settle open chunk {chunk_id}"
     );
-    let (snapshot, policy, receipt_matches, _plan_mode): (Value, String, Option<bool>, String) =
-        sqlx::query_as(
-            r#"
+    let (snapshot, policy, receipt_matches, _plan_mode, tenant_id): (
+        Value,
+        String,
+        Option<bool>,
+        String,
+        Uuid,
+    ) = sqlx::query_as(
+        r#"
         SELECT snapshot.config_snapshot, snapshot.aggregation_policy_hash,
             CASE WHEN receipt.chunk_id IS NOT NULL THEN
                 receipt.ordinal_start = $4 AND receipt.ordinal_end = $5
                 AND receipt.disposition = $6
                 AND receipt.aggregation_policy_hash = snapshot.aggregation_policy_hash
             END AS receipt_matches,
-            set_config('plan_cache_mode', 'force_custom_plan', true)
+            set_config('plan_cache_mode', 'force_custom_plan', true), snapshot.tenant_id
         FROM run_snapshots snapshot
         LEFT JOIN run_chunk_settlements receipt
             ON receipt.run_id = snapshot.run_id
@@ -69,19 +74,19 @@ pub(crate) async fn settle_locked_chunk_with(
             AND receipt.chunk_id = $3
         WHERE snapshot.run_id = $1 AND snapshot.run_shard = $2
         "#,
-        )
-        // Generic plans retain every partition lock, including PostgreSQL's internal
-        // foreign-key queries. Keep this read custom and force custom plans for the
-        // remaining transaction; set_config(..., true) resets at commit or rollback.
-        .persistent(false)
-        .bind(run_id)
-        .bind(shard)
-        .bind(chunk_id)
-        .bind(start)
-        .bind(end)
-        .bind(&disposition)
-        .fetch_one(&mut **tx)
-        .await?;
+    )
+    // Generic plans retain every partition lock, including PostgreSQL's internal
+    // foreign-key queries. Keep this read custom and force custom plans for the
+    // remaining transaction; set_config(..., true) resets at commit or rollback.
+    .persistent(false)
+    .bind(run_id)
+    .bind(shard)
+    .bind(chunk_id)
+    .bind(start)
+    .bind(end)
+    .bind(&disposition)
+    .fetch_one(&mut **tx)
+    .await?;
     if let Some(matches) = receipt_matches {
         anyhow::ensure!(matches, "conflicting chunk settlement {chunk_id}");
         return Ok(());
@@ -94,7 +99,26 @@ pub(crate) async fn settle_locked_chunk_with(
     sqlx::query(r#"
         WITH retired_attempts AS (
         UPDATE execution_attempts a
-        SET status = 'stale', leased_until = NULL, completed_at = COALESCE(a.completed_at, now()), error_message = COALESCE(a.error_message, 'chunk settled before attempt completion'), updated_at = now()
+        SET status = 'stale', leased_until = NULL, completed_at = COALESCE(a.completed_at, now()), error_message = COALESCE(a.error_message, 'chunk settled before attempt completion'), updated_at = now(),
+            invocation_status = CASE WHEN a.invocation_status IN ('submitting','submission_unknown','waiting')
+                THEN CASE WHEN $4 = 'cancelled' THEN 'cancelled'::invocation_status ELSE 'failed'::invocation_status END
+                ELSE a.invocation_status END,
+            invocation_cancel_at = CASE WHEN $4='cancelled'
+                AND a.invocation_status IN ('submitting','submission_unknown','waiting')
+                AND EXISTS (SELECT 1 FROM run_snapshots s WHERE s.run_id=a.run_id AND s.run_shard=a.run_shard
+                    AND s.config_snapshot#>'{invocation_transport,cancellation}' <> 'null'::jsonb)
+                AND (a.invocation_status<>'submitting' OR a.invocation_claim IS NOT NULL)
+                THEN statement_timestamp() ELSE a.invocation_cancel_at END,
+            invocation_cancel_until = CASE WHEN $4='cancelled'
+                AND a.invocation_status IN ('submitting','submission_unknown','waiting')
+                AND EXISTS (SELECT 1 FROM run_snapshots s WHERE s.run_id=a.run_id AND s.run_shard=a.run_shard
+                    AND s.config_snapshot#>'{invocation_transport,cancellation}' <> 'null'::jsonb)
+                THEN statement_timestamp()+interval '1 minute' ELSE a.invocation_cancel_until END,
+            invocation_cancel_uncertain = CASE WHEN a.invocation_status IN ('submitting','submission_unknown','waiting')
+                THEN a.invocation_status<>'waiting' ELSE a.invocation_cancel_uncertain END,
+            invocation_next_at = NULL,
+            invocation_request = NULL, invocation_claim = NULL, invocation_claim_until = NULL,
+            invocation_evidence = NULL, invocation_content_type = NULL
         FROM executions e
         WHERE e.run_id = $1
         AND e.run_shard = $2
@@ -102,14 +126,15 @@ pub(crate) async fn settle_locked_chunk_with(
         AND a.run_id = e.run_id
         AND a.run_shard = e.run_shard
         AND a.execution_id = e.id
-        AND a.status IN ('pending', 'running')
+        AND (a.status IN ('pending', 'running', 'awaiting_agent', 'ready_to_score')
+             OR a.invocation_evidence IS NOT NULL)
         )
         UPDATE executions
         SET status = CASE WHEN $4 = 'cancelled' THEN 'cancelled'::execution_status ELSE 'failed'::execution_status END, retry_after = NULL, completed_at = COALESCE(completed_at, now()), last_error_message = COALESCE(last_error_message, 'chunk settled with unresolved work'), updated_at = now()
         WHERE run_id = $1
         AND run_shard = $2
         AND chunk_id = $3
-        AND status IN ('pending', 'running', 'awaiting_evaluators', 'retry_scheduled')
+        AND status IN ('pending', 'running', 'awaiting_agent', 'awaiting_evaluators', 'retry_scheduled')
         "#)
         .bind(run_id).bind(shard).bind(chunk_id).bind(&disposition).execute(&mut **tx).await?;
 
@@ -158,12 +183,12 @@ pub(crate) async fn settle_locked_chunk_with(
         "chunk {chunk_id} settlement exceeds the receipt byte limit"
     );
     sqlx::query(r#"
-        WITH receipt AS (INSERT INTO run_chunk_settlements (run_id, run_shard, chunk_id, ordinal_start, ordinal_end, aggregation_policy_hash, disposition, summary) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        RETURNING run_id,run_shard,chunk_id,ordinal_start) INSERT INTO run_chunk_settlement_consumptions (run_id,run_shard,chunk_id,ordinal_start) SELECT run_id,run_shard,chunk_id,ordinal_start
+        WITH receipt AS (INSERT INTO run_chunk_settlements (tenant_id, run_id, run_shard, chunk_id, ordinal_start, ordinal_end, aggregation_policy_hash, disposition, summary) VALUES ($9,$1,$2,$3,$4,$5,$6,$7,$8)
+        RETURNING tenant_id,run_id,run_shard,chunk_id,ordinal_start) INSERT INTO run_chunk_settlement_consumptions (tenant_id,run_id,run_shard,chunk_id,ordinal_start) SELECT tenant_id,run_id,run_shard,chunk_id,ordinal_start
         FROM receipt
         "#)
         .bind(run_id).bind(shard).bind(chunk_id).bind(start).bind(end)
-        .bind(policy).bind(disposition).bind(value).execute(&mut **tx).await?;
+        .bind(policy).bind(disposition).bind(value).bind(tenant_id).execute(&mut **tx).await?;
     Ok(())
 }
 

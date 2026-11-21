@@ -59,6 +59,22 @@ Key files:
 
 The reference evaluator uses `wit-bindgen`, imports `evaluator-world`, implements `Guest for Evaluator`, and exports the implementation with `export!(Evaluator)`.
 
+## Evaluator Types
+
+Use <GlossaryTerm term="code-scorer">Deterministic (Code Scorer)</GlossaryTerm>
+for repeatable code-based measurement and
+<GlossaryTerm term="model-as-a-judge">Model-as-a-Judge</GlossaryTerm> for model-based
+assessment. The sentiment template is a Code Scorer. Both types implement the
+same `input`/`output` ABI and return measurements or abstentions, not release gates.
+
+An evaluator measures evidence supplied by an
+<GlossaryTerm term="evaluation-harness">evaluation harness</GlossaryTerm>; it does
+not own the target session. A judge implementation owns its provider request and
+response interpretation within the host's
+[HTTP authorization and limits](/docs/configuration/run-profile#evaluator-http-authorization).
+Nondeterminism and external dependencies must be explicit, with controlled test
+fixtures. Retained evidence alone does not guarantee repeatable model assessments.
+
 ## Contract-First Implementation
 
 Implement the current contract at `vigilo/wit/evaluator/v1.0.0/evaluator.wit`.
@@ -106,6 +122,44 @@ Run a focused evaluator test against the published version using the sample inpu
 ```bash
 vigilo evaluator test 'vigilo/my-evaluator:0.1.0' --input-file evaluators/my-evaluator/example-input.json
 ```
+
+For response-aware evaluators, the input file may include a `response` fixture:
+
+```json
+{
+  "response": {
+    "body": "{\"text\":\"Great service\"}",
+    "content_type": "application/json",
+    "configuration": {
+      "schema_version": "1.0.0",
+      "interpretation": {
+        "format": "json",
+        "mapping": {
+          "items": [{
+            "mode": "single",
+            "item": {
+              "type": "message",
+              "content": [{
+                "media_type": "text/plain",
+                "source": {"representation": "inline_text", "selection": {"pointer": "/text"}}
+              }]
+            }
+          }]
+        }
+      }
+    }
+  }
+}
+```
+
+This is the response portion of the file; include the usual run, execution, attempt,
+case, `actual`, and evaluator configuration fields as shown in the bundled
+`evaluators/sentiment-basic-en/example-input.json`. `body` is a UTF-8 fixture string,
+limited to 4 MiB. `content_type` and `configuration` are optional; absent mapping
+means raw-only evidence. The host runs the same bounded mapping engine and creates
+fresh resource handles. A mapping failure remains available to raw-only evaluators
+and fails mapped consumers. No agent is contacted and fixture JSON cannot supply
+live handles. Binary resource behavior is covered by the Wasm compatibility fixture.
 
 The quoted value is the published
 <GlossaryTerm term="evaluator-identifier">evaluator identifier</GlossaryTerm>.
@@ -158,3 +212,8 @@ Use `vigilo evaluator package` to turn the prebuilt source package into a
 self-contained release archive. Recipients publish it without a Rust toolchain
 or source checkout. See [Publishing Evaluators](./publishing.mdx#portable-packages)
 for the package command, validation rules, and registration workflow.
+
+The evaluator interface also exports `requirements`, returning an
+`evidence-requirements` record. Declare evidence actually consumed by the evaluator;
+see [Response Evidence Contract](./evaluator-compatibility.mdx#response-evidence-contract)
+for availability and host enforcement.

@@ -1,7 +1,12 @@
-//! Worker-side client for invoking the configured agent endpoint.
+//! HTTP transport for inline Direct Probe and Delegated Trial.
+//!
+//! Invokes the target interface and captures evidence; it does not launch the
+//! target process or score its response. Evaluators measure the captured evidence.
 //!
 //! This module owns request-format adaptation, HTTP transport, and response
-//! normalization into the evaluator `AgentOutput` contract.
+//! capture without inferring response semantics. It returns bounded
+//! operational diagnostics separately so the workflow can retain HTTP outcomes
+//! even when later evaluator processing fails, without additional database calls.
 //!
 //! Supported request formats:
 //!
@@ -24,16 +29,52 @@ use failure::{
 #[path = "agent_client/limits.rs"]
 pub(crate) mod limits;
 
-use std::time::{
-    Duration,
-    Instant,
-};
+#[path = "agent_client/credentials.rs"]
+pub(crate) mod credentials;
+
+#[path = "agent_client/diagnostics.rs"]
+pub(crate) mod diagnostics;
+
+/// Successful output plus bounded evidence retained independently of evaluator results.
+#[derive(Debug)]
+pub(crate) struct Invocation {
+    pub(crate) output: AgentOutput,
+    pub(crate) diagnostics: diagnostics::Diagnostics,
+}
+
+/// Process services used for one invocation; contains no resolved secrets.
+pub(crate) struct Services<'a> {
+    pub(crate) client: &'a reqwest::Client,
+    pub(crate) limits: limits::Limits,
+    pub(crate) credentials: &'a credentials::Provider,
+    pub(crate) resources: Option<std::sync::Arc<vigilo::operations::resources::Request>>,
+}
+
+#[path = "agent_client/deferred.rs"]
+pub(crate) mod deferred;
+
+#[path = "agent_client/capture.rs"]
+pub(crate) mod capture;
+
+use std::time::Duration;
 
 use serde_json::{
     Value,
     json,
 };
 use uuid::Uuid;
+use vigilo::invocation::{
+    profile::{
+        AgentIdentity,
+        Harness,
+    },
+    wire::{
+        self,
+        CaseInput,
+        Outcome,
+        Submission,
+    },
+};
 
 use crate::contracts::{
     evaluator::{
@@ -46,11 +87,11 @@ use crate::contracts::{
 const REQUEST_FORMAT_VIGILO_CASE: &str = "vigilo_case";
 const REQUEST_FORMAT_OPENAI_COMPATIBLE_CHAT_COMPLETIONS: &str =
     "openai_compatible_chat_completions";
-const INVOCATION_SOURCE: &str = "http_agent_client";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentRequestFormat {
-    /// Agent Vigilo's native request envelope for custom agent endpoints.
+    Native,
+    /// The Vigilo case request format for custom agent endpoints.
     ///
     /// This is the default when `agent.config.request_format` is absent. The
     /// payload carries Vigilo execution metadata and case input, but not the
@@ -68,6 +109,24 @@ enum AgentRequestFormat {
 
 impl AgentRequestFormat {
     fn from_profile(run_profile: &RunProfile) -> anyhow::Result<Self> {
+        if !run_profile.harness.is_inline() {
+            anyhow::ensure!(
+                run_profile
+                    .agent
+                    .config
+                    .get("request_format")
+                    .is_none_or(|format| format.as_str() == Some("native")),
+                "deferred invocation uses the native request format"
+            );
+            return Ok(Self::Native);
+        }
+        if matches!(run_profile.harness, Harness::DelegatedTrial { .. }) {
+            anyhow::ensure!(
+                run_profile.agent.config.get("request_format").is_none(),
+                "delegated_trial uses the native invocation contract"
+            );
+            return Ok(Self::Native);
+        }
         let Some(format_value) = run_profile.agent.config.get("request_format") else {
             return Ok(Self::VigiloCase);
         };
@@ -76,12 +135,13 @@ impl AgentRequestFormat {
         };
 
         match format {
+            "native" => Ok(Self::Native),
             REQUEST_FORMAT_VIGILO_CASE => Ok(Self::VigiloCase),
             REQUEST_FORMAT_OPENAI_COMPATIBLE_CHAT_COMPLETIONS => {
                 Ok(Self::OpenAiCompatibleChatCompletions)
             }
             other => anyhow::bail!(
-                "unsupported agent.config.request_format '{}'; expected '{}' or '{}'",
+                "unsupported agent.config.request_format '{}'; expected 'native', '{}' or '{}'",
                 other,
                 REQUEST_FORMAT_VIGILO_CASE,
                 REQUEST_FORMAT_OPENAI_COMPATIBLE_CHAT_COMPLETIONS
@@ -91,7 +151,47 @@ impl AgentRequestFormat {
 }
 
 pub(crate) fn validate_request_format(run_profile: &RunProfile) -> anyhow::Result<()> {
-    AgentRequestFormat::from_profile(run_profile).map(|_| ())
+    requested_agent(run_profile)?;
+    run_profile.harness.validate(true)?;
+    if let Some(response) = &run_profile.agent.response
+        && let vigilo::response::Interpretation::Json { mapping } = &response.interpretation
+    {
+        mapping.validate().map_err(anyhow::Error::msg)?;
+    }
+    let format = AgentRequestFormat::from_profile(run_profile)?;
+    if let Harness::DirectProbe {
+        require_executed_agent,
+        executed_agent_pointer,
+        ..
+    } = &run_profile.harness
+    {
+        if format == AgentRequestFormat::Native {
+            anyhow::ensure!(
+                executed_agent_pointer.is_none(),
+                "native outcomes have a fixed executed_agent field"
+            );
+        } else {
+            anyhow::ensure!(
+                !require_executed_agent || executed_agent_pointer.is_some(),
+                "required executed_agent needs an explicit response pointer"
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn requested_agent(profile: &RunProfile) -> anyhow::Result<AgentIdentity> {
+    let agent = &profile.agent;
+    let identity = AgentIdentity {
+        provider: agent.provider.clone(),
+        name: agent.name.clone(),
+        version: agent
+            .version
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("agent.version is required"))?,
+    };
+    identity.validate()?;
+    Ok(identity)
 }
 
 fn build_request_body(
@@ -102,6 +202,7 @@ fn build_request_body(
     test_case: &TestCase,
 ) -> anyhow::Result<Value> {
     match AgentRequestFormat::from_profile(run_profile)? {
+        AgentRequestFormat::Native => anyhow::bail!("native request requires a deadline"),
         AgentRequestFormat::VigiloCase => Ok(build_vigilo_case_request_body(
             run_id,
             execution_id,
@@ -179,12 +280,25 @@ fn build_openai_compatible_chat_messages(
         }));
     }
 
-    if let Some(input_messages) = test_case.input.get("messages").and_then(Value::as_array) {
+    if let Some(input_messages) = test_case.input.get("messages") {
+        let input_messages = input_messages
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("input.messages must be an array"))?;
         for message in input_messages {
-            let role = message
-                .get("role")
-                .and_then(Value::as_str)
-                .unwrap_or("user");
+            let message = message
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("input.messages entries must be objects"))?;
+            // This adapter only represents text messages. Silently discarding tool
+            // identities or multimodal fields would change the task being evaluated.
+            if message.keys().any(|key| key != "role" && key != "content") {
+                anyhow::bail!("input.messages entries support only role and string content");
+            }
+            let role = match message.get("role") {
+                None => "user",
+                Some(value) => value
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("input.messages role must be a string"))?,
+            };
             let content = message
                 .get("content")
                 .and_then(Value::as_str)
@@ -266,153 +380,90 @@ fn response_body_excerpt(body: &str) -> String {
     body.chars().take(MAX_ERROR_BODY_CHARS).collect()
 }
 
-fn parse_response_body(body: &str) -> anyhow::Result<Value> {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return Ok(json!({}));
+/// Preserve complete response bytes without guessing a provider envelope.
+pub(crate) fn captured_output(body: vigilo::response::CapturedBody) -> AgentOutput {
+    AgentOutput {
+        captured_body: Some(body),
+        mapping: None,
+        text: None,
+        structured: None,
+        tool_calls: Vec::new(),
+        trace: Vec::new(),
+        raw: json!({}),
+        metadata: json!({}),
     }
-
-    match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) => Ok(value),
-        Err(err) if trimmed.starts_with('{') || trimmed.starts_with('[') => {
-            anyhow::bail!("agent response body was not valid JSON: {}", err)
-        }
-        Err(_) => Ok(json!({ "text": body })),
-    }
 }
 
-fn string_at(value: &Value, pointer: &str) -> Option<String> {
-    value
-        .pointer(pointer)
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-}
-
-fn extract_agent_response_text(response_json: &Value, output_value: &Value) -> Option<String> {
-    [
-        string_at(output_value, "/text"),
-        string_at(output_value, "/output_text"),
-        string_at(output_value, "/message/content"),
-        string_at(response_json, "/text"),
-        string_at(response_json, "/output_text"),
-        string_at(response_json, "/message/content"),
-        string_at(response_json, "/choices/0/message/content"),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|text| !text.trim().is_empty())
-}
-
-fn extract_agent_response_structured(output_value: &Value) -> Option<Value> {
-    output_value
-        .get("structured_output")
-        .or_else(|| output_value.get("json"))
-        .cloned()
-}
-
-fn parse_structured_text(text: &str) -> Option<Value> {
-    let trimmed = text.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return None;
-    }
-
-    serde_json::from_str(trimmed).ok()
-}
-
-fn is_empty_object(value: &Value) -> bool {
-    matches!(value, Value::Object(map) if map.is_empty())
-}
-
-fn output_from_response_json(response_json: Value) -> anyhow::Result<AgentOutput> {
-    let output_value = response_json
-        .get("actual")
-        .or_else(|| response_json.get("output"))
-        .cloned()
-        .unwrap_or_else(|| response_json.clone());
-
-    if let Value::String(text) = &output_value {
-        return Ok(AgentOutput {
-            text: Some(text.clone()),
-            structured: None,
-            tool_calls: Vec::new(),
-            trace: Vec::new(),
-            raw: response_json,
-            metadata: json!({}),
-        });
-    }
-
-    let mut output = serde_json::from_value::<AgentOutput>(output_value.clone())
-        .map_err(|err| anyhow::anyhow!("agent response did not match output envelope: {}", err))?;
-
-    if output.text.is_none() {
-        output.text = extract_agent_response_text(&response_json, &output_value);
-    }
-
-    if output.structured.is_none() {
-        output.structured = extract_agent_response_structured(&output_value);
-    }
-
-    if output.structured.is_none() {
-        output.structured = output.text.as_deref().and_then(parse_structured_text);
-    }
-
-    if is_empty_object(&output.raw) {
-        output.raw = response_json;
-    }
-
-    Ok(output)
-}
-
-fn invocation_metadata(
-    run_profile: &RunProfile,
-    http_status: Option<u16>,
-    latency_ms: u64,
-) -> Value {
-    json!({
-        "source": INVOCATION_SOURCE,
-        "http_status": http_status,
-        "latency_ms": latency_ms,
-        "agent": {
-            "provider": &run_profile.agent.provider,
-            "name": &run_profile.agent.name,
-            "version": &run_profile.agent.version,
-            "model": &run_profile.agent.model,
-            "config": &run_profile.agent.config,
-        }
-    })
-}
-
-fn attach_invocation_metadata(
-    mut output: AgentOutput,
-    run_profile: &RunProfile,
-    http_status: Option<u16>,
-    latency_ms: u64,
-) -> AgentOutput {
-    let invocation = invocation_metadata(run_profile, http_status, latency_ms);
-    output.metadata = match output.metadata {
-        Value::Object(mut map) => {
-            map.insert("vigilo_invocation".to_string(), invocation);
-            Value::Object(map)
-        }
-        other => json!({
-            "value": other,
-            "vigilo_invocation": invocation,
-        }),
-    };
-    output
-}
-
+/// Attach bounded evidence to every typed outcome without changing retry policy.
 pub(crate) async fn invoke(
-    client: &reqwest::Client,
-    ceilings: limits::Limits,
+    services: Services<'_>,
     run_id: Uuid,
     execution_id: Uuid,
     attempt_id: Uuid,
     run_profile: &RunProfile,
     test_case: &TestCase,
+) -> anyhow::Result<Invocation> {
+    let mut observation = diagnostics::Observation::new(
+        run_id,
+        execution_id,
+        attempt_id,
+        &run_profile.harness.http().url,
+    );
+    let result = invoke_inner(
+        services,
+        run_id,
+        execution_id,
+        attempt_id,
+        run_profile,
+        test_case,
+        &mut observation,
+    )
+    .await;
+    match result {
+        Ok(output) => Ok(Invocation {
+            output,
+            diagnostics: observation.finish(None),
+        }),
+        Err(error) => match error.downcast::<Failure>() {
+            Ok(mut failure) => {
+                failure.invocation = Some(Box::new(observation.finish(Some(failure.kind))));
+                Err(failure.into())
+            }
+            Err(error) => Err(error),
+        },
+    }
+}
+
+async fn invoke_inner(
+    services: Services<'_>,
+    run_id: Uuid,
+    execution_id: Uuid,
+    attempt_id: Uuid,
+    run_profile: &RunProfile,
+    test_case: &TestCase,
+    observation: &mut diagnostics::Observation,
 ) -> anyhow::Result<AgentOutput> {
-    let http = &run_profile.agent.http;
-    let limits = ceilings
+    anyhow::ensure!(
+        run_profile.harness.is_inline(),
+        "inline invocation requires inline completion"
+    );
+    validate_request_format(run_profile)
+        .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
+    let http = run_profile.harness.http();
+    let format = AgentRequestFormat::from_profile(run_profile)?;
+    if http
+        .headers
+        .keys()
+        .any(|name| name.eq_ignore_ascii_case(diagnostics::REQUEST_ID_HEADER))
+    {
+        return Err(Failure::terminal(
+            Kind::Configuration,
+            "profile overrides the host attempt correlation header",
+        )
+        .into());
+    }
+    let limits = services
+        .limits
         .resolve(http)
         .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
     let max_retry_after = http
@@ -421,7 +472,7 @@ pub(crate) async fn invoke(
     if max_retry_after == 0 || max_retry_after > failure::MAX_RETRY_AFTER_SECS {
         return Err(Failure::terminal(
             Kind::Configuration,
-            "agent.http.max_retry_after_secs must be between 1 and 86400",
+            "harness.http.max_retry_after_secs must be between 1 and 86400",
         )
         .into());
     }
@@ -443,26 +494,94 @@ pub(crate) async fn invoke(
         )
     })?;
 
-    let request_body = build_request_body(run_id, execution_id, attempt_id, run_profile, test_case)
-        .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
+    // Resolve only after the request is serialized and bounded. Credentials are
+    // added to transport headers, never the profile or evaluator payload.
+    let request_body = if format == AgentRequestFormat::Native {
+        let forward_context = match &run_profile.harness {
+            Harness::DirectProbe {
+                forward_case_context,
+                ..
+            }
+            | Harness::DelegatedTrial {
+                forward_case_context,
+                ..
+            } => *forward_case_context,
+        };
+        let submission = Submission {
+            schema_version: wire::SCHEMA_VERSION.into(),
+            invocation_id: attempt_id,
+            requested_agent: requested_agent(run_profile)?,
+            deadline_at: (chrono::Utc::now() + chrono::TimeDelta::seconds(i64::from(timeout_secs)))
+                .fixed_offset(),
+            case: CaseInput {
+                input: test_case.input.clone(),
+                context: test_case.context.clone().filter(|_| forward_context),
+            },
+            callback: None,
+        };
+        limits::serialize(&submission, limits.max_request_bytes)
+    } else {
+        let request = build_request_body(run_id, execution_id, attempt_id, run_profile, test_case)
+            .map_err(|err| Failure::terminal(Kind::Configuration, err))?;
+        limits::serialize(&request, limits.max_request_bytes)
+    }
+    .map_err(|err| Failure::terminal(Kind::BodyLimit, err))?;
+    let resolved = match http.credential.as_deref() {
+        Some(reference) => Some(
+            services
+                .credentials
+                .resolve(
+                    reference,
+                    &http.url,
+                    &http.headers,
+                    credentials::Execution {
+                        resources: services.resources.clone(),
+                        run_id,
+                        execution_id,
+                        attempt_id,
+                    },
+                )
+                .await?,
+        ),
+        None => None,
+    };
+    let client = if resolved.is_some() {
+        services.credentials.client().await?
+    } else {
+        services.client
+    };
     let mut request = client
         .request(method, &http.url)
         .timeout(Duration::from_secs(u64::from(timeout_secs)))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(
-            limits::serialize(&request_body, limits.max_request_bytes)
-                .map_err(|err| Failure::terminal(Kind::BodyLimit, err))?,
-        );
+        .body(request_body);
     for (name, value) in &http.headers {
         request = request.header(name, value);
     }
 
-    let started = Instant::now();
-    let mut response = request
-        .send()
+    if let Some(resolved) = resolved {
+        resolved.check_validity()?;
+        if resolved.name.as_str() == diagnostics::REQUEST_ID_HEADER {
+            return Err(Failure::terminal(
+                Kind::Configuration,
+                "credential binding overrides the host attempt correlation header",
+            )
+            .into());
+        }
+        request = request.header(resolved.name, resolved.value);
+    }
+    request = request.header(diagnostics::REQUEST_ID_HEADER, attempt_id.to_string());
+    let request = request
+        .build()
+        .map_err(|err| Failure::transport(err, "invalid agent HTTP request", None))?;
+    observation.start_http();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(timeout_secs));
+    let response = client
+        .execute(request)
         .await
         .map_err(|err| Failure::transport(err, "agent HTTP request failed", None))?;
     let status = response.status();
+    observation.data.http_status = Some(status.as_u16());
     let http_failure = (!status.is_success()).then(|| {
         Failure::http(
             status.as_u16(),
@@ -474,46 +593,97 @@ pub(crate) async fn invoke(
             max_retry_after,
         )
     });
-    let mut body = limits::Body::new(limits.max_response_bytes);
-    while let Some(chunk) = response.chunk().await.map_err(|err| {
-        http_failure.clone().unwrap_or_else(|| {
-            Failure::transport(
-                err,
-                "failed to read agent HTTP response body",
-                Some(status.as_u16()),
-            )
-        })
-    })? {
-        body.append(&chunk).map_err(|err| {
-            Failure::terminal(
-                Kind::BodyLimit,
-                format!("agent HTTP response limit exceeded: {err}"),
-            )
-            .with_status(status.as_u16())
+    let capture_limit = if format == AgentRequestFormat::Native && status.is_success() {
+        wire::MAX_OUTCOME_BYTES as u64
+    } else {
+        limits.max_response_bytes
+    };
+    let captured = capture::collect(response, capture_limit, deadline)
+        .await
+        .map_err(|error| {
+            if error.kind == Kind::BodyLimit {
+                error
+            } else {
+                http_failure.clone().unwrap_or(error)
+            }
         })?;
-    }
-    let bytes = body.finish();
-    // Match reqwest text decoding: strip a UTF-8 BOM and replace invalid UTF-8.
-    let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
-    let body = String::from_utf8_lossy(bytes);
+    observation.finish_http();
 
     if let Some(failure) = http_failure {
-        return Err(failure.with_excerpt(&response_body_excerpt(&body)).into());
+        return Err(if http.credential.is_some() {
+            // Authenticated endpoints may echo credentials in error bodies.
+            failure
+        } else {
+            let bytes = captured.bytes();
+            let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+            failure.with_excerpt(&response_body_excerpt(&String::from_utf8_lossy(bytes)))
+        }
+        .into());
     }
 
-    let response_json = parse_response_body(&body).map_err(|err| {
-        Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
-    })?;
-    let output = output_from_response_json(response_json).map_err(|err| {
-        Failure::terminal(Kind::InvalidResponse, err).with_status(status.as_u16())
-    })?;
+    if format == AgentRequestFormat::Native {
+        let require_agent = match &run_profile.harness {
+            Harness::DelegatedTrial { .. } => true,
+            Harness::DirectProbe {
+                require_executed_agent,
+                ..
+            } => *require_executed_agent,
+        };
+        return match Outcome::decode(
+            captured.bytes(),
+            attempt_id,
+            &requested_agent(run_profile)?,
+            require_agent,
+        )
+        .map_err(|error| {
+            Failure::terminal(Kind::InvalidResponse, error).with_status(status.as_u16())
+        })? {
+            Outcome::Completed { evidence, .. } => {
+                if evidence.bytes.len() as u64 > limits.max_response_bytes {
+                    return Err(Failure::terminal(
+                        Kind::BodyLimit,
+                        "native evidence exceeds configured response limit",
+                    )
+                    .with_status(status.as_u16())
+                    .into());
+                }
+                Ok(captured_output(vigilo::response::CapturedBody::new(
+                    evidence.bytes,
+                    Some(evidence.content_type),
+                )))
+            }
+            Outcome::Failed { .. } => Err(Failure::terminal(
+                Kind::RemoteFailure,
+                "remote invocation reported failure",
+            )
+            .with_status(status.as_u16())
+            .into()),
+        };
+    }
+    if let Harness::DirectProbe {
+        executed_agent_pointer: Some(pointer),
+        require_executed_agent,
+        ..
+    } = &run_profile.harness
+    {
+        wire::validate_reported_agent(
+            captured.bytes(),
+            pointer,
+            &requested_agent(run_profile)?,
+            *require_executed_agent,
+        )
+        .map_err(|error| {
+            Failure::terminal(Kind::InvalidResponse, error).with_status(status.as_u16())
+        })?;
+    }
 
-    Ok(attach_invocation_metadata(
-        output,
-        run_profile,
-        Some(status.as_u16()),
-        started.elapsed().as_millis() as u64,
-    ))
+    // Provider usage is independent of the evidence contract.
+    if format == AgentRequestFormat::OpenAiCompatibleChatCompletions
+        && let Ok(value) = serde_json::from_slice::<Value>(captured.bytes())
+    {
+        observation.data.usage = diagnostics::chat_usage(&value);
+    }
+    Ok(captured_output(captured))
 }
 
 #[cfg(test)]
@@ -521,79 +691,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_response_body_accepts_plain_text() {
-        let value = parse_response_body("plain response").unwrap();
-        assert_eq!(value, json!({ "text": "plain response" }));
-    }
-
-    #[test]
-    fn output_from_response_json_reads_nested_actual() {
-        let output = output_from_response_json(json!({
-            "actual": {
-                "text": "classified positive",
-                "structured": {
-                    "label": "positive"
-                }
-            },
-            "provider_request_id": "req_123"
-        }))
-        .unwrap();
-
-        assert_eq!(output.text.as_deref(), Some("classified positive"));
-        assert_eq!(
-            output
-                .structured
-                .as_ref()
-                .and_then(|value| value.get("label"))
-                .and_then(Value::as_str),
-            Some("positive")
-        );
-        assert_eq!(
-            output
-                .raw
-                .get("provider_request_id")
-                .and_then(Value::as_str),
-            Some("req_123")
-        );
-    }
-
-    #[test]
-    fn output_from_response_json_extracts_common_message_shape() {
-        let output = output_from_response_json(json!({
-            "choices": [
-                {
-                    "message": {
-                        "content": "hello from the model"
-                    }
-                }
-            ]
-        }))
-        .unwrap();
-
-        assert_eq!(output.text.as_deref(), Some("hello from the model"));
-    }
-
-    #[test]
-    fn output_from_response_json_parses_structured_chat_content() {
-        let output = output_from_response_json(json!({
-            "choices": [
-                {
-                    "message": {
-                        "content": "{\"label\":\"positive\"}"
-                    }
-                }
-            ]
-        }))
-        .unwrap();
-
-        assert_eq!(
-            output
-                .structured
-                .as_ref()
-                .and_then(|value| value.get("label"))
-                .and_then(Value::as_str),
-            Some("positive")
-        );
+    fn captured_output_does_not_infer_or_decode_response_shapes() {
+        for bytes in [
+            b"{invalid".as_slice(),
+            b"",
+            &[0xff, 0],
+            br#"{"text":"secret","choices":[]}"#,
+        ] {
+            let output = captured_output(vigilo::response::CapturedBody::new(bytes.to_vec(), None));
+            assert_eq!(output.captured_body.unwrap().bytes(), bytes);
+            assert!(output.text.is_none());
+            assert!(output.structured.is_none());
+            assert!(output.mapping.is_none());
+            assert_eq!(output.raw, json!({}));
+            assert_eq!(output.metadata, json!({}));
+        }
     }
 
     #[test]
@@ -615,10 +727,15 @@ persistence:
 agent:
   provider: example
   name: agent
-  http:
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
   config:
     request_format: unsupported
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
 case_groups: []
 "#,
         )
@@ -626,8 +743,9 @@ case_groups: []
 
         let err = validate_request_format(&profile).unwrap_err();
         assert!(
-            err.to_string()
-                .contains("expected 'vigilo_case' or 'openai_compatible_chat_completions'")
+            err.to_string().contains(
+                "expected 'native', 'vigilo_case' or 'openai_compatible_chat_completions'"
+            )
         );
     }
 
@@ -650,10 +768,15 @@ persistence:
 agent:
   provider: example
   name: agent
-  http:
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
   config:
     request_format: 12
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
 case_groups: []
 "#,
         )
@@ -686,12 +809,17 @@ agent:
   provider: llama.cpp
   name: qwen
   model: qwen2.5-0.5b-instruct-q4_k_m.gguf
-  http:
-    url: http://agent_vigilo_agent:8080/v1/chat/completions
   config:
     request_format: openai_compatible_chat_completions
     system_prompt: classify sentiment
     max_tokens: 64
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://agent_vigilo_agent:8080/v1/chat/completions
 case_groups: []
 "#,
         )
@@ -726,5 +854,113 @@ case_groups: []
         );
         assert!(body.get("case").is_none());
         assert_eq!(body.get("stream").and_then(Value::as_bool), Some(false));
+    }
+    fn fixture_profile() -> RunProfile {
+        serde_yaml::from_str(
+            r#"
+profile_id: p
+profile_version: 1
+description: d
+defaults:
+  max_attempts: 1
+  request_timeout_secs: 30
+  fail_on_any_blocking_failure: true
+  min_execution_score: 0.5
+persistence:
+  mode: full
+  persist_raw_outputs: all
+  persist_evaluator_evidence: true
+agent:
+  provider: example
+  name: model
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
+  http:
+    url: http://localhost/invoke
+case_groups: []
+"#,
+        )
+        .unwrap()
+    }
+
+    fn fixture_case(input: Value) -> TestCase {
+        TestCase {
+            id: "case".into(),
+            task_type: "test".into(),
+            case_group: None,
+            input,
+            expected: Some(json!({"oracle":"must not reach the agent"})),
+            context: Some(json!({"history":[1,2]})),
+            tags: vec!["tag".into()],
+            metadata: Default::default(),
+        }
+    }
+
+    #[test]
+    fn chat_messages_reject_lossy_or_malformed_inputs() {
+        let profile = fixture_profile();
+        for input in [
+            json!({"messages":"wrong"}),
+            json!({"messages":null}),
+            json!({"messages":[{"role":42,"content":"hello"}]}),
+            json!({"messages":[{"role":"assistant","content":"hello","tool_calls":[]}]}),
+            json!({"messages":[{"role":"tool","content":"hello","tool_call_id":"call-1"}]}),
+            json!({"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}),
+        ] {
+            assert!(
+                build_openai_compatible_chat_messages(&profile, &fixture_case(input.clone()))
+                    .is_err(),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_request_preserves_case_input_and_context_without_oracle() {
+        let case = fixture_case(
+            json!({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.invalid/image"}}]}]}),
+        );
+        let ids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+        let body = build_request_body(ids[0], ids[1], ids[2], &fixture_profile(), &case).unwrap();
+        assert_eq!(body["input"], case.input);
+        assert_eq!(body["case"]["input"], case.input);
+        assert_eq!(body["case"]["context"], json!({"history":[1,2]}));
+        assert_eq!(body["run_id"], ids[0].to_string());
+        assert_eq!(body["execution_id"], ids[1].to_string());
+        assert_eq!(body["attempt_id"], ids[2].to_string());
+        assert!(body["case"].get("expected").is_none());
+        assert!(!body.to_string().contains("must not reach the agent"));
+    }
+
+    #[test]
+    fn chat_request_preserves_text_order_and_selected_options() {
+        let mut profile = fixture_profile();
+        profile.agent.config = json!({"request_format":"openai_compatible_chat_completions","system_prompt":"system","temperature":0.3,"top_p":0.8,"min_p":0.1,"max_tokens":64,"stop":["END"],"seed":42,"response_format":{"type":"json_object"},"presence_penalty":0.2,"frequency_penalty":0.1,"repeat_penalty":1.1});
+        let case = fixture_case(
+            json!({"messages":[{"role":"assistant","content":"prior"},{"content":"next"}]}),
+        );
+        let body = build_openai_compatible_chat_completions_request_body(&profile, &case).unwrap();
+        assert_eq!(
+            body["messages"],
+            json!([{"role":"system","content":"system"},{"role":"assistant","content":"prior"},{"role":"user","content":"next"}])
+        );
+        assert_eq!(body["model"], "model");
+        assert_eq!(body["stream"], false);
+        for (key, value) in profile.agent.config.as_object().unwrap() {
+            if key != "request_format" && key != "system_prompt" {
+                assert_eq!(&body[key], value);
+            }
+        }
+        assert!(!body.to_string().contains("must not reach the agent"));
+        for (input, text) in [
+            (json!({"user_message":"hello","prompt":"ignored"}), "hello"),
+            (json!({"prompt":"prompt"}), "prompt"),
+            (json!({"x":1}), "{\"x\":1}"),
+        ] {
+            assert_eq!(input_text_for_chat(&fixture_case(input)).unwrap(), text);
+        }
     }
 }

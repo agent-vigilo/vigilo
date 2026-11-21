@@ -296,7 +296,7 @@ async fn finalization_summary_collection_does_not_advance_pending_receipts(pool:
             .await
             .unwrap();
 
-    let collection = collect_run_shard_summaries(router, Uuid::now_v7(), run)
+    let collection = collect_run_shard_summaries(router, Uuid::now_v7(), Uuid::nil(), run)
         .await
         .unwrap();
     assert!(collection.output.complete);
@@ -361,8 +361,13 @@ async fn finalization_batches_only_routed_summaries_and_defers_missing_or_moving
     sqlx::query("INSERT INTO run_shard_summaries(run_id,run_shard,expected_execution_count,status) SELECT $1,shard,1,'running' FROM generate_series(4,7) shard WHERE shard<>6")
         .bind(run).execute(&pool).await.unwrap();
 
-    let (result, queries) =
-        record_queries(collect_run_shard_summaries(router, Uuid::now_v7(), run)).await;
+    let (result, queries) = record_queries(collect_run_shard_summaries(
+        router,
+        Uuid::now_v7(),
+        Uuid::nil(),
+        run,
+    ))
+    .await;
     let collection = result.unwrap();
     assert!(!collection.output.complete);
     assert_eq!(collection.failures.failed_operation_count(), 0);
@@ -391,7 +396,7 @@ async fn finalization_batches_only_routed_summaries_and_defers_missing_or_moving
         .execute(&pool)
         .await
         .unwrap();
-    let moving = collect_run_shard_summaries(router, Uuid::now_v7(), run)
+    let moving = collect_run_shard_summaries(router, Uuid::now_v7(), Uuid::nil(), run)
         .await
         .unwrap();
     assert!(!moving.output.complete);
@@ -418,7 +423,7 @@ async fn sealed_summary_finalization_reads_without_local_write_admission(pool: P
         "SELECT jsonb_build_object('summary',to_jsonb(s),'consumptions',(SELECT jsonb_agg(to_jsonb(p)) FROM run_chunk_settlement_consumptions p WHERE p.run_id=s.run_id AND p.run_shard=s.run_shard)) FROM run_shard_summaries s WHERE run_id=$1 AND run_shard=4",
     ).bind(run).fetch_one(&pool).await.unwrap();
 
-    let collection = collect_run_shard_summaries(router, Uuid::now_v7(), run)
+    let collection = collect_run_shard_summaries(router, Uuid::now_v7(), Uuid::nil(), run)
         .await
         .unwrap();
     assert!(collection.output.complete);
@@ -446,3 +451,6 @@ async fn sealed_summary_finalization_reads_without_local_write_admission(pool: P
     ).bind(run).fetch_one(&pool).await.unwrap();
     assert_eq!(after, before);
 }
+
+#[path = "finalization_scope_tests.rs"]
+mod finalization_scope_tests;

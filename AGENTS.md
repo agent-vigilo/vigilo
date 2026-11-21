@@ -27,6 +27,14 @@ This file records Vigilo-specific constraints that are easy to miss. A nearer
 
 ## Architecture Contracts
 
+- Prefer explicit configuration and contracts over inferred behavior. Do not guess
+  semantic meaning from field names, content, or familiar formats. Define defaults
+  and fallback behavior explicitly; failed configured behavior must not silently
+  switch to another interpretation.
+- Use the [canonical glossary](web/src/data/glossary.ts) for harness vocabulary
+  (Direct Probe, Delegated Trial) and evaluator vocabulary (Deterministic / Code
+  Scorer, Model-as-a-Judge). Completion delivery is independent of harness type;
+  performance/test harness terminology remains separate.
 - Keep evaluator interface vocabulary as `input` and `output`. Preserve the
   strict evaluator identifier format `<namespace>/<name>:<version>`.
 - Treat `vigilo/wit/evaluator/v1.0.0/evaluator.wit` as the sole pre-release source of
@@ -59,7 +67,7 @@ This file records Vigilo-specific constraints that are easy to miss. A nearer
   ownership, and end-to-end tests for distributed runtime behavior.
 - Service-free tests must not require Docker, PostgreSQL, RabbitMQ, external network
   access, or platform-specific shell tools. Fixtures must be deterministic, bounded,
-  and cross-platform. Reserve `#[ignore]` in the `vigilo` binary for PostgreSQL;
+  and cross-platform. Reserve `#[ignore]` in the `vigilo` library for PostgreSQL;
   put other opt-in services in a named target.
 - Reproduce a reported regression with its exact command, environment, and
   platform when available. Report required checks that did not run and why;
@@ -81,11 +89,32 @@ cargo test --workspace --locked --lib --bins
 - Run `cargo perf check` for performance harness changes. For service or topology
   changes, also run `cargo test -p xtask --locked --features performance-services --test performance_services -- --nocapture`.
 - For SQL, locking, leases, sharding, or database workflow changes, run
-  `cargo test -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4`;
+  `cargo test -p vigilo --locked --lib -- --ignored --nocapture --test-threads=4`;
   apply changed migrations through setup against a fresh PostgreSQL database.
 - Run the named end-to-end tier for distributed routing or runtime changes when
   its full dependency set is available. Run `npm --prefix web run typecheck` and
   `npm --prefix web run build` for web documentation changes.
+
+### Local Build And Test Efficiency
+
+- After reproducing the reported failure, iterate on the smallest package and
+  test target that exercise the change. Keep the relevant features, fixtures, and
+  environment. Check the test output to confirm that the intended cases ran. Use
+  `cargo check` for compile-only feedback and run tests to verify behavior.
+- Reuse the existing Cargo target directory and build configuration for comparable
+  runs. Preserve incremental artifacts unless diagnosing a cache issue or measuring
+  a clean build. Run Cargo commands that share a target directory in sequence.
+  Independent lightweight checks can run alongside them when resources permit.
+- If builds or services compete for CPU or memory, lower local build parallelism
+  with `--jobs` or use fewer test threads where the suite permits. Preserve any
+  concurrency, instrumentation, and service topology required by the test.
+- Reuse healthy local test services where the suite supports it, while preserving
+  required fixture isolation, fresh state, and cleanup. Run all applicable final
+  checks on the completed diff. After further edits, rerun the checks the edits
+  affect.
+- For recurring slow feedback, time compilation, test execution, and service
+  startup separately. Use Cargo's `--timings` when compilation dominates before
+  changing profiles, compiler settings, or hardware.
 
 ## Documentation
 

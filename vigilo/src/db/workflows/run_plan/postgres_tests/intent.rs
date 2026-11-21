@@ -19,6 +19,158 @@ async fn replay(db: &PgPool, f: &Fixture, execute: bool) -> Result<Plan> {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
+async fn execution_intent_does_not_authorize_a_published_plan(db: PgPool) {
+    let f = Fixture::with_size(&db, 2, 2, 2).await;
+    let lease = claim(&db, f.plan.run_id).await.unwrap();
+    f.prepare(&db, lease).await.unwrap();
+    assert!(replay(&db, &f, true).await.unwrap().execution_requested);
+    assert!(
+        admission::claim(&db, f.plan.run_id).await.is_err(),
+        "requesting execution must not approve an immutable plan"
+    );
+    let stats = crate::run_admission::recover(&runtime_context(&db), 1, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        stats.claimed_runs, 0,
+        "recovery must not manufacture approval"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn acceptance_binds_exact_root_and_survives_replay_without_replacement(db: PgPool) {
+    let f = Fixture::with_size(&db, 2, 2, 2).await;
+    let lease = claim(&db, f.plan.run_id).await.unwrap();
+    let root = f.prepare(&db, lease).await.unwrap();
+    let other = Uuid::now_v7();
+    let other_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('vigilo.tenant_id',$1,false)")
+                    .bind(other.to_string())
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(db.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    assert!(
+        admission::accept(&other_pool, f.plan.run_id, &root)
+            .await
+            .is_err()
+    );
+    other_pool.close().await;
+    let mut changed = root.clone();
+    changed.key.push_str("-different");
+    assert!(
+        admission::accept(&db, f.plan.run_id, &changed)
+            .await
+            .is_err()
+    );
+    assert!(admission::claim(&db, f.plan.run_id).await.is_err());
+    sqlx::raw_sql("CREATE FUNCTION fail_acceptance() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.accepted_manifest IS NOT NULL THEN RAISE EXCEPTION 'acceptance commit interrupted'; END IF; RETURN NULL; END $$; CREATE CONSTRAINT TRIGGER fail_acceptance AFTER UPDATE ON run_plans DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION fail_acceptance();")
+        .execute(&db).await.unwrap();
+    assert!(
+        format!(
+            "{:#}",
+            admission::accept(&db, f.plan.run_id, &root)
+                .await
+                .unwrap_err()
+        )
+        .contains("acceptance commit interrupted")
+    );
+    assert!(admission::claim(&db, f.plan.run_id).await.is_err());
+    sqlx::query("DROP TRIGGER fail_acceptance ON run_plans")
+        .execute(&db)
+        .await
+        .unwrap();
+    admission::accept(&db, f.plan.run_id, &root).await.unwrap();
+    admission::accept(&db, f.plan.run_id, &root).await.unwrap();
+    assert!(
+        admission::accept(&db, f.plan.run_id, &changed)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE run_plans SET manifest=$2 WHERE run_id=$1")
+            .bind(f.plan.run_id)
+            .bind(Json(&changed))
+            .execute(&db)
+            .await
+            .is_err()
+    );
+    let lease = admission::claim(&db, f.plan.run_id).await.unwrap();
+    release(&db, lease, None).await.unwrap();
+    sqlx::query("UPDATE runs SET status='cancelled' WHERE id=$1")
+        .bind(f.plan.run_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    assert!(admission::accept(&db, f.plan.run_id, &root).await.is_err());
+    assert!(admission::claim(&db, f.plan.run_id).await.is_err());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn acceptance_rechecks_cancellation_after_waiting_for_run_lock(db: PgPool) {
+    let f = Fixture::with_size(&db, 2, 2, 2).await;
+    let owner = claim(&db, f.plan.run_id).await.unwrap();
+    let root = f.prepare(&db, owner).await.unwrap();
+    let mut tx = db.begin().await.unwrap();
+    sqlx::query("SELECT id FROM runs WHERE id=$1 FOR UPDATE")
+        .bind(f.plan.run_id)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    let pool = db.clone();
+    let id = f.plan.run_id;
+    let task = tokio::spawn(async move { admission::accept(&pool, id, &root).await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(blocker)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("UPDATE runs SET status='cancelled' WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(task.await.unwrap().is_err());
+    let absent: bool =
+        sqlx::query_scalar("SELECT accepted_manifest IS NULL FROM run_plans WHERE run_id=$1")
+            .bind(id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert!(
+        absent,
+        "a waiting acceptance must not approve cancelled work"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
 async fn fresh_creation_and_execution_intent_commit_together(db: PgPool) {
     let f = Fixture::with_size(&db, 2, 2, 2).await;
     let id = Uuid::now_v7();
@@ -116,6 +268,20 @@ async fn held_plan_requests_execution_only_after_replay_validation(db: PgPool) {
     );
     assert!(replay(&db, &f, true).await.unwrap().execution_requested);
     assert!(replay(&db, &f, false).await.unwrap().execution_requested);
+    assert!(admission::claim(&db, f.plan.run_id).await.is_err());
+    admission::accept(
+        &db,
+        f.plan.run_id,
+        load(&db, f.plan.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .manifest
+            .as_ref()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let admission = admission::claim(&db, f.plan.run_id).await.unwrap();
     release(&db, admission, None).await.unwrap();
     // Terminal runs cannot acquire new intent through a replay.

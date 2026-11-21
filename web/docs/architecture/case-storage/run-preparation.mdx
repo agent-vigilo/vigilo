@@ -23,19 +23,21 @@ vigilo run create --profile-file profile.yaml --dataset-upload-id <upload-id> \
 vigilo run status <uuid>
 ```
 
-The upload ID identifies a finalized [dataset catalog entry](./ingestion).
+The upload ID identifies a finalized [dataset catalog entry](./ingestion.mdx).
 The profile is YAML or JSON, supplied through `--profile` or `--profile-file`,
 with an 8 MiB input and encoded limit. Storage configuration resolves the same
 recorded physical owner as the dataset; credentials remain outside SQL and files.
 
 Creation records execution intent atomically with the validated run identity,
-admits the published plan to execution storage, and returns `pending` after
+accepts the exact verified manifest, admits that plan to execution storage, and returns `pending` after
 exact placement verification. On initial creation, `--prepare-only` holds a run
 in `creating` with `plan_status: ready` and `dispatchable: false`. Repeat the same
 command without that flag to request execution. Replay validates immutable inputs
 before recording intent under the run lock; a preparation-only retry does not
-revoke an existing request. Coordinators resume requested admission after the
-foreground process stops; they leave preparation-only runs held.
+revoke an existing request. Execution intent does not approve a plan: acceptance
+binds the exact published manifest before admission can claim authority.
+Coordinators resume accepted admission after the foreground process stops;
+unaccepted plans stay held until their caller retries.
 Inline and file YAML/JSON inputs use the same ingestion and preparation path.
 Set `VIGILO_STORAGE_CONFIG` for creators, coordinators, and workers, or supply
 `--storage-config` to creation. Runtime credentials need read access to the
@@ -67,12 +69,14 @@ preparation. Gate count files contain sorted entries, including zero counts for
 used shards where a gate selects no cases.
 
 Chunk files, indexes, gate files, and the configuration use the
-[storage formats and budgets](./formats). The configuration freezes the full
+[storage formats and budgets](./formats.mdx). The configuration freezes the full
 profile, agent settings, evaluator execution plan, logical dataset identity, and
 executability counts. The run-plan manifest links those objects to the finalized
 dataset and records per-shard totals and settlement hashes. The control run
-snapshot retains compact identities, references and expected shard settlement
-hashes rather than full policy or case payloads. Publication derives that bounded
+snapshot retains compact identities, references, expected shard settlement
+hashes, and the response retention mode and mapping hash. The full policy and case
+payloads remain in blob storage. The response policy identity lets attempt writes
+validate retained evidence without loading the full profile from PostgreSQL. Publication derives that bounded
 finalization projection from the same shard metadata in its atomic commit.
 
 ## Authority, Recovery, and Status
@@ -81,7 +85,11 @@ finalization projection from the same shard metadata in its atomic commit.
 
 The run creation lease lasts five minutes. Each claim also increments a
 plan generation. Mutations lock the run, then recheck the current owner,
-generation, status, and wall-clock expiry. No SQL transaction spans storage I/O.
+generation, status, and wall-clock expiry. Preparation checkpoints retain the command's caller identity when supplied;
+lease renewal and publication enforce that same caller policy. Transaction-local
+settings end with commit, rollback or cancellation. Exact plan acceptance commits
+under caller authority before a separate system admission claim.
+No SQL transaction spans storage I/O.
 Read-only traversal renews the lease periodically, without a SQL mutation for
 every dataset file. Each group of remote writes gets a finite admission window
 before its authority check.
@@ -117,7 +125,7 @@ Frozen evaluator artifacts and placements are reused even when registry state or
 default placement policy changes. Changed source identity, profile, limits, or
 physical storage binding is rejected.
 
-Recovery claims the run before opening its storage adapter or reading roots,
+Recovery claims the run before loading protected plan details, opening its storage adapter or reading roots,
 configuration, and gate files. Competing coordinators cannot duplicate those
 reads for the same live lease. Adapter initialization and root reads share a
 120-second deadline minted before the claim; the complete gate traversal has
@@ -130,6 +138,19 @@ generation fence; an old caller cannot release a replacement owner's lease.
 Each coordinator processes recovery candidates sequentially. A failed candidate
 is deferred and the next candidate can proceed, but slow reads delay later
 candidates until the bounded read finishes or fails.
+Admission retains the ownership identity returned by its claim. Each control or
+execution-local transaction binds that identity before accessing protected rows,
+clears caller identity, and keeps the connection's fixed database role. Checkpoints,
+renewals, activation, failure, and release retain their owner/generation fences.
+Scope settings end on commit, rollback, or cancellation; no transaction spans blob
+I/O. Context setup shares the existing lock or timeout submission where possible.
+Scoped reads and release use explicit transactions; placement verification adds
+one context submission per bounded page, never per case.
+
+Placement activation locks each target catalog row through a restricted database
+function. The lock lasts through activation, while the caller retains no catalog
+update privilege. Role/status validation and route writes remain in Rust.
+
 The foreground creator reuses its already verified roots and claims authority
 before gate reads and local admission. Preparation-only runs remain held.
 
@@ -244,8 +265,9 @@ are local copies linked by run/shard identity; their logical relationship to
 control runs is not a cross-database foreign key.
 
 `run_plans` freezes the dataset catalog ID, storage binding, limits, evaluator
-artifacts and initial placements, then records generation, acknowledged chunk
-progress, execution intent, admission cursor/folds and the published root. `run_plan_objects` holds one compact reference
+artifacts, HTTP grant ceilings and initial placements, then records generation,
+acknowledged chunk progress, execution intent, admission cursor/folds, the published
+root and its exact accepted reference. `run_plan_objects` holds one compact reference
 per owned file. `run_plan_shards` holds at most 128 rows of verified totals,
 placement aliases and membership hashes. There are no per-case plan rows, case
 payloads, or temporary per-chunk SQL plans in this preparation path.

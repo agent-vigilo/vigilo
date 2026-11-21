@@ -6,9 +6,8 @@ async fn rebalance_defers_a_draining_shard_until_active_work_drains(pool: PgPool
     let database_router = database_router_with_control_pool(pool.clone(), database_url);
     let (operation_id, items) = seed_rebalance_operation(&pool, 1).await;
     let (run_id, run_shard) = items[0];
-    let dataset_id = Uuid::now_v7();
-    let dataset_version_id = Uuid::now_v7();
-    seed_run(&pool, run_id, dataset_id, dataset_version_id).await;
+    let dataset_id = run_id;
+    let dataset_version_id = run_id;
     seed_run_snapshot(&pool, run_id, run_shard, dataset_id, dataset_version_id).await;
     sqlx::query(         r#"             INSERT INTO shard_placements (run_id, run_shard, database_alias, status)             VALUES ($1::uuid, $2, 'primary', 'active')             "#,     )     .bind(run_id)     .bind(run_shard)     .execute(&pool)     .await     .unwrap();
     sqlx::query(         r#"             INSERT INTO run_chunks (                 id, run_id, run_shard, dataset_version_id, profile_group_id,                 ordinal_start, ordinal_end, status, lease_token, leased_until             )             VALUES (                 $1::uuid, $2::uuid, $3, $4::uuid, 'default',                 0, 1, 'leased', gen_random_uuid(), now() + interval '1 minute'             )             "#,     )     .bind(Uuid::now_v7())     .bind(run_id)     .bind(run_shard)     .bind(dataset_version_id)     .execute(&pool)     .await     .unwrap();

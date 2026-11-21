@@ -139,6 +139,30 @@ pub(crate) async fn resolve_evaluators(
     profile: &RunProfile,
 ) -> anyhow::Result<Vec<ResolvedEvaluator>> {
     let (_, resolved, issues) = resolve_profile(db, profile).await?;
+    let resolved = require_resolved(resolved, issues)?;
+    let ids = resolved.iter().map(|e| e.evaluator_id).collect::<Vec<_>>();
+    freeze_http_ceiling(
+        resolved,
+        crate::db::tables::evaluator_http_policies::load(db, &ids).await?,
+    )
+}
+/// Resolve metadata and policy ceilings on the caller's already scoped connection.
+pub(crate) async fn resolve_evaluators_with(
+    db: &mut sqlx::PgConnection,
+    profile: &RunProfile,
+) -> anyhow::Result<Vec<ResolvedEvaluator>> {
+    let (_, resolved, issues) = resolve_profile(&mut *db, profile).await?;
+    let resolved = require_resolved(resolved, issues)?;
+    let ids = resolved.iter().map(|e| e.evaluator_id).collect::<Vec<_>>();
+    freeze_http_ceiling(
+        resolved,
+        crate::db::tables::evaluator_http_policies::load(db, &ids).await?,
+    )
+}
+fn require_resolved(
+    resolved: Vec<ResolvedEvaluator>,
+    issues: Vec<String>,
+) -> anyhow::Result<Vec<ResolvedEvaluator>> {
     anyhow::ensure!(
         issues.is_empty(),
         "profile executability validation failed:\n- {}",
@@ -146,9 +170,21 @@ pub(crate) async fn resolve_evaluators(
     );
     Ok(resolved)
 }
+/// Both credential paths freeze exactly the same validated capability ceiling.
+fn freeze_http_ceiling(
+    mut resolved: Vec<ResolvedEvaluator>,
+    mut policies: std::collections::BTreeMap<uuid::Uuid, Vec<vigilo::evaluator_http::Rule>>,
+) -> anyhow::Result<Vec<ResolvedEvaluator>> {
+    for evaluator in &mut resolved {
+        let rules = policies.remove(&evaluator.evaluator_id).unwrap_or_default();
+        crate::evaluator_http::Snapshot::new(evaluator.evaluator_id, rules.clone())?;
+        evaluator.http_rules = rules;
+    }
+    Ok(resolved)
+}
 
-async fn resolve_profile(
-    db: &PgPool,
+async fn resolve_profile<'e, E: sqlx::Executor<'e, Database = sqlx::Postgres>>(
+    db: E,
     profile: &RunProfile,
 ) -> anyhow::Result<(HashMap<String, bool>, Vec<ResolvedEvaluator>, Vec<String>)> {
     let mut runnable_by_ref: HashMap<String, bool> = HashMap::new();
@@ -256,6 +292,7 @@ async fn resolve_profile(
 
         runnable_by_ref.insert(evaluator_ref.clone(), true);
         resolved_evaluators.push(ResolvedEvaluator {
+            http_rules: vec![],
             evaluator_ref,
             evaluator_id: evaluator_record.id,
             content_hash: evaluator_record.content_hash.clone(),
@@ -443,38 +480,51 @@ fn collect_static_profile_config_issues(profile: &RunProfile) -> Vec<String> {
         issues.push("agent.name must not be empty".to_string());
     }
 
-    if let Err(err) = reqwest::Url::parse(&profile.agent.http.url) {
-        issues.push(format!("agent.http.url is invalid: {}", err));
+    if let Some(reference) = &profile.harness.http().credential
+        && let Err(err) = agent_client::credentials::validate_reference(reference)
+    {
+        issues.push(err.to_string());
     }
 
-    if let Err(err) = profile.agent.http.method.parse::<reqwest::Method>() {
+    if let Err(err) = reqwest::Url::parse(&profile.harness.http().url) {
+        issues.push(format!("harness.http.url is invalid: {}", err));
+    }
+
+    if let Err(err) = profile.harness.http().method.parse::<reqwest::Method>() {
         issues.push(format!(
-            "agent.http.method '{}' is invalid: {}",
-            profile.agent.http.method, err
+            "harness.http.method '{}' is invalid: {}",
+            profile.harness.http().method,
+            err
         ));
     }
 
     for (name, value) in [
-        ("max_request_bytes", profile.agent.http.max_request_bytes),
-        ("max_response_bytes", profile.agent.http.max_response_bytes),
+        (
+            "max_request_bytes",
+            profile.harness.http().max_request_bytes,
+        ),
+        (
+            "max_response_bytes",
+            profile.harness.http().max_response_bytes,
+        ),
     ] {
         if value == Some(0) {
-            issues.push(format!("agent.http.{name} must be greater than zero"));
+            issues.push(format!("harness.http.{name} must be greater than zero"));
         }
     }
 
     if profile
-        .agent
-        .http
+        .harness
+        .http()
         .max_retry_after_secs
         .is_some_and(|value| {
             value == 0 || value > crate::agent_client::failure::MAX_RETRY_AFTER_SECS
         })
     {
-        issues.push("agent.http.max_retry_after_secs must be between 1 and 86400".to_string());
+        issues.push("harness.http.max_retry_after_secs must be between 1 and 86400".to_string());
     }
-    if profile.agent.http.timeout_secs == Some(0) {
-        issues.push("agent.http.timeout_secs must be greater than zero".to_string());
+    if profile.harness.http().timeout_secs == Some(0) {
+        issues.push("harness.http.timeout_secs must be greater than zero".to_string());
     }
 
     if profile.defaults.max_attempts == 0 {
@@ -490,6 +540,9 @@ fn collect_static_profile_config_issues(profile: &RunProfile) -> Vec<String> {
     }
 
     if let Err(err) = agent_client::validate_request_format(profile) {
+        issues.push(err.to_string());
+    }
+    if let Err(err) = agent_client::deferred::Route::from_profile(profile) {
         issues.push(err.to_string());
     }
 
@@ -633,10 +686,10 @@ fn is_runnable_state(state: &EvaluatorState) -> bool {
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
+    use vigilo::invocation::profile::HttpEndpoint;
 
     use crate::{
         contracts::run::{
-            AgentHttpConfig,
             AgentProfile,
             AggregationMethod,
             AggregationSettings,
@@ -658,6 +711,44 @@ mod tests {
         models::evaluator::EvaluatorState,
     };
 
+    #[test]
+    fn callback_completion_is_rejected_without_host_ingress() {
+        let mut profile = profile();
+        let vigilo::invocation::profile::Harness::DirectProbe { completion, .. } =
+            &mut profile.harness
+        else {
+            panic!("expected a direct probe fixture");
+        };
+        *completion = vigilo::invocation::profile::Completion::Callback { deadline_secs: 600 };
+        assert_eq!(
+            profile.harness.validate(false).unwrap_err().to_string(),
+            "callback ingress is unavailable"
+        );
+    }
+
+    #[test]
+    fn credential_references_are_validated_without_resolving_operator_secrets() {
+        let mut profile = profile();
+        profile.harness.http_mut().credential = Some("agent-api".into());
+        assert!(
+            !super::collect_static_profile_config_issues(&profile)
+                .iter()
+                .any(|issue| issue.contains("credential"))
+        );
+        assert_eq!(
+            serde_json::to_value(&profile).unwrap()["harness"]["http"]["credential"],
+            "agent-api"
+        );
+        for reference in ["", "../secret", "env:TOKEN"] {
+            profile.harness.http_mut().credential = Some(reference.into());
+            assert!(
+                super::collect_static_profile_config_issues(&profile)
+                    .iter()
+                    .any(|issue| issue.contains("credential"))
+            );
+        }
+    }
+
     fn profile() -> RunProfile {
         RunProfile {
             profile_id: "p".to_string(),
@@ -676,13 +767,18 @@ mod tests {
             },
             scorecard: Default::default(),
             agent: AgentProfile {
+                response: None,
                 provider: "example".to_string(),
                 name: "test-agent".to_string(),
                 version: Some("1.0.0".to_string()),
                 model: Some("test-model".to_string()),
                 prompt_config_id: Some("test-prompt".to_string()),
                 prompt_config_version: Some("1.0.0".to_string()),
-                http: AgentHttpConfig {
+                config: serde_json::json!({}),
+            },
+            harness: crate::invocation::profile::Harness::DirectProbe {
+                http: HttpEndpoint {
+                    credential: None,
                     url: "http://127.0.0.1:8787/v1/agent/invoke".to_string(),
                     method: "POST".to_string(),
                     headers: Default::default(),
@@ -691,7 +787,11 @@ mod tests {
                     max_response_bytes: None,
                     max_retry_after_secs: None,
                 },
-                config: serde_json::json!({}),
+                completion: crate::invocation::profile::Completion::Inline {},
+                capabilities: None,
+                require_executed_agent: false,
+                executed_agent_pointer: None,
+                forward_case_context: false,
             },
             case_groups: vec![CaseGroupProfile {
                 id: "classification".to_string(),
@@ -743,6 +843,64 @@ mod tests {
         }
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires PostgreSQL"]
+    async fn resolved_run_grants_are_frozen_and_worker_catalog_enforces_them(db: sqlx::PgPool) {
+        let abi = crate::evaluator_abi::current_identity();
+        let id: Uuid = sqlx::query_scalar("INSERT INTO evaluators(namespace,name,version,content_hash,wasm_bytes,wasm_size_bytes,interface_name,interface_version,wit_world,abi_contract_hash,abi_adapter,runtime,runtime_version,runtime_fingerprint,state) VALUES('test','judge','1.0.0','hash','',0,$1,$2,$3,$4,$5,'wasmtime','test','test','active') RETURNING id")
+            .bind(format!("{}/{}", abi.package, abi.interface)).bind(&abi.version).bind(&abi.world)
+            .bind(&abi.contract_hash).bind(&abi.adapter).fetch_one(&db).await.unwrap();
+        let mut profile = profile();
+        profile.case_groups[0]
+            .evaluators
+            .push(evaluator_binding("judge", "test/judge:1.0.0"));
+        let empty = super::resolve_evaluators(&db, &profile).await.unwrap();
+        assert!(empty[0].http_rules.is_empty());
+        sqlx::query("INSERT INTO evaluator_http_policies(evaluator_id,uri,method,action) VALUES($1,'https://judge.example/score','POST','allow')")
+            .bind(id).execute(&db).await.unwrap();
+        let accepted = super::resolve_evaluators(&db, &profile).await.unwrap();
+        assert_eq!(accepted[0].http_rules.len(), 1);
+        let catalog = crate::db::workflows::execution_processing::build_pinned_evaluator_catalog(
+            accepted.clone(),
+        )
+        .unwrap();
+        sqlx::query("INSERT INTO evaluator_http_policies(evaluator_id,uri,method,action) VALUES($1,'https://other.example/score','POST','allow')")
+            .bind(id).execute(&db).await.unwrap();
+        let changed = super::resolve_evaluators(&db, &profile).await.unwrap();
+        let current =
+            crate::evaluator_http::Snapshot::new(id, changed[0].http_rules.clone()).unwrap();
+        let effective = current
+            .restrict_to(&catalog["test/judge:1.0.0"].http_policy)
+            .unwrap();
+        assert!(
+            effective
+                .authorize(id, "POST", "https://judge.example/score")
+                .is_ok()
+        );
+        assert!(
+            effective
+                .authorize(id, "POST", "https://other.example/score")
+                .is_err()
+        );
+        assert_eq!(accepted[0].http_rules.len(), 1);
+        let empty_catalog =
+            crate::db::workflows::execution_processing::build_pinned_evaluator_catalog(empty)
+                .unwrap();
+        assert!(
+            current
+                .restrict_to(&empty_catalog["test/judge:1.0.0"].http_policy)
+                .unwrap()
+                .authorize(id, "POST", "https://judge.example/score")
+                .is_err()
+        );
+        sqlx::query("UPDATE evaluator_http_policies SET uri='not-a-uri' WHERE evaluator_id=$1 AND uri='https://judge.example/score'")
+            .bind(id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(super::resolve_evaluators(&db, &profile).await.is_err());
+    }
+
     #[test]
     fn matching_groups_use_case_group_override_when_present() {
         let profile = profile();
@@ -782,6 +940,26 @@ mod tests {
     }
 
     #[test]
+    fn response_configuration_is_preserved_and_supported_for_execution() {
+        let mut configured = profile();
+        configured.agent.response = Some(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": "1.0.0", "interpretation": {"format": "raw"}
+            }))
+            .unwrap(),
+        );
+        let round_trip: RunProfile =
+            serde_json::from_value(serde_json::to_value(&configured).unwrap()).unwrap();
+        assert_eq!(configured.agent.response, round_trip.agent.response);
+        let issues = super::collect_static_profile_config_issues(&round_trip);
+        assert!(issues.is_empty(), "{issues:?}");
+        crate::agent_client::validate_request_format(&round_trip).unwrap();
+        let mut wrong = serde_json::to_value(&configured).unwrap();
+        wrong["agent"]["response"]["schema_version"] = serde_json::json!("2.0.0");
+        assert!(serde_json::from_value::<RunProfile>(wrong).is_err());
+    }
+
+    #[test]
     fn valid_profile_has_no_static_config_issues() {
         assert!(super::collect_static_profile_config_issues(&profile()).is_empty());
     }
@@ -791,12 +969,12 @@ mod tests {
         let mut profile = profile();
         profile.agent.provider = " ".to_string();
         profile.agent.name = "".to_string();
-        profile.agent.http.url = "not a url".to_string();
-        profile.agent.http.method = "not a method".to_string();
-        profile.agent.http.timeout_secs = Some(0);
-        profile.agent.http.max_request_bytes = Some(0);
-        profile.agent.http.max_response_bytes = Some(0);
-        profile.agent.http.max_retry_after_secs = Some(86401);
+        profile.harness.http_mut().url = "not a url".to_string();
+        profile.harness.http_mut().method = "not a method".to_string();
+        profile.harness.http_mut().timeout_secs = Some(0);
+        profile.harness.http_mut().max_request_bytes = Some(0);
+        profile.harness.http_mut().max_response_bytes = Some(0);
+        profile.harness.http_mut().max_retry_after_secs = Some(86401);
         profile.defaults.max_attempts = 0;
         profile.defaults.min_execution_score = f64::NAN;
 
@@ -805,12 +983,12 @@ mod tests {
         for expected in [
             "agent.provider",
             "agent.name",
-            "agent.http.url",
-            "agent.http.method",
-            "agent.http.timeout_secs",
-            "agent.http.max_request_bytes",
-            "agent.http.max_response_bytes",
-            "agent.http.max_retry_after_secs",
+            "harness.http.url",
+            "harness.http.method",
+            "harness.http.timeout_secs",
+            "harness.http.max_request_bytes",
+            "harness.http.max_response_bytes",
+            "harness.http.max_retry_after_secs",
             "defaults.max_attempts",
             "defaults.min_execution_score",
         ] {

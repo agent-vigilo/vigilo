@@ -27,6 +27,9 @@ use crate::{
     },
 };
 
+#[path = "v1/evidence.rs"]
+mod evidence;
+
 const WIT: &[u8] = include_bytes!("../../wit/evaluator/v1.0.0/evaluator.wit");
 
 mod bindings {
@@ -65,7 +68,11 @@ impl EvaluatorAbiAdapter for V1Adapter {
         component: &component::Component,
     ) -> anyhow::Result<component::InstancePre<EvaluatorHost>> {
         let mut linker = component::Linker::new(runtime.engine());
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        let mut wasi = wasmtime_wasi::p2::bindings::sync::LinkOptions::default();
+        // Rust's WASIp2 standard library can import exit-with-code. Wasmtime
+        // reports a guest exit to the host as an error for that invocation.
+        wasi.cli_exit_with_code(true);
+        wasmtime_wasi::p2::add_to_linker_with_options_sync(&mut linker, &wasi)?;
         bindings::vigilo::evaluator::executor::add_to_linker::<
             _,
             wasmtime::component::HasSelf<EvaluatorHost>,
@@ -84,9 +91,17 @@ impl EvaluatorAbiAdapter for V1Adapter {
         input: EvaluatorInput,
     ) -> anyhow::Result<EvaluatorOutput> {
         let mut store = runtime.evaluator_store()?;
+        store.data_mut().http_policy = input.http_policy.clone();
+        store.data_mut().http_invocation = input.http_invocation.clone();
         let instance = instance_pre.instantiate(&mut store)?;
         let bindings = bindings::EvaluatorWorld::new(&mut store, &instance)?;
-        let input = map_input(input)?;
+        let requirements = bindings
+            .vigilo_evaluator_evaluator()
+            .call_requirements(&mut store)?;
+        evidence::validate(&requirements, &input.actual)?;
+        let response_evidence = evidence::bind(store.data_mut(), &input.actual)?;
+        let mut input = map_input(input)?;
+        input.response_evidence = response_evidence;
         let output = bindings
             .vigilo_evaluator_evaluator()
             .call_evaluate(&mut store, &input)
@@ -106,6 +121,25 @@ impl EvaluatorAbiAdapter for V1Adapter {
 }
 
 impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
+    fn read_resource(
+        &mut self,
+        handle: u64,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<Vec<u8>, bindings::vigilo::evaluator::types::ResourceReadError> {
+        self.read_response_resource(handle, offset, max_bytes)
+            .map_err(|error| {
+                use bindings::vigilo::evaluator::types::ResourceReadError as WitError;
+                use vigilo::response::ResourceReadError as HostError;
+                match error {
+                    HostError::Unavailable => WitError::Unavailable,
+                    HostError::InvalidHandle => WitError::InvalidHandle,
+                    HostError::OutOfBounds => WitError::OutOfBounds,
+                    HostError::LimitExceeded => WitError::LimitExceeded,
+                }
+            })
+    }
+
     fn trace(&mut self, msg: String) {
         if let Some(msg) = self.capped_log_message(msg) {
             tracing::debug!("evaluator.trace: {}", msg);
@@ -132,9 +166,53 @@ impl bindings::vigilo::evaluator::executor::Host for EvaluatorHost {
 
     fn send_http_request(
         &mut self,
-        _req: bindings::vigilo::evaluator::executor::HttpRequest,
+        req: bindings::vigilo::evaluator::executor::HttpRequest,
     ) -> Result<bindings::vigilo::evaluator::executor::HttpResponse, String> {
-        Err("send_http_request is not enabled yet; outbound HTTP policy enforcement is not configured".to_string())
+        let policy = self
+            .http_policy
+            .as_ref()
+            .ok_or("evaluator HTTP policy unavailable")?;
+        let _destination = policy
+            .authorize(policy.evaluator_id(), &req.method, &req.uri)
+            .map_err(|error| error.to_string())?;
+        let invocation = self
+            .http_invocation
+            .as_ref()
+            .ok_or("evaluator HTTP invocation unavailable")?;
+        let requested_timeout = req
+            .timeout_ms
+            .map(|ms| std::time::Duration::from_millis(ms.into()));
+        let timeout = match self.http_deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err("evaluator execution deadline exceeded".into());
+                }
+                Some(requested_timeout.unwrap_or(remaining).min(remaining))
+            }
+            None => requested_timeout,
+        };
+        let response = invocation.send(vigilo::evaluator_http::transport::Request {
+            method: req.method,
+            uri: req.uri,
+            headers: req.headers.into_iter().map(|h| (h.name, h.value)).collect(),
+            body: req.body.unwrap_or_default(),
+            timeout,
+        })?;
+        Ok(bindings::vigilo::evaluator::executor::HttpResponse {
+            status: response.status,
+            headers: response
+                .headers
+                .into_iter()
+                .map(
+                    |(name, value)| bindings::vigilo::evaluator::executor::HttpHeader {
+                        name,
+                        value,
+                    },
+                )
+                .collect(),
+            body: response.body,
+        })
     }
 }
 
@@ -214,6 +292,7 @@ fn map_input(input: EvaluatorInput) -> anyhow::Result<bindings::vigilo::evaluato
             raw_json: serialize_json("actual.raw", &input.actual.raw)?,
             metadata_json: serialize_json("actual.metadata", &input.actual.metadata)?,
         },
+        response_evidence: None,
         evaluator_config_json: serialize_json("evaluator_config", &input.evaluator_config)?,
     })
 }
@@ -307,6 +386,8 @@ mod tests {
 
     fn evaluator_input() -> EvaluatorInput {
         EvaluatorInput {
+            http_policy: None,
+            http_invocation: None,
             run_id: "run-1".to_string(),
             execution_id: "execution-1".to_string(),
             attempt_id: "attempt-1".to_string(),
@@ -321,6 +402,8 @@ mod tests {
                 metadata: BTreeMap::from([("source".to_string(), json!("test"))]),
             },
             actual: AgentOutput {
+                captured_body: None,
+                mapping: None,
                 text: Some("positive".to_string()),
                 structured: Some(json!({"label": "positive"})),
                 tool_calls: vec![ToolCall {
@@ -451,4 +534,85 @@ mod tests {
             assert_eq!(map_severity(input), expected);
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn http_import_requires_host_authority_and_clamps_the_execution_deadline() {
+    use bindings::vigilo::evaluator::executor::{
+        Host,
+        HttpRequest,
+    };
+    use vigilo::evaluator_http::{
+        Action,
+        Rule,
+        Snapshot,
+    };
+    let runtime = Wasm::new(crate::context::wasm::Config::default()).unwrap();
+    let mut store = runtime.evaluator_store().unwrap();
+    let request = || HttpRequest {
+        method: "POST".into(),
+        uri: "https://judge.example/v1".into(),
+        headers: vec![],
+        body: None,
+        timeout_ms: None,
+    };
+    assert_eq!(
+        store.data_mut().send_http_request(request()).unwrap_err(),
+        "evaluator HTTP policy unavailable"
+    );
+    let id = uuid::Uuid::nil();
+    store.data_mut().http_policy = Some(std::sync::Arc::new(Snapshot::new(id, vec![]).unwrap()));
+    assert!(
+        store
+            .data_mut()
+            .send_http_request(request())
+            .unwrap_err()
+            .contains("not granted")
+    );
+    store.data_mut().http_policy = Some(std::sync::Arc::new(
+        Snapshot::new(
+            id,
+            vec![Rule {
+                uri: request().uri,
+                method: "POST".into(),
+                action: Action::Allow,
+                networks: vec![],
+            }],
+        )
+        .unwrap(),
+    ));
+    assert_eq!(
+        store.data_mut().send_http_request(request()).unwrap_err(),
+        "evaluator HTTP invocation unavailable"
+    );
+    #[derive(Debug)]
+    struct DeadlineCheck;
+    impl vigilo::evaluator_http::transport::BlockingTransport for DeadlineCheck {
+        fn send(
+            &self,
+            request: vigilo::evaluator_http::transport::Request,
+        ) -> Result<vigilo::evaluator_http::transport::Response, String> {
+            assert!(request.timeout.unwrap() <= std::time::Duration::from_secs(1));
+            Ok(vigilo::evaluator_http::transport::Response {
+                status: 200,
+                headers: vec![],
+                body: vec![],
+            })
+        }
+    }
+    store.data_mut().http_invocation = Some(std::sync::Arc::new(DeadlineCheck));
+    store.data_mut().http_deadline =
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+    let mut bounded = request();
+    bounded.timeout_ms = Some(u32::MAX);
+    assert_eq!(
+        store.data_mut().send_http_request(bounded).unwrap().status,
+        200
+    );
+    store.data_mut().http_deadline = Some(std::time::Instant::now());
+    assert_eq!(
+        store.data_mut().send_http_request(request()).unwrap_err(),
+        "evaluator execution deadline exceeded"
+    );
 }

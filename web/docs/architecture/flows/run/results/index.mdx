@@ -17,13 +17,19 @@ import decisionFlowDiagram from './decision-flow.mmd';
 
 # Results
 
-How `vigilo run results` loads a run and returns a summary-only results response.
+`vigilo run results` calls the shared typed library operation and formats its
+summary-only result. Library hosts call `Client::run_results` or the caller-bound
+`HostedUser::run_results` directly; see the
+[operation boundary](/docs/architecture/structure/components/vigilo#results-summary-operations).
 
 Results include execution aggregate counts and the authoritative run scorecard. The scorecard reports each configured dimension or evaluator gate with coverage, mean score, pass rate, error rate, abstention rate, and failure reasons. A completed run can still have `gate_status: fail`.
 
 Summary reads batch routed shards by execution database and merge them in shard
 order, keeping floating-point scores independent of database grouping. Exports
-use the same summary projection.
+use the same summary projection. Library results also report discovered-route and
+summary counts. `summary_complete` requires a nonempty route set and one summary
+per discovered route; it is separate from terminal state and shard sealing.
+Control, execution and scorecard observations are not one atomic distributed view.
 
 ## Execution Flow
 

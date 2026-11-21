@@ -502,6 +502,7 @@ async fn count_dispatch_cursor_backlog_matches_dispatchable_routes(pool: PgPool)
 async fn dispatch_routed_run_window_dispatches_exact_route(pool: PgPool) {
     let run_id = seed_pending_run(&pool, &[(0, 1), (1, 1)]).await;
     let route = DispatchRoute {
+        tenant_id: Uuid::nil(),
         run_id,
         run_shard: 1,
         database_alias: "primary".to_string(),
@@ -635,6 +636,268 @@ async fn concurrent_pending_run_start_emits_one_started_event(pool: PgPool) {
     assert_eq!(chunk_ready_event_count(&pool, run_id).await, 2);
 }
 
+async fn dispatch_pool(pool: &PgPool, connections: u32) -> PgPool {
+    PgPoolOptions::new()
+        .max_connections(connections)
+        .acquire_timeout(Duration::from_secs(1))
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap()
+}
+
+fn fixed_dispatch_router(pool: &PgPool, connections: u32) -> database::DatabaseRouter {
+    database::DatabaseRouter::from_fixed_pools(
+        database::Config::new(
+            String::new(),
+            connections,
+            Duration::from_secs(1),
+            Default::default(),
+            database::PlacementConfig::default_single_database(),
+        ),
+        std::collections::BTreeMap::from([(
+            "primary".into(),
+            database::FixedPlacementPool {
+                pool: pool.clone(),
+                role: crate::models::database_placement::DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
+            },
+        )]),
+    )
+    .unwrap()
+}
+
+async fn dispatch_colocated_claim(
+    router: &database::DatabaseRouter,
+    mut claim: ClaimedDispatchRoute,
+    prepared: Option<&tokio::sync::Barrier>,
+) -> anyhow::Result<DispatchedRun> {
+    let snapshot =
+        prepare_dispatch_run_snapshot_with(&mut claim.control_tx, &claim.route, Uuid::now_v7(), 60)
+            .await?
+            .expect("claimed cursor should have a snapshot");
+    if let Some(prepared) = prepared {
+        prepared.wait().await;
+    }
+    let execution = router
+        .execution_route_from_placements(&snapshot.shard_placement, &snapshot.database_placement)
+        .await?;
+    Ok(dispatch_admitted_run_window(
+        router,
+        claim.control_tx,
+        &execution,
+        1,
+        &claim.route,
+        &snapshot,
+    )
+    .await?
+    .expect("admitted shard should dispatch"))
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn colocated_dispatch_uses_one_connection(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 2)]).await;
+    let limited = dispatch_pool(&pool, 1).await;
+    let fixed = fixed_dispatch_router(&limited, 1);
+    let first = claim_next_dispatch_route(fixed.control().await.unwrap(), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    let first = dispatch_colocated_claim(&fixed, first, None).await.unwrap();
+    assert_eq!(first.chunks_marked_dispatched, 1);
+    assert!(first.has_remaining_chunks);
+    assert_eq!(cursor_status(&pool, run, 0).await, "open");
+
+    let standalone = database::DatabaseRouter::new(database::Config::new(
+        String::new(),
+        1,
+        Duration::from_secs(1),
+        Default::default(),
+        database::PlacementConfig::default_single_database(),
+    ));
+    standalone.control_pool.set(limited.clone()).unwrap();
+    let second = claim_target_dispatch_route(
+        standalone.control().await.unwrap(),
+        Uuid::nil(),
+        run,
+        0,
+        "primary",
+        1,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let second = dispatch_colocated_claim(&standalone, second, None)
+        .await
+        .unwrap();
+    assert_eq!(second.chunks_marked_dispatched, 1);
+    assert!(!second.has_remaining_chunks);
+    assert_eq!(cursor_status(&pool, run, 0).await, "drained");
+    assert_eq!(run_started_event_count(&pool, run).await, 1);
+    assert_eq!(chunk_ready_event_count(&pool, run).await, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn colocated_dispatch_progresses_when_all_connections_hold_claims(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 1), (1, 1)]).await;
+    mark_run_running(&pool, run).await;
+    let limited = dispatch_pool(&pool, 2).await;
+    let router = fixed_dispatch_router(&limited, 2);
+    let barrier = tokio::sync::Barrier::new(2);
+    let dispatch = || async {
+        let claim = claim_next_dispatch_route(&limited, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        dispatch_colocated_claim(&router, claim, Some(&barrier)).await
+    };
+    let (left, right) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(dispatch(), dispatch())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        dispatched_shards(&[left.unwrap(), right.unwrap()]),
+        BTreeSet::from([0, 1])
+    );
+    for shard in [0, 1] {
+        assert_eq!(cursor_status(&pool, run, shard).await, "drained");
+        assert_eq!(dispatched_chunk_count(&pool, run, shard).await, 1);
+    }
+    assert_eq!(chunk_ready_event_count(&pool, run).await, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn revocation_fences_dispatch_holding_cursor_without_run_lock(pool: PgPool) {
+    use crate::{
+        db::workflows::run_control,
+        operations::ExecutionControl,
+    };
+
+    for running in [false, true] {
+        let run = seed_pending_run(&pool, &[(0, 1)]).await;
+        if running {
+            mark_run_running(&pool, run).await;
+        }
+        let mut claim = claim_next_dispatch_route(&pool, &[])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.route.run_id, run);
+
+        // Claim the cursor first, then commit the public control intent on an
+        // independent connection before dispatch can lock the parent run.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_control::request(&pool, run, ExecutionControl::Revoked),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            prepare_dispatch_run_snapshot_with(
+                &mut claim.control_tx,
+                &claim.route,
+                Uuid::now_v7(),
+                60,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        claim.control_tx.rollback().await.unwrap();
+        assert!(
+            claim_next_dispatch_route(&pool, &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(run_started_event_count(&pool, run).await, 0);
+        assert_eq!(chunk_ready_event_count(&pool, run).await, 0);
+        assert_eq!(dispatched_chunk_count(&pool, run, 0).await, 0);
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn revocation_waits_for_inflight_dispatch_then_stops_next_window(pool: PgPool) {
+    use crate::{
+        db::workflows::run_control,
+        operations::ExecutionControl,
+    };
+
+    let run = seed_pending_run(&pool, &[(0, 2)]).await;
+    let router = fixed_dispatch_router(&pool, 5);
+    let mut claim = claim_next_dispatch_route(&pool, &[])
+        .await
+        .unwrap()
+        .unwrap();
+    let snapshot =
+        prepare_dispatch_run_snapshot_with(&mut claim.control_tx, &claim.route, Uuid::now_v7(), 60)
+            .await
+            .unwrap()
+            .unwrap();
+    let holder: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *claim.control_tx)
+        .await
+        .unwrap();
+    let execution = router
+        .execution_route_from_placements(&snapshot.shard_placement, &snapshot.database_placement)
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let revoke = run_control::request(&pool, run, ExecutionControl::Revoked);
+        let finish_dispatch = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                     WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(holder)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            dispatch_admitted_run_window(
+                &router,
+                claim.control_tx,
+                &execution,
+                1,
+                &claim.route,
+                &snapshot,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        };
+        let (revoked, dispatched) = tokio::join!(revoke, finish_dispatch);
+        assert_eq!(
+            revoked.unwrap().execution_control,
+            ExecutionControl::Revoked
+        );
+        assert_eq!(dispatched.chunks_marked_dispatched, 1);
+        assert!(dispatched.has_remaining_chunks);
+    })
+    .await
+    .unwrap();
+    assert_eq!(cursor_status(&pool, run, 0).await, "open");
+    assert!(
+        claim_next_dispatch_route(&pool, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(run_started_event_count(&pool, run).await, 1);
+    assert_eq!(chunk_ready_event_count(&pool, run).await, 1);
+    assert_eq!(dispatched_chunk_count(&pool, run, 0).await, 1);
+}
+
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
 async fn running_dispatch_does_not_wait_on_parent_run_share_lock(pool: PgPool) {
@@ -728,3 +991,179 @@ async fn finalization_skips_run_with_active_dispatch_lifecycle_share_lock(pool: 
         .unwrap();
     assert_eq!(claimed.unwrap().id, run_id);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_dispatch_claim_preserves_locks_without_table_access(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 1)]).await;
+    let role = format!("claim_test_{}", Uuid::new_v4().simple());
+    let owner = format!("claim_owner_{}", Uuid::new_v4().simple());
+    // Role creation and grants roll back with the test transaction, even on panic.
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_dispatch(ARRAY[]::text[]); RAISE EXCEPTION 'unexpected function access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {owner} NOLOGIN; GRANT USAGE ON SCHEMA public TO {owner}; GRANT SELECT ON public.runs, public.shard_placements, public.database_placements, public.run_shard_dispatch_cursors TO {owner}; GRANT UPDATE ON public.run_shard_dispatch_cursors TO {owner}; ALTER FUNCTION public.vigilo_claim_dispatch(text[]) OWNER TO {owner}; GRANT EXECUTE ON FUNCTION public.vigilo_claim_dispatch(text[]) TO {role}; SET LOCAL ROLE {role};"))
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_dispatch(NULL::text[]); RAISE EXCEPTION 'accepted missing exclusions'; EXCEPTION WHEN invalid_parameter_value THEN NULL; END; BEGIN PERFORM * FROM public.vigilo_claim_dispatch(array_fill('x'::text,ARRAY[129])); RAISE EXCEPTION 'accepted oversized exclusions'; EXCEPTION WHEN invalid_parameter_value THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    let excluded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM public.vigilo_claim_dispatch(ARRAY['primary']::text[])",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(excluded, 0);
+    let access: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.runs','SELECT') OR has_table_privilege(current_user,'public.run_shard_dispatch_cursors','UPDATE')")
+        .fetch_one(&mut *tx).await.unwrap();
+    assert!(!access);
+    let claimed: Uuid =
+        sqlx::query_scalar("SELECT run_id FROM public.vigilo_claim_dispatch(ARRAY[]::text[])")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(claimed, run);
+    assert!(
+        queries::claim_next_dispatch_route(&pool, &[])
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tx.rollback().await.unwrap();
+    let recovered = queries::claim_next_dispatch_route(&pool, &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.route.run_id, run);
+    recovered.control_tx.rollback().await.unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_chunk_recovery_discovery_retains_movement_locks(pool: PgPool) {
+    let run = seed_pending_run(&pool, &[(0, 2), (1, 1), (2, 1)]).await;
+    sqlx::query("UPDATE run_chunks SET status='leased', lease_token=gen_random_uuid(), leased_until=now()-interval '1 minute' WHERE run_id=$1")
+        .bind(run).execute(&pool).await.unwrap();
+    let mut moving = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text,1::bigint))")
+        .bind(run)
+        .execute(&mut *moving)
+        .await
+        .unwrap();
+    let role = format!("recovery_caller_{}", Uuid::new_v4().simple());
+    let owner = format!("recovery_owner_{}", Uuid::new_v4().simple());
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_chunk_recovery(3,100); RAISE EXCEPTION 'unexpected access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {owner} NOLOGIN; GRANT USAGE ON SCHEMA public TO {owner}; GRANT SELECT ON public.run_chunks TO {owner}; ALTER FUNCTION public.vigilo_claim_chunk_recovery(integer,bigint) OWNER TO {owner}; GRANT EXECUTE ON FUNCTION public.vigilo_claim_chunk_recovery(integer,bigint) TO {role}; SET LOCAL ROLE {role};"))
+        .execute(&mut *tx).await.unwrap();
+    let access: bool =
+        sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.run_chunks','SELECT')")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert!(!access);
+    let (rows, queries) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        sqlx::query_as::<_, (Uuid, i16)>("SELECT * FROM public.vigilo_claim_chunk_recovery(3,100)")
+            .fetch_all(&mut *tx),
+    )
+    .await;
+    assert_eq!(rows.unwrap(), vec![(run, 0), (run, 2)]);
+    assert_eq!(queries.len(), 1);
+    // Shared claims allow competing recovery transactions; chunk row locks in
+    // the subsequent recovery statements decide which coordinator writes.
+    let competing: Vec<(Uuid, i16)> =
+        sqlx::query_as("SELECT * FROM public.vigilo_claim_chunk_recovery(3,100)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(competing, vec![(run, 0), (run, 2)]);
+    let locked: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text,0::bigint))",
+    )
+    .bind(run)
+    .fetch_one(&mut *moving)
+    .await
+    .unwrap();
+    assert!(!locked);
+    tx.rollback().await.unwrap();
+    let released: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text,0::bigint))",
+    )
+    .bind(run)
+    .fetch_one(&mut *moving)
+    .await
+    .unwrap();
+    assert!(released);
+    moving.rollback().await.unwrap();
+    let available: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM vigilo_claim_chunk_recovery(3,100)")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(available, 3);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn chunk_recovery_discovery_reserves_candidates_in_each_retry_class(pool: PgPool) {
+    let shards: Vec<_> = (0..70).map(|shard| (shard, 1)).collect();
+    let run = seed_pending_run(&pool, &shards).await;
+    sqlx::query("UPDATE run_chunks SET status='leased', lease_token=gen_random_uuid(), leased_until=now()-interval '1 minute'*(70-run_shard), recovery_count=CASE WHEN run_shard >= 34 THEN 3 ELSE 0 END WHERE run_id=$1 AND run_shard<69")
+        .bind(run).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE run_chunks SET leased_until=now()+interval '1 hour' WHERE run_id=$1 AND run_shard=68")
+        .bind(run).execute(&pool).await.unwrap();
+    let rows: Vec<(Uuid, i16)> = sqlx::query_as("SELECT * FROM vigilo_claim_chunk_recovery(3,1)")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows,
+        (0..33)
+            .chain(34..67)
+            .map(|shard| (run, shard))
+            .collect::<Vec<_>>()
+    );
+    let all: Vec<(Uuid, i16)> = sqlx::query_as("SELECT * FROM vigilo_claim_chunk_recovery(0,100)")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(all, (0..68).map(|shard| (run, shard)).collect::<Vec<_>>());
+    for (limit, batch) in [
+        (None, Some(1_i64)),
+        (Some(-1), Some(1)),
+        (Some(10001), Some(1)),
+        (Some(3), None),
+        (Some(3), Some(0)),
+        (Some(3), Some(1000001)),
+    ] {
+        let error =
+            sqlx::query("SELECT * FROM vigilo_claim_chunk_recovery($1::integer,$2::bigint)")
+                .bind(limit)
+                .bind(batch)
+                .execute(&pool)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("22023")
+        );
+    }
+}
+
+#[path = "execution_scope_tests.rs"]
+mod execution_scope_tests;
+
+#[path = "recovery_scope_tests.rs"]
+mod recovery_scope_tests;

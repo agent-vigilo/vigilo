@@ -46,7 +46,11 @@ flowchart TD
     Hash -- Yes --> HashFail
     Hash -- No --> Persist
 
-    Persist --> Success
+    Persist --> Inserted{Insert succeeded?}
+    Inserted -- Yes --> Success
+    Inserted -- No --> Concurrent{Exact version now has same digest?}
+    Concurrent -- Yes --> Success
+    Concurrent -- No --> VersionFail
 
     class Start command
     class Success success

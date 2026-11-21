@@ -1,4 +1,5 @@
 CREATE TABLE run_shard_summaries (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     expected_execution_count INTEGER NOT NULL CHECK (expected_execution_count >= 0),
@@ -38,7 +39,8 @@ CREATE TABLE run_shard_summaries (
     CONSTRAINT fk_run_shard_summaries_snapshot
         FOREIGN KEY (run_id, run_shard)
         REFERENCES run_snapshots(run_id, run_shard)
-        ON DELETE CASCADE
+        ON DELETE CASCADE,
+    CONSTRAINT fk_run_shard_summaries_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_run_shard_summaries_run_status
@@ -109,3 +111,35 @@ COMMENT ON COLUMN run_shard_summaries.unresolved_execution_count IS
 
 COMMENT ON COLUMN run_shard_summaries.status IS
     'Running until every planned chunk receipt is incorporated; then completed or failed according to retained outcomes and operational completeness.';
+
+-- Bounded scheduler discovery; aggregation still validates ownership per page.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_pending_aggregation(p_limit bigint)
+RETURNS TABLE(run_id uuid, run_shard smallint, write_epoch bigint, tenant_id uuid)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+    IF p_limit IS NULL OR p_limit < 1 OR p_limit > 100000 THEN
+        RAISE EXCEPTION 'invalid aggregation discovery limit' USING ERRCODE = '22023';
+    END IF;
+    RETURN QUERY
+SELECT s.run_id,s.run_shard,a.write_epoch,s.tenant_id
+        FROM %1$I.run_shard_summaries s
+        JOIN %1$I.local_shard_admissions a ON a.run_id=s.run_id AND a.run_shard=s.run_shard
+        WHERE NOT s.sealed
+        AND a.state IN ('open','draining')
+        AND ((s.planned_chunk_count > 0 AND s.settled_chunk_count >= s.planned_chunk_count)
+             OR EXISTS (SELECT 1 FROM %1$I.run_chunk_settlement_consumptions p
+                        WHERE p.run_id=s.run_id AND p.run_shard=s.run_shard AND NOT p.consumed))
+        ORDER BY s.updated_at,s.run_id,s.run_shard
+        LIMIT p_limit;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_pending_aggregation(bigint) FROM PUBLIC', installation_schema);
+END;
+$install$;

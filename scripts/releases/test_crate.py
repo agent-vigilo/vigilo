@@ -1,6 +1,12 @@
 """Service-free checks for the crate release identity boundary."""
+import hashlib
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+
 from crate import validate_tag
+from verify_package import main as verify_package
 
 
 class CrateReleaseTests(unittest.TestCase):
@@ -23,6 +29,20 @@ class CrateReleaseTests(unittest.TestCase):
                         dict(name="vigilo", version={"workspace": True})]:
             with self.subTest(package=package), self.assertRaises(ValueError):
                 validate_tag(package, "vigilo/v0.1.0")
+
+    def test_release_verifier_writes_the_verified_archive_checksum(self):
+        with TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "vigilo-0.1.0.crate"
+            contents = b"verified archive bytes"
+            artifact.write_bytes(contents)
+            checksum = Path(temporary) / "checksum"
+
+            with patch("verify_package.verify", return_value=artifact), patch(
+                "sys.argv", ["verify_package.py", "--checksum-output", str(checksum)]
+            ):
+                verify_package()
+
+            self.assertEqual(checksum.read_text().strip(), hashlib.sha256(contents).hexdigest())
 
 
 if __name__ == "__main__":

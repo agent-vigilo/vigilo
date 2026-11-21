@@ -407,7 +407,7 @@ async fn seed_running_attempt(
     let chunk = sqlx::query_as::<_, crate::models::run_chunk::RunChunk>(
         r#"
             SELECT
-                1::bigint AS write_epoch,
+                1::bigint AS write_epoch, tenant_id, execution_control,
                 id, run_id, run_shard, dataset_version_id, profile_group_id,
                 ordinal_start, ordinal_end, status, lease_token, leased_until,
                 created_at, updated_at
@@ -581,18 +581,22 @@ async fn terminal_transition_rejects_expired_attempt_lease(pool: PgPool) {
 
     let result = finalize_execution_terminal_transitions(
         &pool,
+        uuid::Uuid::nil(),
         seed.run_id,
         seed.run_shard,
         seed.worker_id,
         1,
         &[ExecutionTerminalTransition {
+            http_policy_revisions: Default::default(),
             execution_id: seed.execution_id,
             attempt_id: seed.attempt_id,
             attempt_no: 1,
             completed: true,
             error_message: None,
             requires_worker_lease: true,
+            agent_invocation: None,
             agent_failure: None,
+            response_evidence: None,
         }],
     )
     .await;
@@ -688,11 +692,67 @@ async fn expired_chunk_recovery_stales_attempt_and_requeues_chunk(pool: PgPool) 
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
-async fn recovered_attempt_cannot_persist_late_results(pool: PgPool) {
+async fn recovery_skips_blocked_work_and_fences_late_results(pool: PgPool) {
+    let moving = seed_running_attempt(&pool, -300, -300).await;
+    let locked = seed_running_attempt(&pool, -200, -200).await;
     let seed = seed_running_attempt(&pool, -5, -5).await;
-    run_dispatch::recover_expired_chunk_leases(&pool, 3, 10)
+    let mut blocker = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text,$2::bigint))")
+        .bind(moving.run_id)
+        .bind(i64::from(moving.run_shard))
+        .execute(&mut *blocker)
         .await
         .unwrap();
+    sqlx::query("SELECT id FROM run_chunks WHERE run_id=$1 AND run_shard=$2 AND id=$3 FOR UPDATE")
+        .bind(locked.run_id)
+        .bind(locked.run_shard)
+        .bind(locked.chunk_id)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let recover = || {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_dispatch::recover_expired_chunk_leases(&pool, 3, 1),
+        )
+    };
+    let first = recover().await.unwrap().unwrap();
+    assert_eq!(
+        first.recovered_chunks, 1,
+        "old blocked work must leave room for recovery"
+    );
+    assert_eq!(first.failed_chunks, 0);
+    assert_eq!(recover().await.unwrap().unwrap().recovered_chunks, 0);
+    let states: Vec<(i64, String, i32)> = sqlx::query_as(
+        "SELECT candidates.ordinal, c.status, c.recovery_count
+         FROM unnest($1::uuid[]) WITH ORDINALITY candidates(id,ordinal)
+         JOIN run_chunks c ON c.id=candidates.id ORDER BY candidates.ordinal",
+    )
+    .bind(&[moving.chunk_id, locked.chunk_id, seed.chunk_id][..])
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        states,
+        vec![
+            (1, "leased".into(), 0),
+            (2, "leased".into(), 0),
+            (3, "pending".into(), 1)
+        ]
+    );
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.chunk.ready'",
+    )
+    .bind(seed.run_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+    blocker.rollback().await.unwrap();
+    assert_eq!(recover().await.unwrap().unwrap().recovered_chunks, 1);
+    assert_eq!(recover().await.unwrap().unwrap().recovered_chunks, 1);
+    assert_eq!(recover().await.unwrap().unwrap().recovered_chunks, 0);
     let completed = CompletedExecutionPersistence {
         execution_id: seed.execution_id,
         attempt_id: seed.attempt_id,
@@ -898,11 +958,13 @@ async fn authentication_failure_is_terminal_before_attempt_budget_exhaustion(poo
     let seed = seed_running_attempt(&pool, 120, 120).await;
     finalize_execution_terminal_transitions(
         &pool,
+        uuid::Uuid::nil(),
         seed.run_id,
         seed.run_shard,
         seed.worker_id,
         3,
         &[ExecutionTerminalTransition {
+            http_policy_revisions: Default::default(),
             execution_id: seed.execution_id,
             attempt_id: seed.attempt_id,
             attempt_no: 1,
@@ -911,6 +973,8 @@ async fn authentication_failure_is_terminal_before_attempt_budget_exhaustion(poo
                 "agent invocation failed: agent HTTP request failed with status 401".into(),
             ),
             requires_worker_lease: true,
+            agent_invocation: None,
+            response_evidence: None,
             agent_failure: Some(crate::agent_client::failure::Failure::http(
                 401,
                 None,
@@ -940,6 +1004,20 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
     };
     for (failure, max_attempts, expected) in [
         (
+            Some(Failure::credential_unavailable()),
+            3,
+            "retry_scheduled",
+        ),
+        (Some(Failure::credential_unavailable()), 1, "failed"),
+        (
+            Some(Failure::terminal(
+                Kind::Configuration,
+                "credential binding unavailable",
+            )),
+            3,
+            "failed",
+        ),
+        (
             Some(Failure::http(429, Some("120"), chrono::Utc::now(), 600)),
             3,
             "retry_scheduled",
@@ -964,16 +1042,23 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
         let seed = seed_running_attempt(&pool, 120, 120).await;
         let floor = failure.as_ref().and_then(|f| f.retry_not_before);
         let transition = ExecutionTerminalTransition {
+            http_policy_revisions: std::collections::BTreeMap::from([(
+                Uuid::nil(),
+                "frozen-policy-revision".to_owned(),
+            )]),
             execution_id: seed.execution_id,
             attempt_id: seed.attempt_id,
             attempt_no: 1,
             completed: false,
             error_message: Some("opaque diagnostic; do not classify this text".into()),
             requires_worker_lease: true,
+            agent_invocation: None,
+            response_evidence: None,
             agent_failure: failure.clone(),
         };
         finalize_execution_terminal_transitions(
             &pool,
+            uuid::Uuid::nil(),
             seed.run_id,
             seed.run_shard,
             seed.worker_id,
@@ -988,6 +1073,10 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
         let (status, retry_after, summary, attempt_status): (String, Option<chrono::DateTime<chrono::Utc>>, serde_json::Value, String) = sqlx::query_as(
             "SELECT e.status::text, e.retry_after, a.outcome_summary, a.status::text FROM executions e JOIN execution_attempts a ON a.run_id=e.run_id AND a.run_shard=e.run_shard AND a.id=e.current_attempt_id WHERE e.id=$1"
         ).bind(seed.execution_id).fetch_one(&mut *connection).await.unwrap();
+        assert_eq!(
+            summary["evaluator_http_policy_revisions"][Uuid::nil().to_string()],
+            "frozen-policy-revision"
+        );
         assert_eq!(status, expected);
         if let Some(floor) = floor {
             assert!(retry_after.unwrap() >= floor);
@@ -1010,3 +1099,516 @@ async fn agent_retry_policy_persists_not_before_and_preserves_budget_and_legacy_
         }
     }
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn invocation_diagnostics_use_existing_terminal_summary_for_every_outcome(pool: PgPool) {
+    use crate::agent_client::{
+        diagnostics::Observation,
+        failure::{
+            Failure,
+            Kind,
+        },
+    };
+    for (completed, agent_failed) in [(true, false), (false, true), (false, false)] {
+        let seed = seed_running_attempt(&pool, 120, 120).await;
+        if completed {
+            insert_passing_aggregate(&pool, &seed).await;
+        }
+        let mut observation = Observation::new(
+            seed.run_id,
+            seed.execution_id,
+            seed.attempt_id,
+            "https://example.com/?secret=canary",
+        );
+        observation.data.http_status = Some(if agent_failed { 503 } else { 200 });
+        observation.data.latency_ms = Some(12);
+        let diagnostics = observation.finish(agent_failed.then_some(Kind::HttpStatus));
+        sqlx::query("UPDATE execution_attempts SET outcome_summary = '{\"existing\":true}'::jsonb WHERE id=$1").bind(seed.attempt_id).execute(&pool).await.unwrap();
+        finalize_execution_terminal_transitions(
+            &pool,
+            uuid::Uuid::nil(),
+            seed.run_id,
+            seed.run_shard,
+            seed.worker_id,
+            2,
+            &[ExecutionTerminalTransition {
+                http_policy_revisions: Default::default(),
+                execution_id: seed.execution_id,
+                attempt_id: seed.attempt_id,
+                attempt_no: 1,
+                completed,
+                error_message: (!completed).then(|| "safe error".into()),
+                requires_worker_lease: true,
+                agent_invocation: Some(diagnostics.clone()),
+                response_evidence: None,
+                agent_failure: agent_failed
+                    .then(|| Failure::http(503, None, chrono::Utc::now(), 600)),
+            }],
+        )
+        .await
+        .unwrap();
+        let summary: serde_json::Value =
+            sqlx::query_scalar("SELECT outcome_summary FROM execution_attempts WHERE id=$1")
+                .bind(seed.attempt_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(summary["existing"], true);
+        assert_eq!(
+            summary["agent_invocation"],
+            serde_json::to_value(diagnostics).unwrap()
+        );
+        assert_eq!(summary.get("agent_failure").is_some(), agent_failed);
+        assert!(!summary.to_string().contains("canary"));
+    }
+}
+
+#[path = "postgres_tests/query_probe.rs"]
+mod query_probe;
+
+async fn statement_counts(pool: &PgPool) -> std::collections::BTreeMap<String, i64> {
+    sqlx::query_as::<_, (String,i64)>(r#"/* evidence_measure */
+        SELECT CASE
+            WHEN upper(ltrim(query)) LIKE 'SELECT%' THEN 'read'
+            WHEN upper(ltrim(query)) LIKE 'WITH%' THEN 'mixed'
+            WHEN upper(ltrim(query)) LIKE 'BEGIN%' OR upper(ltrim(query)) LIKE 'COMMIT%' OR upper(ltrim(query)) LIKE 'ROLLBACK%' THEN 'transaction'
+            WHEN upper(ltrim(query)) LIKE 'INSERT%' OR upper(ltrim(query)) LIKE 'UPDATE%' OR upper(ltrim(query)) LIKE 'DELETE%' THEN 'dml'
+            ELSE 'other' END AS category, sum(calls)::bigint
+        FROM pg_stat_statements
+        WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND query NOT LIKE '/* evidence_measure */%'
+          -- Match client submissions even when the server also tracks trigger SQL.
+          AND toplevel
+        GROUP BY 1
+    "#).fetch_all(pool).await.unwrap().into_iter().collect()
+}
+
+async fn evidence_for_seed(
+    pool: &PgPool,
+    seed: &SeededAttempt,
+    mode: crate::contracts::run::PersistenceMode,
+) -> crate::contracts::response_retention::RetainedResponse {
+    let packet = crate::contracts::response_retention::tests::packet(
+        seed.run_id,
+        seed.execution_id,
+        seed.attempt_id,
+        mode,
+    );
+    let metadata = packet.metadata_json().unwrap();
+    sqlx::query("UPDATE executions SET case_hash=$4 WHERE run_id=$1 AND run_shard=$2 AND id=$3")
+        .bind(seed.run_id)
+        .bind(seed.run_shard)
+        .bind(seed.execution_id)
+        .bind(metadata["provenance"]["case_hash"].as_str().unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE run_snapshots SET profile_hash=$3, config_snapshot=$4 WHERE run_id=$1 AND run_shard=$2").bind(seed.run_id).bind(seed.run_shard).bind(metadata["provenance"]["profile_hash"].as_str().unwrap()).bind(json!({"execution_plan_hash":metadata["provenance"]["execution_plan_hash"],"response_policy":{"retention":metadata["retention"],"configuration_hash":metadata["configuration_hash"]}})).execute(pool).await.unwrap();
+    packet
+}
+
+fn terminal(seed: &SeededAttempt) -> ExecutionTerminalTransition {
+    ExecutionTerminalTransition {
+        http_policy_revisions: Default::default(),
+        execution_id: seed.execution_id,
+        attempt_id: seed.attempt_id,
+        attempt_no: 1,
+        completed: false,
+        error_message: Some("controlled evaluator failure".into()),
+        requires_worker_lease: true,
+        agent_invocation: None,
+        agent_failure: None,
+        response_evidence: None,
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL; pg_stat_statements adds server observations"]
+async fn attempt_transition_query_observations(pool: PgPool) {
+    let preload: String = sqlx::query_scalar("SHOW shared_preload_libraries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let server_counts = preload.contains("pg_stat_statements");
+    if server_counts {
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (completed, max_attempts) in [(true, 1), (false, 1), (false, 3)] {
+        for retention in ["absent", "full", "summary"] {
+            let seed = seed_running_attempt(&pool, 120, 120).await;
+            let mut transition = terminal(&seed);
+            transition.completed = completed;
+            if completed {
+                let result = CompletedExecutionPersistence {
+                    execution_id: seed.execution_id,
+                    attempt_id: seed.attempt_id,
+                    attempt_no: 1,
+                    result_rows: Vec::new(),
+                    overall_status: "passed".into(),
+                    aggregate_score: Some(1.0),
+                    evaluator_result_count: 0,
+                    dimension_scores: json!({}),
+                    blocking_failures: json!([]),
+                    summary: json!({}),
+                };
+                persist_completed_execution_results_batch(
+                    &pool,
+                    &seed.chunk,
+                    seed.worker_id,
+                    &[result],
+                )
+                .await
+                .unwrap();
+            }
+            if retention != "absent" {
+                transition.response_evidence = Some(
+                    evidence_for_seed(
+                        &pool,
+                        &seed,
+                        if retention == "full" {
+                            crate::contracts::run::PersistenceMode::Full
+                        } else {
+                            crate::contracts::run::PersistenceMode::Summary
+                        },
+                    )
+                    .await,
+                );
+            }
+            let probe = query_probe::Probe::new(&pool).await;
+            let before = if server_counts {
+                statement_counts(&pool).await
+            } else {
+                Default::default()
+            };
+            let wal_before: String = sqlx::query_scalar(
+                "/* evidence_measure */ SELECT pg_current_wal_insert_lsn()::text",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            let counter_epoch = if server_counts {
+                Some(sqlx::query_as::<_, (i64, String)>("/* evidence_measure */ SELECT dealloc::bigint, stats_reset::text FROM pg_stat_statements_info").fetch_one(&pool).await.unwrap())
+            } else {
+                None
+            };
+            probe.start();
+            finalize_execution_terminal_transitions(
+                &probe.pool,
+                uuid::Uuid::nil(),
+                seed.run_id,
+                seed.run_shard,
+                seed.worker_id,
+                max_attempts,
+                &[transition],
+            )
+            .await
+            .unwrap();
+            let (round_trips, bytes) = probe.stop();
+            let wal_bytes:i64=sqlx::query_scalar("/* evidence_measure */ SELECT pg_wal_lsn_diff(pg_current_wal_insert_lsn(),$1::pg_lsn)::bigint").bind(&wal_before).fetch_one(&pool).await.unwrap();
+            if let Some(epoch) = counter_epoch {
+                let observed = sqlx::query_as::<_, (i64, String)>("/* evidence_measure */ SELECT dealloc::bigint, stats_reset::text FROM pg_stat_statements_info").fetch_one(&pool).await.unwrap();
+                assert_eq!(
+                    observed, epoch,
+                    "invalid statement measurement: statistics reset or entries evicted; rerun on an isolated server"
+                );
+            }
+            let after = if server_counts {
+                statement_counts(&pool).await
+            } else {
+                Default::default()
+            };
+            let delta = after
+                .into_iter()
+                .map(|(key, count)| {
+                    let old = before.get(&key).copied().unwrap_or(0);
+                    (key, count - old)
+                })
+                .filter(|(_, count)| *count != 0)
+                .collect::<std::collections::BTreeMap<_, _>>();
+            assert_eq!(
+                round_trips, 7,
+                "combined scope/fence submission preserves the measured cold exchange budget"
+            );
+            if server_counts {
+                assert_eq!(
+                    delta,
+                    [
+                        ("read".into(), 2),
+                        ("mixed".into(), 1),
+                        ("other".into(), 4),
+                        ("transaction".into(), 2)
+                    ]
+                    .into()
+                );
+            }
+            let status: String = sqlx::query_scalar(
+                "SELECT status::text FROM executions WHERE run_id=$1 AND run_shard=$2 AND id=$3",
+            )
+            .bind(seed.run_id)
+            .bind(seed.run_shard)
+            .bind(seed.execution_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                status,
+                if completed {
+                    "completed"
+                } else if max_attempts == 1 {
+                    "failed"
+                } else {
+                    "retry_scheduled"
+                }
+            );
+            let stored = crate::db::tables::execution_attempts::select_response_evidence(
+                &pool,
+                seed.run_id,
+                seed.run_shard,
+                seed.attempt_id,
+            )
+            .await
+            .unwrap();
+            assert_eq!(stored.is_some(), retention != "absent");
+            let payload_bytes = stored
+                .as_ref()
+                .map(|packet| packet.payload().len())
+                .unwrap_or(0);
+            if let Some(packet) = stored {
+                if retention == "full" {
+                    assert_eq!(packet.reconstruct().unwrap().items.unwrap().len(), 1);
+                } else {
+                    assert!(packet.reconstruct().is_err());
+                }
+            }
+            println!(
+                "response-retention-query-observation {}",
+                json!({"completed":completed,"retention":retention,"max_attempts":max_attempts,"execution_statements":delta,"server_counts_available":server_counts,"control_statements":0,"round_trips":round_trips,"client_protocol_bytes":bytes,"retained_payload_bytes":payload_bytes,"wal_bytes":wal_bytes})
+            );
+            probe.close().await;
+        }
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL"]
+async fn retained_response_rejects_stale_or_mismatched_evidence_and_cascades_on_delete(
+    pool: PgPool,
+) {
+    let seed = seed_running_attempt(&pool, 120, 120).await;
+    let packet =
+        evidence_for_seed(&pool, &seed, crate::contracts::run::PersistenceMode::Full).await;
+    let mut transition = terminal(&seed);
+    transition.response_evidence = Some(packet.clone());
+    assert!(
+        finalize_execution_terminal_transitions(
+            &pool,
+            uuid::Uuid::nil(),
+            seed.run_id,
+            seed.run_shard,
+            Uuid::now_v7(),
+            1,
+            &[transition.clone()]
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::db::tables::execution_attempts::select_response_evidence(
+            &pool,
+            seed.run_id,
+            seed.run_shard,
+            seed.attempt_id
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let retired: String = sqlx::query_scalar(
+        "SELECT status::text FROM execution_attempts WHERE run_id=$1 AND run_shard=$2 AND id=$3",
+    )
+    .bind(seed.run_id)
+    .bind(seed.run_shard)
+    .bind(seed.attempt_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        retired, "stale",
+        "existing wrong-worker retirement is preserved"
+    );
+    let seed = seed_running_attempt(&pool, 120, 120).await;
+    let packet =
+        evidence_for_seed(&pool, &seed, crate::contracts::run::PersistenceMode::Full).await;
+    let mut transition = terminal(&seed);
+    transition.response_evidence = Some(packet.clone());
+    sqlx::query("UPDATE executions SET case_hash='wrong' WHERE id=$1")
+        .bind(seed.execution_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        finalize_execution_terminal_transitions(
+            &pool,
+            uuid::Uuid::nil(),
+            seed.run_id,
+            seed.run_shard,
+            seed.worker_id,
+            1,
+            &[transition.clone()]
+        )
+        .await
+        .is_err()
+    );
+    evidence_for_seed(&pool, &seed, crate::contracts::run::PersistenceMode::Full).await;
+    for field in ["retention", "configuration_hash"] {
+        sqlx::query("UPDATE run_snapshots SET config_snapshot=jsonb_set(config_snapshot, ARRAY['response_policy',$3], '\"wrong\"'::jsonb) WHERE run_id=$1 AND run_shard=$2")
+            .bind(seed.run_id).bind(seed.run_shard).bind(field).execute(&pool).await.unwrap();
+        assert!(
+            finalize_execution_terminal_transitions(
+                &pool,
+                uuid::Uuid::nil(),
+                seed.run_id,
+                seed.run_shard,
+                seed.worker_id,
+                1,
+                &[transition.clone()]
+            )
+            .await
+            .is_err()
+        );
+        evidence_for_seed(&pool, &seed, crate::contracts::run::PersistenceMode::Full).await;
+    }
+    finalize_execution_terminal_transitions(
+        &pool,
+        uuid::Uuid::nil(),
+        seed.run_id,
+        seed.run_shard,
+        seed.worker_id,
+        1,
+        &[transition.clone()],
+    )
+    .await
+    .unwrap();
+    assert!(
+        finalize_execution_terminal_transitions(
+            &pool,
+            uuid::Uuid::nil(),
+            seed.run_id,
+            seed.run_shard,
+            seed.worker_id,
+            1,
+            &[transition]
+        )
+        .await
+        .is_err()
+    );
+    let restored = crate::db::tables::execution_attempts::select_response_evidence(
+        &pool,
+        seed.run_id,
+        seed.run_shard,
+        seed.attempt_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(restored.payload(), packet.payload());
+    sqlx::query("DELETE FROM runs WHERE id=$1")
+        .bind(seed.run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        crate::db::tables::execution_attempts::select_response_evidence(
+            &pool,
+            seed.run_id,
+            seed.run_shard,
+            seed.attempt_id
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+}
+
+#[cfg(feature = "evaluator-abi-fixtures")]
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL and built evaluator ABI fixtures"]
+async fn persisted_response_replays_through_wasm_without_agent_io(pool: PgPool) {
+    use crate::{
+        context::wasm::{
+            Config,
+            Wasm,
+        },
+        contracts::evaluator::{
+            EvaluatorInput,
+            EvaluatorOutcome,
+            Measurement,
+        },
+        evaluator_abi::{
+            PreparedEvaluator,
+            current_identity,
+        },
+    };
+    let seed = seed_running_attempt(&pool, 120, 120).await;
+    let packet =
+        evidence_for_seed(&pool, &seed, crate::contracts::run::PersistenceMode::Full).await;
+    let wasm = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/wasm32-wasip2/release/sentiment_basic_en.wasm"),
+    )
+    .unwrap();
+    let runtime = Wasm::new(Config {
+        timeout_ms: 0,
+        ..Default::default()
+    })
+    .unwrap();
+    let evaluator = PreparedEvaluator::compile(&runtime, &wasm, &current_identity()).unwrap();
+    let evaluate = |response: crate::contracts::response_retention::RetainedResponse| {
+        let mapped = response.reconstruct().unwrap();
+        let mut input:EvaluatorInput=serde_json::from_value(json!({"run_id":seed.run_id.to_string(),"execution_id":seed.execution_id.to_string(),"attempt_id":seed.attempt_id.to_string(),"case":{"id":"case","task_type":"classification","input":{"text":"excellent"}},"actual":{},"evaluator_config":{}})).unwrap();
+        input.actual.captured_body = Some(mapped.original.clone());
+        input.actual.mapping = Some(std::sync::Arc::new(Ok(mapped)));
+        evaluator.execute(&runtime, input).unwrap()
+    };
+    let before = evaluate(packet.clone());
+    assert!(
+        matches!(&before.outcome,EvaluatorOutcome::Completed(Measurement::Ordinal {value}) if value == "neutral")
+    );
+    let mut transition = terminal(&seed);
+    transition.response_evidence = Some(packet);
+    finalize_execution_terminal_transitions(
+        &pool,
+        uuid::Uuid::nil(),
+        seed.run_id,
+        seed.run_shard,
+        seed.worker_id,
+        1,
+        &[transition],
+    )
+    .await
+    .unwrap();
+    let restored = crate::db::tables::execution_attempts::select_response_evidence(
+        &pool,
+        seed.run_id,
+        seed.run_shard,
+        seed.attempt_id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let replayed = evaluate(restored);
+    assert_eq!(
+        serde_json::to_value(before.outcome).unwrap(),
+        serde_json::to_value(replayed.outcome).unwrap()
+    );
+}
+
+#[path = "postgres_tests/worker_scope.rs"]
+mod worker_scope;
+
+#[path = "postgres_tests/deferred.rs"]
+mod deferred;

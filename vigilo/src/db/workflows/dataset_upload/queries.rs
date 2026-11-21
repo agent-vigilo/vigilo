@@ -18,7 +18,8 @@ pub(super) const FIND_REUSABLE: &str = r#"
     SELECT id,
     manifest
     FROM dataset_catalog
-    WHERE storage_alias=$1
+    WHERE tenant_id = NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid
+    AND storage_alias=$1
     AND binding_hash=$2
     AND dataset_hash=$3
     AND limits=$4

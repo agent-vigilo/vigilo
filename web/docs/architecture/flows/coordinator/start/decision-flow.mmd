@@ -12,26 +12,29 @@ flowchart TD
     CoordinatorId[Generate coordinator id]
     Runner[Start coordinator service runner]
     Event{Next service event?}
-    Database{Database context available?}
-    RecoverCreation[Claim ready plans with execution requested]
-    ReadPlan[Verify immutable roots, configuration and gate counts]
-    AdmitPlan[Replay compact admission and verify coverage]
+    Database{Database context and restricted route validation succeed?}
+    Controls[Claim deliveries; scope apply, quiescence and acknowledgement transactions]
+    SettleControls[Claim quiescent revocations; scope cleanup and acknowledgement]
+    RecoverCreation[Discover accepted ready plans and acquire fenced admission lease]
+    ReadPlan[Bind claimed identity and exact resources; verify protected plan and immutable inputs]
+    AdmitPlan[Scope placement transactions; verify coverage and lock catalog for activation]
     CreationDeferred[Release ownership and continue bounded candidates]
     Circuit{Alias circuit admits operation?}
     CircuitSkip[Leave durable work pending and continue]
-    Recover[Recover expired chunk leases]
+    Recover[Read expired leases with bounded lookahead and limit eligible standalone invocations]
     RecoveryIsolated[Count placement failure and continue aliases]
-    Dispatch[Dispatch ready run-shard windows]
+    Dispatch[Claim cursor, read scoped snapshot and route, fence admission, and commit with the cursor if colocated]
     DispatchIsolated[Leave cursor open and exclude failed alias]
-    Finalize[Read summaries by database and finalize exact valid seals]
-    FinalizeIsolated[Defer candidate; inspect next run]
-    Aggregate[Discover ready shards with bounded database and shard concurrency]
+    Finalize[Read routed summaries, claim lease and recheck expiry under run lock before final commit]
+    FinalizeIsolated[Scope deferral heartbeat; inspect next run]
+    Aggregate[Restricted ready-shard discovery with bounded database and shard concurrency]
     AggregationBudget{Ready page and database scheduling budgets available?}
-    AggregationPage[Try claim and atomically commit one bounded receipt or canonical page]
+    AggregationPage[Scope claim to discovered work and atomically commit one bounded receipt or canonical page]
+    AggregationRotate[Release page locks and rotate deferred candidate in a scoped transaction]
     AggregationNext[Visit unchecked candidates before revisiting shards with ready work]
     AggregationDrain[Await all admitted page operations under database deadlines]
     Messaging{Messaging context available?}
-    Outbox[Claim delivery queue batch and publish with bounded concurrency]
+    Outbox[Claim owned batches; publish concurrently; commit scoped bookkeeping]
     BrokerCircuit{Messaging circuit admits publish?}
     OutboxIsolated[Count placement failure and continue aliases]
     Wait[Wait for next tick]
@@ -52,17 +55,19 @@ flowchart TD
     Event -- Shutdown signal --> Shutdown
 
     Database -- No --> ContextFail
-    Database -- Yes --> RecoverCreation
+    Database -- Yes --> Controls --> SettleControls --> RecoverCreation
 
     RecoverCreation --> ReadPlan --> AdmitPlan --> RecoveryPlacement{Serviceable placements remain?}
     ReadPlan -. Unavailable or invalid object .-> CreationDeferred
     AdmitPlan -. Candidate fails .-> CreationDeferred
     CreationDeferred --> RecoveryPlacement
     RecoveryPlacement -- Yes --> Circuit
-    RecoveryPlacement -- No --> Dispatch
+    RecoveryPlacement -- No --> DeferredWork[Expire and claim bounded deferred work on execution placements] --> Dispatch
     Circuit -- Open --> CircuitSkip
     Circuit -- Closed or probe --> Recover
     CircuitSkip --> RecoveryPlacement
+    Controls -. Control database failure .-> CycleFail
+    SettleControls -. Control database failure .-> CycleFail
     RecoverCreation -. Control recovery fails .-> CycleFail
 
     Recover --> RecoveryPlacement
@@ -71,7 +76,9 @@ flowchart TD
 
     Dispatch --> Aggregate
     Aggregate --> AggregationBudget
-    AggregationBudget -- Yes --> AggregationPage --> AggregationNext --> AggregationBudget
+    AggregationBudget -- Yes --> AggregationPage
+    AggregationPage -- Productive --> AggregationNext --> AggregationBudget
+    AggregationPage -- Busy or invalid --> AggregationRotate --> AggregationNext
     AggregationBudget -- No --> AggregationDrain --> Finalize
     Dispatch -. Execution placement fails .-> DispatchIsolated
     Dispatch -. Control dispatch fails .-> CycleFail
@@ -102,5 +109,6 @@ flowchart TD
 
     class Start command
     class Success success
-    class CoordinatorId,Runner,Event,Database,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryPlacement,Circuit,CircuitSkip,Recover,RecoveryIsolated,Dispatch,DispatchIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationNext,AggregationDrain,Finalize,FinalizeIsolated,Messaging,Outbox,BrokerCircuit,OutboxIsolated,Wait,Shutdown,Stop system
+    class DeferredWork system
+    class CoordinatorId,Runner,Event,Database,Controls,SettleControls,RecoverCreation,ReadPlan,AdmitPlan,CreationDeferred,RecoveryPlacement,Circuit,CircuitSkip,Recover,RecoveryIsolated,Dispatch,DispatchIsolated,Aggregate,AggregationBudget,AggregationPage,AggregationRotate,AggregationNext,AggregationDrain,Finalize,FinalizeIsolated,Messaging,Outbox,BrokerCircuit,OutboxIsolated,Wait,Shutdown,Stop system
     class ContextFail,CycleFail,ShutdownFail error

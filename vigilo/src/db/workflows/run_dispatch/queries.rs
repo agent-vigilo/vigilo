@@ -24,52 +24,31 @@ pub(crate) async fn select_next_dispatch_route(
 }
 
 /// Claims the next control cursor and keeps its transaction open through the
-/// routed execution write.
+/// routed execution write. The same statement installs transaction-local identity
+/// from the claimed row and clears caller identity before follow-up control SQL.
 pub(crate) async fn claim_next_dispatch_route(
     db: &PgPool,
     excluded_database_aliases: &[String],
 ) -> anyhow::Result<Option<ClaimedDispatchRoute>> {
     let mut control_tx = db.begin().await?;
-    let route = sqlx::query_as::<_, DispatchRoute>(
-        r#"
-        SELECT
-            c.run_id,
-            c.run_shard,
-            sp.database_alias,
-            sp.status AS placement_status,
-            sp.route_version,
-            sp.write_epoch
-        FROM run_shard_dispatch_cursors c
-        JOIN runs r
-          ON r.id = c.run_id
-        JOIN shard_placements sp
-          ON sp.run_id = c.run_id
-         AND sp.run_shard = c.run_shard
-        JOIN database_placements dp
-          ON dp.alias = sp.database_alias
-        WHERE c.status = 'open'
-          AND sp.status = 'active'
-          AND dp.status IN ('active', 'draining')
-          AND dp.role IN ('shard', 'control_and_shard')
-          AND NOT (sp.database_alias = ANY($1::text[]))
-          AND (
-              r.status = 'running'::run_status
-              OR (
-                  r.status = 'pending'::run_status
-                  AND (
-                      r.coordinator_leased_until IS NULL
-                      OR r.coordinator_leased_until < now()
-                  )
-              )
-          )
-        ORDER BY c.updated_at ASC, c.run_id ASC, c.run_shard ASC
-        LIMIT 1
-        FOR UPDATE OF c SKIP LOCKED
-        "#,
-    )
-    .bind(excluded_database_aliases)
-    .fetch_optional(&mut *control_tx)
-    .await?;
+    let route =
+        sqlx::query_as::<_, DispatchRoute>(
+            // Bind only the authoritative claim result, after the SECURITY DEFINER
+            // function returns. Keep context and the cursor lock on this transaction;
+            // no role switch or separate context-setting round trip is needed.
+            r#"WITH claimed AS MATERIALIZED (
+                SELECT * FROM vigilo_claim_dispatch($1::text[])
+            )
+            SELECT claimed.*,
+                   set_config('vigilo.tenant_id',tenant_id::text,true) IS NOT NULL AS tenant_scope_bound,
+                   set_config('vigilo.run_id',run_id::text,true) IS NOT NULL AS run_scope_bound,
+                   set_config('vigilo.actor_id','',true) IS NOT NULL AS actor_scope_cleared,
+                   set_config('vigilo.run_batch','',true) IS NOT NULL AS batch_scope_cleared
+            FROM claimed"#,
+        )
+            .bind(excluded_database_aliases)
+            .fetch_optional(&mut *control_tx)
+            .await?;
 
     let Some(route) = route else {
         control_tx.rollback().await?;
@@ -79,41 +58,57 @@ pub(crate) async fn claim_next_dispatch_route(
     Ok(Some(ClaimedDispatchRoute { route, control_tx }))
 }
 
+/// Claims only the requested cursor under the supplied run scope and route.
+/// A stale or busy target yields no work without selecting another run.
+pub(crate) async fn claim_target_dispatch_route(
+    db: &PgPool,
+    tenant_id: Uuid,
+    run_id: Uuid,
+    run_shard: i16,
+    database_alias: &str,
+    write_epoch: i64,
+) -> anyhow::Result<Option<ClaimedDispatchRoute>> {
+    let mut control_tx = db.begin().await?;
+    crate::db::scope::set_system(&mut control_tx, tenant_id, run_id).await?;
+    let route = sqlx::query_as::<_, DispatchRoute>(
+        "SELECT r.tenant_id,c.run_id,c.run_shard,sp.database_alias,
+                sp.status AS placement_status,sp.route_version,sp.write_epoch
+         FROM run_shard_dispatch_cursors c
+         JOIN runs r ON r.id=c.run_id AND r.tenant_id=c.tenant_id
+         JOIN shard_placements sp ON sp.run_id=c.run_id AND sp.run_shard=c.run_shard
+         JOIN database_placements dp ON dp.alias=sp.database_alias
+         WHERE c.run_id=$1 AND c.run_shard=$2 AND c.tenant_id=$3 AND c.status='open'
+           AND sp.database_alias=$4 AND sp.write_epoch=$5 AND sp.status='active'
+           AND dp.status IN ('active','draining')
+           AND dp.role IN ('shard','control_and_shard') AND r.execution_control='enabled'
+           AND (r.status='running' OR (r.status='pending' AND
+                (r.coordinator_leased_until IS NULL OR r.coordinator_leased_until < now())))
+         FOR UPDATE OF c SKIP LOCKED",
+    )
+    .bind(run_id)
+    .bind(run_shard)
+    .bind(tenant_id)
+    .bind(database_alias)
+    .bind(write_epoch)
+    .fetch_optional(&mut *control_tx)
+    .await?;
+    if let Some(route) = route {
+        Ok(Some(ClaimedDispatchRoute { route, control_tx }))
+    } else {
+        control_tx.rollback().await?;
+        Ok(None)
+    }
+}
+
 /// Counts currently dispatchable control-database cursor rows.
 ///
 /// This mirrors [`select_next_dispatch_route`] without ordering or row return
 /// data. Coordinator structured logs use it as a backlog gauge for scale
 /// monitoring.
 pub(crate) async fn count_dispatch_cursor_backlog(db: &PgPool) -> anyhow::Result<i64> {
-    let count = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT COUNT(*)::bigint
-        FROM run_shard_dispatch_cursors c
-        JOIN runs r
-          ON r.id = c.run_id
-        JOIN shard_placements sp
-          ON sp.run_id = c.run_id
-         AND sp.run_shard = c.run_shard
-        JOIN database_placements dp
-          ON dp.alias = sp.database_alias
-        WHERE c.status = 'open'
-          AND sp.status = 'active'
-          AND dp.status IN ('active', 'draining')
-          AND dp.role IN ('shard', 'control_and_shard')
-          AND (
-              r.status = 'running'::run_status
-              OR (
-                  r.status = 'pending'::run_status
-                  AND (
-                      r.coordinator_leased_until IS NULL
-                      OR r.coordinator_leased_until < now()
-                  )
-              )
-          )
-        "#,
-    )
-    .fetch_one(db)
-    .await?;
+    let count = sqlx::query_scalar::<_, i64>("SELECT vigilo_dispatch_backlog()")
+        .fetch_one(db)
+        .await?;
 
     Ok(count)
 }
@@ -137,6 +132,8 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
                 updated_at = now()
             WHERE r.id = $1::uuid
               AND r.status = 'pending'::run_status
+              AND r.tenant_id=$5
+              AND r.execution_control = 'enabled'
               AND (
                   r.coordinator_leased_until IS NULL
                   OR r.coordinator_leased_until < now()
@@ -144,18 +141,22 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
             RETURNING r.*
         ),
         started_event AS (
-            INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, dedupe_key, payload)
+            INSERT INTO outbox_events (tenant_id,event_type, aggregate_type, aggregate_id, dedupe_key, payload)
             SELECT
+                started_run.tenant_id,
                 'run.started',
                 'run',
                 started_run.id,
                 format('run:%s:started', started_run.id),
                 jsonb_build_object('run_id', started_run.id)
             FROM started_run
-            ON CONFLICT (dedupe_key) DO NOTHING
+            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING id
         )
         SELECT
+            to_jsonb(sp) AS shard_placement,
+            to_jsonb(dp) AS database_placement,
+            started_run.tenant_id,
             started_run.id AS run_id,
             $2::smallint AS run_shard,
             started_run.run_key,
@@ -177,12 +178,15 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
             started_run.config_snapshot,
             (SELECT COUNT(*)::bigint FROM started_event) AS run_started_event_records_inserted
         FROM started_run
+        JOIN shard_placements sp ON sp.run_id=started_run.id AND sp.run_shard=$2
+        JOIN database_placements dp ON dp.alias=sp.database_alias
         "#,
     )
     .bind(route.run_id)
     .bind(route.run_shard)
     .bind(coordinator_id)
     .bind(lease_seconds)
+    .bind(route.tenant_id)
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -193,6 +197,9 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
     let running = sqlx::query_as::<_, DispatchRunSnapshot>(
         r#"
         SELECT
+            to_jsonb(sp) AS shard_placement,
+            to_jsonb(dp) AS database_placement,
+            r.tenant_id,
             r.id AS run_id,
             $2::smallint AS run_shard,
             r.run_key,
@@ -214,13 +221,18 @@ pub(crate) async fn prepare_dispatch_run_snapshot_with(
             r.config_snapshot,
             0::bigint AS run_started_event_records_inserted
         FROM runs r
+        JOIN shard_placements sp ON sp.run_id=r.id AND sp.run_shard=$2
+        JOIN database_placements dp ON dp.alias=sp.database_alias
         WHERE r.id = $1::uuid
           AND r.status = 'running'::run_status
-        FOR SHARE
+          AND r.tenant_id=$3
+          AND r.execution_control = 'enabled'
+        FOR SHARE OF r
         "#,
     )
     .bind(route.run_id)
     .bind(route.run_shard)
+    .bind(route.tenant_id)
     .fetch_optional(&mut **tx)
     .await?;
 
@@ -276,6 +288,7 @@ pub(super) async fn recover_expired_chunks(
     // Query outline:
     //
     // expired         - recoverable leased chunks whose lease is past due.
+    //                   A draining shard still owns its expired leases.
     // recovered       - clear lease, increment recovery_count, return rows.
     // stale_recovered_attempts
     //                 - mark current running attempts stale before requeue.
@@ -295,7 +308,7 @@ pub(super) async fn recover_expired_chunks(
             JOIN local_shard_admissions admission
               ON admission.run_id = rc.run_id
              AND admission.run_shard = rc.run_shard
-             AND admission.state = 'open'
+             AND admission.state IN ('open','draining')
             JOIN UNNEST($3::uuid[], $4::smallint[]) AS admitted(run_id,run_shard)
               ON admitted.run_id = rc.run_id AND admitted.run_shard = rc.run_shard
             WHERE rc.status = 'leased'
@@ -342,8 +355,9 @@ pub(super) async fn recover_expired_chunks(
             RETURNING ea.id
         ),
         recovery_events AS (
-            INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, dedupe_key, payload)
+            INSERT INTO outbox_events (tenant_id,event_type, aggregate_type, aggregate_id, dedupe_key, payload)
             SELECT
+                snapshot.tenant_id,
                 'run.chunk.ready',
                 'run',
                 recovered.run_id,
@@ -359,14 +373,17 @@ pub(super) async fn recover_expired_chunks(
                     'chunk_id', recovered.id,
                     'database_alias', admission.database_alias,
                     'write_epoch', admission.write_epoch,
-                    'recovery_count', recovered.recovery_count
+                    'recovery_count', recovered.recovery_count,
+                    'tenant_id', snapshot.tenant_id,
+                    'plan_digest', snapshot.config_snapshot #>> '{run_plan,digest}'
                 )
             FROM recovered
+            JOIN run_snapshots snapshot ON snapshot.run_id=recovered.run_id AND snapshot.run_shard=recovered.run_shard
             JOIN local_shard_admissions admission
               ON admission.run_id = recovered.run_id
              AND admission.run_shard = recovered.run_shard
-             AND admission.state = 'open'
-            ON CONFLICT (dedupe_key) DO NOTHING
+             AND admission.state IN ('open','draining')
+            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING id
         )
         SELECT COUNT(*)::bigint
@@ -389,7 +406,7 @@ pub(super) async fn recover_expired_chunks(
     let failed_rows = sqlx::query_as::<_, (Uuid, i16, Uuid)>(
         r#"
         WITH expired AS (
-            SELECT rc.run_id, rc.run_shard, rc.id
+            SELECT rc.run_id, rc.run_shard, rc.id, rc.tenant_id
             FROM run_chunks rc
             JOIN run_snapshots rs
               ON rs.run_id = rc.run_id
@@ -492,10 +509,12 @@ pub(super) async fn dispatch_run_window(
                 $19::text AS prompt_config_version,
                 $20::jsonb AS config_snapshot,
                 $21::text AS database_alias,
-                $22::bigint AS write_epoch
+                $22::bigint AS write_epoch,
+                $24::uuid AS tenant_id
         ),
         snapshot_upsert AS (
             INSERT INTO run_snapshots (
+                tenant_id,
                 run_id,
                 run_shard,
                 run_key,
@@ -518,6 +537,7 @@ pub(super) async fn dispatch_run_window(
                 expected_execution_count
             )
             SELECT
+                snapshot_input.tenant_id,
                 snapshot_input.run_id,
                 snapshot_input.run_shard,
                 snapshot_input.run_key,
@@ -565,29 +585,33 @@ pub(super) async fn dispatch_run_window(
                     THEN run_snapshots.config_snapshot ELSE EXCLUDED.config_snapshot END,
                 expected_execution_count = EXCLUDED.expected_execution_count,
                 updated_at = now()
-            RETURNING run_id, run_shard, run_key
+            WHERE run_snapshots.tenant_id=EXCLUDED.tenant_id
+            RETURNING run_id, run_shard, run_key, tenant_id
         ),
         claimed AS (
             SELECT
+                snapshot_upsert.tenant_id,
                 snapshot_upsert.run_id AS id,
                 snapshot_upsert.run_key,
                 snapshot_upsert.run_shard
             FROM snapshot_upsert
         ),
         selected_chunks AS (
-            SELECT rc.run_id, rc.run_shard, rc.id
+            SELECT rc.run_id, rc.run_shard, rc.id, rc.tenant_id
             FROM run_chunks rc
             JOIN claimed
               ON claimed.id = rc.run_id
              AND claimed.run_shard = rc.run_shard
             WHERE rc.status = 'pending'
+              AND rc.tenant_id = claimed.tenant_id
               AND rc.dispatched_at IS NULL
             ORDER BY rc.ordinal_start ASC, rc.id ASC
             LIMIT $1
         ),
         chunk_events AS (
-            INSERT INTO outbox_events (event_type, aggregate_type, aggregate_id, dedupe_key, payload)
+            INSERT INTO outbox_events (tenant_id,event_type, aggregate_type, aggregate_id, dedupe_key, payload)
             SELECT
+                selected_chunks.tenant_id,
                 'run.chunk.ready',
                 'run',
                 selected_chunks.run_id,
@@ -597,11 +621,13 @@ pub(super) async fn dispatch_run_window(
                     'run_shard', selected_chunks.run_shard,
                     'chunk_id', selected_chunks.id,
                     'database_alias', snapshot_input.database_alias,
-                    'write_epoch', snapshot_input.write_epoch
+                    'write_epoch', snapshot_input.write_epoch,
+                    'tenant_id', selected_chunks.tenant_id,
+                    'plan_digest', snapshot_input.config_snapshot #>> '{run_plan,digest}'
                 )
             FROM selected_chunks
             CROSS JOIN snapshot_input
-            ON CONFLICT (dedupe_key) DO NOTHING
+            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
             RETURNING id
         ),
         marked_chunks AS (
@@ -666,6 +692,7 @@ pub(super) async fn dispatch_run_window(
     .bind(&route.database_alias)
     .bind(route.write_epoch)
     .bind(snapshot.run_started_event_records_inserted)
+    .bind(snapshot.tenant_id)
     .fetch_optional(&mut **execution_tx)
     .await
     .map_err(anyhow::Error::from)

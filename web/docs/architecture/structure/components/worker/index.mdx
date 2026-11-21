@@ -14,13 +14,25 @@ import workerDiagram from './diagram.mmd';
 
 # Worker Components
 
-Describes the major internal responsibilities of the worker runtime.
+The trusted library host obtains `operations::Worker` from a validated
+`HostedRuntime`. Its `once()` and cancellable `run()` share the CLI processing
+path and service caches. The host owns cancellation and task joining; shutdown
+drains admitted chunks, and dropped work stops its lease heartbeat.
+
+The worker obtains target evidence through
+<GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm> or
+<GlossaryTerm term="delegated-trial">Delegated Trial</GlossaryTerm>. It verifies
+the reported target identity before passing evidence to evaluators. <GlossaryTerm term="code-scorer">Code Scorers</GlossaryTerm> and
+<GlossaryTerm term="model-as-a-judge">Model-as-a-Judge</GlossaryTerm> implementations
+share the evaluator ABI and resource limits. Judge calls use evaluator-specific
+HTTP permissions; they are separate from the harness call to the target.
 
 <Mermaid value={workerDiagram} />
 
 ## Notes
 
-- Workers use `VIGILO_STORAGE_CONFIG` to resolve the frozen storage owner, read
+- Standalone workers use `VIGILO_STORAGE_CONFIG`; hosted workers use the injected
+  resource resolver to resolve the frozen storage owner. They read
   configuration and assigned case files through a shared, bounded immutable-byte
   cache, and fetch misses through the provider-neutral adapter. Every use verifies
   complete files and exact chunk membership before execution. Large assignments
@@ -28,8 +40,11 @@ Describes the major internal responsibilities of the worker runtime.
   [Run Preparation](/docs/architecture/case-storage/run-preparation).
 
 - Workers consume `run.chunk.ready` broker messages carrying `run_id`,
-  `run_shard`, `chunk_id`, `database_alias`, and `write_epoch`, then validate
-  local shard admission while claiming the chunk lease.
+  `run_shard`, `chunk_id`, `database_alias`, `write_epoch`, owner and accepted plan
+  identity as hints. A restricted execution-local verifier matches exact chunk and
+  immutable snapshot records, retains the movement fence, and returns trusted
+  ownership before protected admission reads. The existing epoch/control checks
+  and guarded lease claim follow in that transaction.
 - `vigilo worker start` defaults to one in-flight chunk per worker process. `--max-inflight-chunks` / `VIGILO_WORKER_MAX_INFLIGHT_CHUNKS` can raise that limit, and RabbitMQ prefetch is set to the same value.
 - Workers attach a process `worker_id`, host label, internal queue message UUID, broker message id, attempt lease, and heartbeat timestamp to newly allocated attempts.
 - While a chunk is processing, the worker renews the chunk lease and current running attempt leases. Terminal execution transitions require current-attempt authority and a live attempt lease for that worker.
@@ -41,6 +56,10 @@ Describes the major internal responsibilities of the worker runtime.
   adapter is resolved once per cached artifact, not per case. Lifecycle changes
   affect new runs without changing an already-created run.
 - Workers use a shared HTTP client and run chunk cases with bounded chunk-local parallelism before persisting results in batch.
+- For deferred completion, the worker stores submission intent on the execution
+  shard before calling the harness. It can release the chunk while waiting and
+  reclaim the same attempt when a saved outcome is ready. See
+  [execution lifecycle](../../../state/execution-lifecycle) for the state transitions.
 - Evaluator execution is admitted through a process-wide Wasm semaphore and each invocation runs in a fresh Wasmtime store with memory, table, instance, fuel, timeout, and log-message limits.
 - The completeness and aggregation component verifies every required evaluator binding before publishing scores. Missing, errored, skipped, or unscored required output produces an errored aggregate with no score; optional diagnostic output cannot affect policy.
 - Execution writes use shared run-state guards so chunks for the same running run do not serialize on the run row.
@@ -53,6 +72,15 @@ Describes the major internal responsibilities of the worker runtime.
 - Duplicate broker deliveries are expected under at-least-once messaging; chunk claims, attempt authority tokens, and evaluator-result uniqueness make processing idempotent at the persistence boundary.
 
 Workers settle terminal chunks under the chunk lock, preserve authoritative committed results, and retire unfinished authority before writing an immutable receipt. They acknowledge after this transaction; coordinators own shard aggregation and sealing. See [settlement](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
+
+The claimed chunk carries its persisted owner into snapshot reads, chunk/attempt
+heartbeats, batched allocation and evidence writes, terminal transitions, retry
+summaries, release and settlement. Each transaction clears unrelated caller context;
+connections are released before HTTP, blob reads, Wasm evaluation or broker I/O.
+The paused-work probe also verifies local identity. This adds no control-database
+ownership lookup. Exceptional stale-route refresh carries the locally verified
+identity into a scoped control read; existing cold registry and policy metadata
+reads remain separate.
 
 ## Related
 
@@ -73,3 +101,57 @@ Agent failure classification stays at the HTTP boundary; the execution workflow
 carries its typed policy into the authoritative batch transition. Retry timing is
 persisted with the execution, and diagnostic categories remain in the attempt
 summary. Terminal invocation failures are operational errors, not quality scores.
+
+The agent client resolves credential references through a process-local provider.
+Local bindings use operator-supplied environment variables or secret files; the
+service provider uses a versioned HTTP contract and per-run grants. External
+authorization and secret management remain outside the core worker. See
+[Agent Credentials](/docs/configuration/agent-credentials) for the trust boundary.
+
+Agent invocation returns bounded operational evidence separately from evaluator
+output. Execution processing carries it through both successful and failed
+evaluation paths into the existing batched attempt update. No diagnostic query or
+transaction is added. See [invocation diagnostics](/docs/configuration/run-profile#agent-invocation-diagnostics).
+
+The evaluator ABI exposes declared evidence requirements. The host checks these
+before calling `evaluate`; unavailable required response evidence produces an
+evaluation error rather than a fabricated score. Mapping runs once per attempt; raw-only evaluators remain independent of mapping failure. Successful HTTP calls retain original decoded bytes in shared immutable memory.
+Each evaluator store owns a scoped resource table and read budgets; reads copy only
+the requested range into guest memory. Store destruction releases the table after
+success, errors, or traps. Resource reads on a store with no table return unavailable;
+foreign handles cannot authorize access. This path does not persist captured bytes
+or resource handles.
+
+### Resource bindings
+
+A verified immutable run reference selects resource bindings before object reads.
+Standalone workers use operator configuration. An injected resolver receives the
+verified run and plan identity; its reply must match both that request and the
+physical storage binding. Resolver failures stop context construction without
+falling back to process files or environment variables. Run-context caches retain
+only bound resource services alongside immutable inputs; database and queue
+ownership remains in the process context.
+
+Agent and evaluator credential callbacks carry the accepted plan and allocated
+execution/attempt identity. Credentials renew through their provider and remain
+host-only. Per-run binding selection preserves process-wide admission and HTTP
+ceilings. No additional ownership query is performed for a case or callback.
+See [host resource resolution](/docs/configuration/agent-credentials#host-resource-resolution).
+
+### Evaluator HTTP permissions
+
+Workers load operator policy snapshots in bounded batches through a process-local
+cache keyed by verified ownership and evaluator identity. Refreshes bind that
+ownership in a short database transaction before reading one policy batch;
+transaction scope is cleared before the connection returns to the pool.
+Newly allocated attempts retain immutable evaluator-specific snapshots;
+revision IDs accompany the existing terminal update. Cache expiry requires a
+successful refresh before new authorization. No policy database call occurs inside
+Wasm HTTP imports. The import checks permission, resolves host-owned credentials and sends a bounded
+request through the async transport while Wasm executes on a blocking thread.
+The invocation owns credential caching and cancellation; a worker-wide semaphore
+bounds concurrent requests. Warm cache hits add no SQL. A refresh adds transaction
+and scope setup around its single batched read; policy and credential checks add
+no per-request SQL.
+HTTP failures return status and body; transport or budget failures return host errors.
+See [evaluator HTTP authorization](/docs/configuration/run-profile#evaluator-http-authorization).

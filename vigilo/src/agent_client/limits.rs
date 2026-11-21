@@ -4,15 +4,15 @@
 
 use std::io::Write;
 
-use crate::contracts::run::AgentHttpConfig;
+use vigilo::invocation::profile::HttpEndpoint;
 
 pub(crate) const DEFAULT_BODY_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Worker ceilings, or effective limits after profile validation.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Limits {
-    pub(crate) max_request_bytes: u64,
-    pub(crate) max_response_bytes: u64,
+pub struct Limits {
+    pub max_request_bytes: u64,
+    pub max_response_bytes: u64,
 }
 
 impl Default for Limits {
@@ -26,12 +26,12 @@ impl Default for Limits {
 
 impl Limits {
     /// Reject invalid or excessive overrides before doing network I/O.
-    pub(crate) fn resolve(self, profile: &AgentHttpConfig) -> anyhow::Result<Self> {
+    pub(crate) fn resolve(self, profile: &HttpEndpoint) -> anyhow::Result<Self> {
         fn resolve(name: &str, requested: Option<u64>, ceiling: u64) -> anyhow::Result<u64> {
             let value = requested.unwrap_or(ceiling);
             anyhow::ensure!(
                 value > 0 && value <= ceiling,
-                "agent.http.{name} must be between 1 and worker ceiling {ceiling}"
+                "harness.http.{name} must be between 1 and worker ceiling {ceiling}"
             );
             Ok(value)
         }
@@ -91,7 +91,7 @@ impl Write for Body {
 }
 
 /// Serialize directly into a bounded buffer rather than allocating then checking.
-pub(crate) fn serialize(value: &serde_json::Value, limit: u64) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn serialize(value: &impl serde::Serialize, limit: u64) -> anyhow::Result<Vec<u8>> {
     let mut body = Body::new(limit);
     serde_json::to_writer(&mut body, value)
         .map_err(|err| anyhow::anyhow!("agent HTTP request serialization failed: {err}"))?;
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn profile_limits_default_lower_and_reject_excess_or_zero() {
-        let mut profile: AgentHttpConfig =
+        let mut profile: HttpEndpoint =
             serde_json::from_value(serde_json::json!({"url":"http://localhost"})).unwrap();
         let ceilings = Limits {
             max_request_bytes: 10,

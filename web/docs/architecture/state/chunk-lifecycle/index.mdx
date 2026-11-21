@@ -27,7 +27,10 @@ How `run_chunks.status` protects worker ownership and prevents stale workers fro
   dispatch cursors are created only after all placements are seeded.
 - Each chunk receives a stable `run_shard` in the 128-shard logical range. Child execution, attempt, aggregate, and evaluator result rows inherit that shard.
 - Each coordinator dispatch operation selects a bounded window from one run shard, marks each selected pending chunk with `dispatched_at`, and inserts one `run.chunk.ready` outbox event record per chunk with its execution database alias and write epoch.
-- Coordinator recovery scans expired `leased` chunks for running runs, increments `recovery_count`, resets recoverable chunks to `pending`, and inserts a recovery-scoped `run.chunk.ready` outbox event record.
+- Coordinator recovery scans expired `leased` chunks on open or draining shards.
+  It increments `recovery_count`, resets recoverable chunks to `pending`, and
+  inserts a recovery-scoped `run.chunk.ready` outbox event record. A worker can
+  claim the pending chunk once the current shard admission is open.
 - Chunks at the configured recovery limit are marked `failed` and receive a terminal receipt even if some execution rows were never created.
 - Workers can claim a chunk only when the owning run is `running`.
 - A chunk is completed only after all executions in its case range are terminal and the local shard admission still accepts the claimed write epoch. If any execution is `retry_scheduled`, the worker releases the chunk and delays the chunk-ready broker message until the next `retry_after` window.

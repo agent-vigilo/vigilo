@@ -4,11 +4,24 @@
 //! RabbitMQ, and a built evaluator WASM artifact. It drives the public `vigilo`
 //! binary through recoverable creation, dispatch, worker processing,
 //! finalization, results/export, cancellation, and validation failure paths.
+//! Public-library acceptance also exercises restricted roles, injected resources,
+//! shared runtime services, controls and dropped-worker recovery.
 
+#[path = "support/postgres_probe.rs"]
+mod postgres_probe;
 mod support;
+
+#[path = "multi_database_e2e/deferred.rs"]
+mod deferred;
+
+#[path = "multi_database_e2e/hosted.rs"]
+mod hosted;
 
 #[path = "multi_database_e2e/recovery.rs"]
 mod recovery;
+
+#[path = "multi_database_e2e/response_queries.rs"]
+mod response_queries;
 
 #[path = "multi_database_e2e/worker_storage.rs"]
 mod worker_storage;
@@ -58,58 +71,149 @@ const E2E_MAX_RUNTIME_CYCLES: usize = 8;
 const E2E_WORKER_PASSES_PER_CYCLE: usize = 4;
 
 #[tokio::test]
-async fn run_creation_recovers_after_cross_database_seed_status_failure() -> anyhow::Result<()> {
+async fn run_creation_recovers_after_submitter_dies_before_admission_checkpoint()
+-> anyhow::Result<()> {
     let Some(fixture) = E2eFixture::setup().await? else {
         return Ok(());
     };
 
-    install_seed_status_failure(&fixture.primary).await?;
-    let recoverable_output = create_run_output(
+    sqlx::raw_sql(
+        "CREATE FUNCTION hold_admission_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NEW.admission_cursor > OLD.admission_cursor THEN
+                 PERFORM pg_advisory_xact_lock(42187);
+             END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER hold_admission_checkpoint BEFORE UPDATE ON run_plans
+         FOR EACH ROW EXECUTE FUNCTION hold_admission_checkpoint();",
+    )
+    .execute(&fixture.primary)
+    .await?;
+    let mut barrier = fixture.primary.begin().await?;
+    let barrier_pid: i32 =
+        sqlx::query_scalar("SELECT pg_backend_pid() FROM pg_advisory_xact_lock(42187)")
+            .fetch_one(&mut *barrier)
+            .await?;
+
+    let profile_id = "e2e_creation_recovery";
+    let inputs = write_run_inputs(
+        profile_id,
+        &fixture.agent.url,
+        SENTIMENT_EVALUATOR_REF,
+        1,
+        CaseMode::Passing,
+    )?;
+    let mut create = tokio::process::Command::from(vigilo_command(
         &fixture.config,
-        RunCreateInput {
-            default_execution_alias: SHARD_ALIAS,
-            shard_assignment_policy: "single-default",
-            agent_url: &fixture.agent.url,
-            profile_id: "e2e_creation_recovery",
-            case_count: 1,
-            case_mode: CaseMode::Passing,
-            evaluator_ref: SENTIMENT_EVALUATOR_REF,
-        },
-    )?;
-    remove_seed_status_failure(&fixture.primary).await?;
-    if !recoverable_output.status.success() {
-        anyhow::bail!(
-            "recoverable run create failed with status {}\nstdout:\n{}\nstderr:\n{}",
-            recoverable_output.status,
-            String::from_utf8_lossy(&recoverable_output.stdout),
-            String::from_utf8_lossy(&recoverable_output.stderr)
-        );
-    }
-    let recoverable_payload: Value = serde_json::from_slice(&recoverable_output.stdout)?;
-    let recoverable_run_id = Uuid::parse_str(
-        recoverable_payload["data"]["run_id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("recoverable create response omitted data.run_id"))?,
-    )?;
-    assert_eq!(recoverable_payload["data"]["status"], "creating");
+        SHARD_ALIAS,
+        "single-default",
+    ));
+    let mut child = create
+        .kill_on_drop(true)
+        .args([
+            "run",
+            "create",
+            "--profile-file",
+            path_arg(&inputs.profile)?,
+            "--dataset-file",
+            path_arg(&inputs.dataset)?,
+        ])
+        .spawn()?;
+
+    let checkpoint_pid = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let waiting = sqlx::query_scalar::<_, i32>(
+                "SELECT pid FROM pg_stat_activity
+                 WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid))",
+            )
+            .bind(barrier_pid)
+            .fetch_optional(&fixture.primary)
+            .await?;
+            if let Some(pid) = waiting {
+                return Ok::<_, anyhow::Error>(pid);
+            }
+            anyhow::ensure!(
+                child.try_wait()?.is_none(),
+                "submission exited before checkpoint"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    let (run, owner, generation): (Uuid, Uuid, i64) = sqlx::query_as(
+        "SELECT r.id, r.coordinator_id, p.generation FROM runs r JOIN run_plans p ON p.run_id=r.id
+         WHERE r.evaluation_profile_id=$1 AND r.status='creating'",
+    )
+    .bind(profile_id)
+    .fetch_one(&fixture.primary)
+    .await?;
+    let checkpoint = || {
+        sqlx::query_as::<_, (i32, i32, Value)>(
+            "SELECT admission_cursor, chunk_cursor, admission_state FROM run_plans WHERE run_id=$1",
+        )
+        .bind(run)
+        .fetch_one(&fixture.primary)
+    };
+    let local_seed = || {
+        sqlx::query_as::<_, (Uuid, i16, i32, i32, Value, Value)>(
+            "SELECT c.id,c.run_shard,c.ordinal_start,c.ordinal_end,to_jsonb(s)-'updated_at',to_jsonb(a)
+             FROM run_chunks c JOIN run_snapshots s USING(run_id,run_shard)
+             JOIN local_shard_admissions a USING(run_id,run_shard)
+             WHERE c.run_id=$1 ORDER BY c.run_shard,c.ordinal_start",
+        )
+        .bind(run)
+        .fetch_all(&fixture.shard)
+    };
+    let routes = || {
+        sqlx::query_as::<_, (i16, String, String)>(
+            "SELECT run_shard,database_alias,status FROM shard_placements WHERE run_id=$1 ORDER BY run_shard",
+        )
+        .bind(run)
+        .fetch_all(&fixture.primary)
+    };
+    let committed = local_seed().await?;
+    assert_eq!(committed.len(), 1);
+    assert_eq!((committed[0].1, committed[0].2, committed[0].3), (0, 0, 1));
+    assert_eq!(checkpoint().await?, (0, 1, json!({})));
+    assert_eq!(dispatch_cursor_count(&fixture.primary, run).await?, 0);
+    assert!(routes().await?.is_empty());
     assert_eq!(
-        recoverable_payload["meta"]["creation_placements_pending"],
-        1
-    );
-    assert_eq!(
-        run_chunk_count(&fixture.shard, recoverable_run_id).await?,
-        1
-    );
-    assert_eq!(
-        dispatch_cursor_count(&fixture.primary, recoverable_run_id).await?,
+        outbox_event_count(&fixture.shard, run, "run.chunk.ready").await?,
         0
     );
 
+    child.kill().await?;
+    // PostgreSQL can keep running a blocked statement after its client exits.
+    // Terminate the observed backend before opening the barrier so the
+    // unacknowledged checkpoint is guaranteed to roll back.
+    let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1, 5000)")
+        .bind(checkpoint_pid)
+        .fetch_one(&fixture.primary)
+        .await?;
+    if !terminated {
+        let running: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1)")
+                .bind(checkpoint_pid)
+                .fetch_one(&fixture.primary)
+                .await?;
+        assert!(
+            !running,
+            "checkpoint backend must exit before releasing the barrier"
+        );
+    }
+    barrier.rollback().await?;
+    sqlx::raw_sql(
+        "DROP TRIGGER hold_admission_checkpoint ON run_plans;
+         DROP FUNCTION hold_admission_checkpoint();",
+    )
+    .execute(&fixture.primary)
+    .await?;
     let creating_status = run_vigilo_json(
         &fixture.config,
         SHARD_ALIAS,
         "single-default",
-        ["run", "status", &recoverable_run_id.to_string()],
+        ["run", "status", &run.to_string()],
     )?;
     assert_eq!(creating_status["data"]["status"], "creating");
     assert_eq!(
@@ -117,24 +221,66 @@ async fn run_creation_recovers_after_cross_database_seed_status_failure() -> any
         1
     );
 
-    expire_run_creation_lease(&fixture.primary, recoverable_run_id).await?;
-    run_vigilo_ok(
-        &fixture.config,
+    let once = || {
+        run_vigilo_ok(
+            &fixture.config,
+            SHARD_ALIAS,
+            "single-default",
+            ["coordinator", "once"],
+        )
+    };
+    once()?;
+    let retained: (Uuid, bool) = sqlx::query_as(
+        "SELECT coordinator_id, coordinator_leased_until > now() FROM runs WHERE id=$1",
+    )
+    .bind(run)
+    .fetch_one(&fixture.primary)
+    .await?;
+    assert_eq!(retained, (owner, true));
+    assert_eq!(checkpoint().await?, (0, 1, json!({})));
+    assert_eq!(dispatch_cursor_count(&fixture.primary, run).await?, 0);
+    assert!(routes().await?.is_empty());
+    assert_eq!(local_seed().await?, committed);
+
+    expire_run_creation_lease(&fixture.primary, run).await?;
+    once()?;
+    once()?;
+    let (cursor, total, state) = checkpoint().await?;
+    assert_eq!((cursor, total), (1, 1));
+    assert_eq!(state["0"]["chunk_count"], 1);
+    assert_eq!(local_seed().await?, committed);
+    assert_eq!(run_chunk_count(&fixture.shard, run).await?, 1);
+    assert_eq!(dispatch_cursor_count(&fixture.primary, run).await?, 1);
+    assert_eq!(
+        routes().await?,
+        vec![(0, SHARD_ALIAS.into(), "active".into())]
+    );
+    assert_eq!(
+        run_creation_placement_state(&fixture.primary, run, SHARD_ALIAS).await?,
+        ("seeded".to_string(), generation + 1)
+    );
+    assert_eq!(
+        outbox_event_count(&fixture.shard, run, "run.chunk.ready").await?,
+        1
+    );
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.started").await?,
+        1
+    );
+    let terminal = drive_run_to_status(
+        &fixture,
+        "replay interrupted admission",
         SHARD_ALIAS,
         "single-default",
-        ["coordinator", "once"],
-    )?;
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(terminal["data"]["gate_status"], "pass");
+    assert_eq!(execution_count(&fixture.shard, run).await?, 1);
     assert_eq!(
-        run_chunk_count(&fixture.shard, recoverable_run_id).await?,
+        outbox_event_count(&fixture.primary, run, "run.completed").await?,
         1
-    );
-    assert_eq!(
-        dispatch_cursor_count(&fixture.primary, recoverable_run_id).await?,
-        1
-    );
-    assert_eq!(
-        run_creation_placement_state(&fixture.primary, recoverable_run_id, SHARD_ALIAS).await?,
-        ("seeded".to_string(), 3)
     );
 
     Ok(())
@@ -181,6 +327,11 @@ async fn cross_shard_run_completes_and_exports_results() -> anyhow::Result<()> {
     assert_eq!(status["data"]["gate_status"].as_str(), Some("pass"));
     assert_eq!(status["data"]["expected_execution_count"], 101);
     assert_eq!(status["data"]["terminal_execution_count"], 101);
+    for (database, count) in [(&fixture.primary, 100_i64), (&fixture.shard, 1)] {
+        let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM execution_attempts WHERE run_id=$1 AND response_evidence IS NOT NULL AND octet_length(response_evidence_bytes)>0 AND response_evidence->'items' IS NOT NULL")
+            .bind(completed_run_id).fetch_one(database).await?;
+        assert_eq!(retained, count);
+    }
 
     let results = run_vigilo_json(
         &fixture.config,
@@ -399,6 +550,145 @@ async fn older_nonterminal_run_does_not_block_newer_terminal_run() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn mapping_failure_retains_original_and_fails_required_gate_without_retry()
+-> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let files = write_run_inputs(
+        "mapping_failure",
+        &fixture.agent.url,
+        SENTIMENT_EVALUATOR_REF,
+        1,
+        CaseMode::MappingFailure,
+    )?;
+    let profile = fs::read_to_string(&files.profile)?.replace("max_attempts: 1", "max_attempts: 3");
+    fs::write(&files.profile, profile)?;
+    let created = run_vigilo_json(
+        &fixture.config,
+        PRIMARY_ALIAS,
+        "single-default",
+        [
+            "run",
+            "create",
+            "--profile-file",
+            path_arg(&files.profile)?,
+            "--dataset-file",
+            path_arg(&files.dataset)?,
+        ],
+    )?;
+    let run = Uuid::parse_str(created["data"]["run_id"].as_str().unwrap())?;
+    let status = drive_run_to_status(
+        &fixture,
+        "mapping failure",
+        PRIMARY_ALIAS,
+        "single-default",
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(status["data"]["gate_status"], "fail");
+    let attempts: Vec<(i32, Value, Vec<u8>)> = sqlx::query_as("SELECT attempt_no, response_evidence, response_evidence_bytes FROM execution_attempts WHERE run_id=$1")
+        .bind(run).fetch_all(&fixture.primary).await?;
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].0, 1);
+    assert_eq!(attempts[0].2, b"{malformed");
+    assert!(attempts[0].1["items"].is_null());
+    assert!(attempts[0].1["mapping_error"].is_string());
+    let errors: i64 = sqlx::query_scalar("SELECT count(*) FROM evaluator_results WHERE run_id=$1 AND error_code='response_mapping_error'")
+        .bind(run).fetch_one(&fixture.primary).await?;
+    assert_eq!(errors, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn inline_harnesses_score_only_evidence_from_the_requested_target() -> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    for (kind, name, valid) in [
+        ("direct_probe", "mock-agent", true),
+        ("delegated_trial", "mock-agent", true),
+        ("delegated_trial", "different-target", false),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let profile_path = dir.path().join("profile.json");
+        let dataset_path = dir.path().join("dataset.yaml");
+        let mut profile: Value = serde_yaml::from_str(&profile_yaml(
+            "inline_harness",
+            &fixture.agent.url,
+            SENTIMENT_EVALUATOR_REF,
+        ))?;
+        profile["agent"]["name"] = json!(name);
+        profile["harness"]["kind"] = json!(kind);
+        if kind == "direct_probe" {
+            profile["agent"]["config"]["request_format"] = json!("native");
+        }
+        fs::write(&profile_path, serde_json::to_vec(&profile)?)?;
+        fs::write(&dataset_path, dataset_yaml(1, CaseMode::Passing))?;
+        let created = run_vigilo_json(
+            &fixture.config,
+            SHARD_ALIAS,
+            "single-default",
+            [
+                "run",
+                "create",
+                "--profile-file",
+                path_arg(&profile_path)?,
+                "--dataset-file",
+                path_arg(&dataset_path)?,
+            ],
+        )?;
+        let run: Uuid = created["data"]["run_id"].as_str().unwrap().parse()?;
+        let status = drive_run_to_status(
+            &fixture,
+            kind,
+            SHARD_ALIAS,
+            "single-default",
+            run,
+            "completed",
+        )
+        .await?;
+        assert_eq!(
+            status["data"]["gate_status"],
+            if valid { "pass" } else { "fail" }
+        );
+        let attempt: (String, Vec<u8>) = sqlx::query_as(
+            "SELECT status::text, response_evidence_bytes FROM execution_attempts WHERE run_id=$1",
+        )
+        .bind(run)
+        .fetch_one(&fixture.shard)
+        .await?;
+        let scores: Vec<Option<f64>> = sqlx::query_scalar(
+            "SELECT aggregate_score::double precision FROM execution_aggregates WHERE run_id=$1",
+        )
+        .bind(run)
+        .fetch_all(&fixture.shard)
+        .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM evaluator_results WHERE run_id=$1")
+                .bind(run)
+                .fetch_one(&fixture.shard)
+                .await?;
+        if valid {
+            assert_eq!(attempt.0, "completed");
+            assert_eq!(
+                attempt.1,
+                br#"{"text":"good reliable response"}good reliable response"#
+            );
+            assert_eq!(scores, [Some(1.0)]);
+            assert_eq!(count, 1);
+        } else {
+            assert_eq!(attempt.0, "failed_agent_call");
+            assert!(attempt.1.is_empty());
+            assert!(scores.iter().all(Option::is_none));
+            assert_eq!(count, 0);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn agent_failure_completes_run_with_failed_gate() -> anyhow::Result<()> {
     let Some(fixture) = E2eFixture::setup().await? else {
         return Ok(());
@@ -433,6 +723,128 @@ async fn agent_failure_completes_run_with_failed_gate() -> anyhow::Result<()> {
         1
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn durable_control_survives_submission_disconnect_and_resumes_routed_work()
+-> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "controlled",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    let client = vigilo::operations::Client::new(vigilo::operations::Config::new(
+        fixture.config.primary_url.clone(),
+    ))?;
+    let paused = client
+        .control_run(run, vigilo::operations::ExecutionControl::Paused)
+        .await?;
+    assert_eq!(paused.revision, 1);
+    assert_eq!(paused.applied_placement_count, 0);
+    drop(client);
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+    let paused:bool=sqlx::query_scalar("SELECT bool_and(execution_control='paused' AND control_revision=1 AND status='pending') FROM run_chunks WHERE run_id=$1").bind(run).fetch_one(&fixture.shard).await?;
+    assert!(paused);
+    assert_eq!(
+        outbox_event_count(&fixture.shard, run, "run.chunk.ready").await?,
+        0
+    );
+    let client = vigilo::operations::Client::new(vigilo::operations::Config::new(
+        fixture.config.primary_url.clone(),
+    ))?;
+    assert_eq!(
+        client
+            .control_run(run, vigilo::operations::ExecutionControl::Enabled)
+            .await?
+            .revision,
+        2
+    );
+    let result = drive_run_to_status(
+        &fixture,
+        "control resume",
+        SHARD_ALIAS,
+        "single-default",
+        run,
+        "completed",
+    )
+    .await?;
+    assert_eq!(result["data"]["gate_status"], "pass");
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancellation_delivery_failure_remains_pending_and_coordinator_retries()
+-> anyhow::Result<()> {
+    let Some(fixture) = E2eFixture::setup().await? else {
+        return Ok(());
+    };
+    let run = create_run(
+        &fixture.config,
+        RunCreateInput {
+            default_execution_alias: SHARD_ALIAS,
+            shard_assignment_policy: "single-default",
+            agent_url: &fixture.agent.url,
+            profile_id: "control_retry",
+            case_count: 1,
+            case_mode: CaseMode::Passing,
+            evaluator_ref: SENTIMENT_EVALUATOR_REF,
+        },
+    )?;
+    sqlx::raw_sql("CREATE FUNCTION reject_control_delivery() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.control_revision>OLD.control_revision THEN RAISE EXCEPTION 'control delivery unavailable'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_control_delivery BEFORE UPDATE ON runs FOR EACH ROW EXECUTE FUNCTION reject_control_delivery();").execute(&fixture.shard).await?;
+    let result = run_vigilo_json(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["run", "cancel", &run.to_string()],
+    )?;
+    assert_eq!(result["meta"]["terminal"], false);
+    assert_eq!(
+        run_chunk_status_count(&fixture.shard, run, "cancelled").await?,
+        0
+    );
+    let outstanding: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM run_control_deliveries WHERE run_id=$1 AND applied_at IS NULL",
+    )
+    .bind(run)
+    .fetch_one(&fixture.primary)
+    .await?;
+    assert_eq!(outstanding, 1);
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_control_delivery ON runs; DROP FUNCTION reject_control_delivery();",
+    )
+    .execute(&fixture.shard)
+    .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["coordinator", "once"],
+    )?;
+    assert_eq!(
+        run_chunk_status_count(&fixture.shard, run, "cancelled").await?,
+        1
+    );
+    assert_eq!(
+        outbox_event_count(&fixture.primary, run, "run.cancelled").await?,
+        1
+    );
     Ok(())
 }
 
@@ -472,6 +884,30 @@ async fn run_cancellation_updates_routed_storage() -> anyhow::Result<()> {
     assert_eq!(
         outbox_event_count(&fixture.shard, cancel_run_id, "run.cancelled").await?,
         0
+    );
+
+    let state = || {
+        sqlx::query_as::<_, (Value, Value)>(
+            "SELECT r.summary,e.payload FROM runs r JOIN outbox_events e ON e.aggregate_id=r.id
+             WHERE r.id=$1 AND e.event_type='run.cancelled'",
+        )
+        .bind(cancel_run_id)
+        .fetch_one(&fixture.primary)
+    };
+    let committed = state().await?;
+    assert_eq!(committed.0["chunks_cancelled_by_request"], 1);
+    assert_eq!(committed.1["chunks_cancelled"], 1);
+    // Retry through a fresh process as if the first reply had been lost.
+    run_vigilo_ok(
+        &fixture.config,
+        SHARD_ALIAS,
+        "single-default",
+        ["run", "cancel", &cancel_run_id.to_string()],
+    )?;
+    assert_eq!(state().await?, committed);
+    assert_eq!(
+        outbox_event_count(&fixture.primary, cancel_run_id, "run.cancelled").await?,
+        1
     );
 
     Ok(())
@@ -825,16 +1261,61 @@ fn unavailable_postgres_url() -> anyhow::Result<String> {
     Ok(format!("postgres://vigilo@{address}/vigilo"))
 }
 
-fn handle_agent_request(mut stream: TcpStream) -> anyhow::Result<()> {
+fn read_agent_request(stream: &mut TcpStream) -> anyhow::Result<String> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut buffer = [0u8; 16 * 1024];
-    let read = stream.read(&mut buffer)?;
-    let request = String::from_utf8_lossy(&buffer[..read]);
+    let mut read = 0;
+    loop {
+        let count = stream.read(&mut buffer[read..])?;
+        anyhow::ensure!(count > 0, "incomplete mock HTTP request");
+        read += count;
+        let request = String::from_utf8_lossy(&buffer[..read]);
+        if let Some((head, body)) = request.split_once("\r\n\r\n") {
+            let length = head
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value.trim().parse::<usize>())
+                .transpose()?
+                .unwrap_or_default();
+            if body.len() >= length {
+                break;
+            }
+        }
+    }
+    Ok(String::from_utf8_lossy(&buffer[..read]).into_owned())
+}
 
-    let (status, body) = if request.contains("force-agent-error") {
+fn handle_agent_request(mut stream: TcpStream) -> anyhow::Result<()> {
+    let request = read_agent_request(&mut stream)?;
+
+    let (status, body) = if request.contains("requested_agent") {
+        use vigilo::invocation::wire::Submission;
+        let (_, body) = request
+            .split_once("\r\n\r\n")
+            .ok_or_else(|| anyhow::anyhow!("missing request body"))?;
+        let submission = Submission::decode(body.as_bytes(), 16 * 1024, false)?;
+        anyhow::ensure!(submission.case.input["user_message"].is_string());
+        (
+            "HTTP/1.1 200 OK",
+            json!({
+                "schema_version":"1.0.0", "invocation_id":submission.invocation_id,
+                "status":"completed", "executed_agent":{"provider":"integration","name":"mock-agent","version":"1.0.0"},
+                "evidence":{"content_type":"application/json","encoding":"utf8","body":r#"{"text":"good reliable response"}"#}
+            }).to_string(),
+        )
+    } else if request.contains("force-agent-error") {
         (
             "HTTP/1.1 500 Internal Server Error",
             json!({"error": "forced integration agent failure"}).to_string(),
         )
+    } else if request.contains("force-resource-response") {
+        (
+            "HTTP/1.1 200 OK",
+            json!({"text":"good reliable response","data":"AP8="}).to_string(),
+        )
+    } else if request.contains("force-mapping-error") {
+        ("HTTP/1.1 200 OK", "{malformed".to_string())
     } else {
         (
             "HTTP/1.1 200 OK",
@@ -1100,6 +1581,7 @@ async fn expire_chunk_lease(primary: &PgPool, run_id: Uuid) -> anyhow::Result<()
 
 #[derive(Debug, Clone, Copy)]
 enum CaseMode {
+    MappingFailure,
     Passing,
     AgentFailure,
 }
@@ -1577,8 +2059,20 @@ fn run_vigilo_output<'a>(
     shard_assignment_policy: &str,
     args: impl IntoIterator<Item = &'a str>,
 ) -> anyhow::Result<Output> {
-    let args = args.into_iter().collect::<Vec<_>>();
-    Ok(Command::new(env!("CARGO_BIN_EXE_vigilo"))
+    Ok(
+        vigilo_command(config, default_execution_alias, shard_assignment_policy)
+            .args(args)
+            .output()?,
+    )
+}
+
+fn vigilo_command(
+    config: &IntegrationConfig,
+    default_execution_alias: &str,
+    shard_assignment_policy: &str,
+) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_vigilo"));
+    command
         .env(PRIMARY_DATABASE_URL_ENV, &config.primary_url)
         .env(SHARD_DATABASE_URL_ENV, &config.shard_url)
         .env("MESSAGING_URL", &config.messaging_url)
@@ -1588,9 +2082,8 @@ fn run_vigilo_output<'a>(
             default_execution_alias,
         )
         .env("VIGILO_SHARD_ASSIGNMENT_POLICY", shard_assignment_policy)
-        .args(["-q", "-f", "json"])
-        .args(&args)
-        .output()?)
+        .args(["-q", "-f", "json"]);
+    command
 }
 
 struct RunInputFiles {
@@ -1647,6 +2140,26 @@ persistence:
 agent:
   provider: integration
   name: mock-agent
+  response:
+    schema_version: 1.0.0
+    interpretation:
+      format: json
+      mapping:
+        items:
+          - mode: single
+            item:
+              type: message
+              content:
+                - media_type: text/plain
+                  source:
+                    representation: inline_text
+                    selection:
+                      pointer: /text
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
   http:
     url: {agent_url}
 case_groups:
@@ -1687,6 +2200,7 @@ fn dataset_yaml(case_count: usize, case_mode: CaseMode) -> String {
         let prompt = match case_mode {
             CaseMode::Passing => format!("case {ordinal}: this is good and reliable"),
             CaseMode::AgentFailure => "force-agent-error".to_string(),
+            CaseMode::MappingFailure => "force-mapping-error".to_string(),
         };
         raw.push_str(&format!(
             r#"  - id: {case_id}
@@ -1782,10 +2296,10 @@ async fn run_creation_placement_state(
     db: &PgPool,
     run_id: Uuid,
     database_alias: &str,
-) -> anyhow::Result<(String, i32)> {
-    Ok(sqlx::query_as::<_, (String, i32)>(
+) -> anyhow::Result<(String, i64)> {
+    Ok(sqlx::query_as::<_, (String, i64)>(
         r#"
-        SELECT CASE WHEN admission_cursor=chunk_cursor THEN 'seeded' ELSE 'pending' END, generation::int
+        SELECT CASE WHEN admission_cursor=chunk_cursor THEN 'seeded' ELSE 'pending' END, generation
         FROM run_plans
         WHERE run_id = $1::uuid
           AND EXISTS(SELECT 1 FROM run_plan_shards WHERE run_id=$1 AND database_alias=$2)

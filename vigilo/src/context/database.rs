@@ -3,9 +3,11 @@
 //! Commands call this module through
 //! [`crate::context::Context::dbr`] when they first need database
 //! access. This context initializes the database router once, then the router
-//! lazily initializes its control pool and per-placement pools. New aliases are
-//! discovered on first use when their secret is already in the environment;
-//! existing connection parameters remain fixed for the process lifetime.
+//! lazily initializes standalone control and per-placement pools. Standalone
+//! aliases can resolve configured environment credentials. Fixed binding routers
+//! instead retain exactly the supplied authority pools and placement purposes;
+//! absent bindings fail without environment or operator fallback. Placement
+//! lifecycle checks remain live while connection bindings stay fixed.
 //! Runtime commands may attach one operation deadline policy; the router then
 //! applies its derived statement and lock limits to every new pool connection.
 //!
@@ -16,7 +18,10 @@
 mod circuit_breaker;
 
 use std::{
-    collections::HashMap,
+    collections::{
+        BTreeMap,
+        HashMap,
+    },
     sync::Arc,
     time::{
         Duration,
@@ -35,6 +40,7 @@ pub(crate) use circuit_breaker::{
 };
 use moka::future::Cache;
 use sqlx::{
+    Executor,
     PgPool,
     Postgres,
     Transaction,
@@ -62,6 +68,9 @@ use crate::{
     },
     models::{
         database_placement::{
+            DATABASE_PLACEMENT_ROLE_CONTROL,
+            DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
+            DATABASE_PLACEMENT_ROLE_SHARD,
             DATABASE_PLACEMENT_STATUS_ACTIVE,
             DATABASE_PLACEMENT_STATUS_PROVISIONING,
             DEFAULT_DATABASE_URL_ENV,
@@ -254,22 +263,33 @@ impl Config {
 
 pub(crate) struct Context {
     pub(crate) config: Config,
-    pub(crate) cell: OnceCell<DatabaseRouter>,
+    pub(crate) cell: OnceCell<Arc<DatabaseRouter>>,
 }
 
 impl Context {
     pub(crate) async fn get(&self) -> anyhow::Result<&DatabaseRouter> {
         self.cell
             .get_or_try_init(|| async {
-                Ok::<DatabaseRouter, anyhow::Error>(DatabaseRouter::new(self.config.clone()))
+                Ok::<Arc<DatabaseRouter>, anyhow::Error>(Arc::new(DatabaseRouter::new(
+                    self.config.clone(),
+                )))
             })
             .await
+            .map(Arc::as_ref)
     }
+}
+
+/// One supplied pool and its declared placement capability. Credentials and
+/// connection validation remain owned by the fixed binding domain.
+pub(crate) struct FixedPlacementPool {
+    pub(crate) pool: PgPool,
+    pub(crate) role: &'static str,
 }
 
 /// Resolves control and execution database pools from placement metadata.
 pub(crate) struct DatabaseRouter {
     pub(crate) uri: String,
+    fixed_pools: Option<BTreeMap<String, FixedPlacementPool>>,
     pub(crate) max_connections_per_pool: u32,
     pub(crate) acquire_timeout: Duration,
     pub(crate) placement_config: PlacementConfig,
@@ -293,6 +313,29 @@ pub(crate) struct ExecutionRoute {
     pub(crate) pool: PgPool,
 }
 
+/// Dispatch already owns a control connection. A colocated placement uses that
+/// transaction for its writes, while a separate placement needs its own pool.
+pub(crate) enum DispatchExecutionRoute {
+    Colocated(ShardPlacement),
+    Separate(ExecutionRoute),
+}
+
+impl DispatchExecutionRoute {
+    pub(crate) fn placement(&self) -> &ShardPlacement {
+        match self {
+            Self::Colocated(placement) => placement,
+            Self::Separate(route) => &route.placement,
+        }
+    }
+}
+
+enum AdmissionControl<'a> {
+    Colocated,
+    Separate(&'a mut sqlx::PgConnection),
+    #[cfg(test)]
+    Unclaimed,
+}
+
 /// Message-carried route hint paired with its process-local execution pool.
 #[derive(Clone)]
 pub(crate) struct ExecutionWriteRoute {
@@ -301,9 +344,15 @@ pub(crate) struct ExecutionWriteRoute {
 }
 
 impl DatabaseRouter {
-    fn new(config: Config) -> Self {
+    /// Standalone operators own placement discovery. Fixed-role hosts supply their own delivery adapters.
+    pub(crate) fn supports_standalone_polling(&self) -> bool {
+        self.fixed_pools.is_none()
+    }
+
+    pub(crate) fn new(config: Config) -> Self {
         Self {
             uri: config.uri,
+            fixed_pools: None,
             max_connections_per_pool: config.max_connections_per_pool,
             acquire_timeout: config.acquire_timeout,
             placement_config: config.placement_config,
@@ -318,11 +367,89 @@ impl DatabaseRouter {
         }
     }
 
+    /// Internal fixed-credential construction. Supplied pools are authoritative;
+    /// no URI or environment fallback exists in this mode. Construction is lazy
+    /// and the pool's connection guard remains responsible for role validation.
+    pub(crate) fn from_fixed_pools(
+        config: Config,
+        pools: BTreeMap<String, FixedPlacementPool>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            config.uri.is_empty(),
+            "fixed database bindings cannot use an operator URI"
+        );
+        anyhow::ensure!(
+            !pools.is_empty() && pools.len() <= 129,
+            "invalid fixed database binding count"
+        );
+        for (alias, binding) in &pools {
+            anyhow::ensure!(
+                normalize_alias(alias.clone(), "fixed database alias")? == *alias
+                    && matches!(
+                        binding.role,
+                        DATABASE_PLACEMENT_ROLE_CONTROL
+                            | DATABASE_PLACEMENT_ROLE_SHARD
+                            | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+                    ),
+                "invalid fixed database binding"
+            );
+        }
+        let control = pools
+            .get(&config.placement_config.control_database_alias)
+            .ok_or_else(|| anyhow::anyhow!("missing fixed database binding for control"))?;
+        anyhow::ensure!(
+            matches!(
+                control.role,
+                DATABASE_PLACEMENT_ROLE_CONTROL | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+            ),
+            "fixed control database binding has incompatible purpose"
+        );
+        let execution = pools
+            .get(&config.placement_config.default_shard_database_alias)
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing fixed database binding for default execution")
+            })?;
+        anyhow::ensure!(
+            matches!(
+                execution.role,
+                DATABASE_PLACEMENT_ROLE_SHARD | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+            ),
+            "fixed execution database binding has incompatible purpose"
+        );
+        let mut router = Self::new(config);
+        router.fixed_pools = Some(pools);
+        Ok(router)
+    }
+
+    /// Match supplied capability against current placement metadata without
+    /// consulting the metadata's standalone credential-variable reference.
+    fn fixed_placement_pool(&self, placement: &DatabasePlacement) -> anyhow::Result<&PgPool> {
+        let binding = self
+            .fixed_pools
+            .as_ref()
+            .and_then(|p| p.get(&placement.alias))
+            .ok_or_else(|| {
+                anyhow::anyhow!("missing fixed database binding for {}", placement.alias)
+            })?;
+        anyhow::ensure!(
+            binding.role == placement.role,
+            "fixed database binding purpose differs from placement {}",
+            placement.alias
+        );
+        Ok(&binding.pool)
+    }
+
     /// Returns the control database pool.
     ///
     /// The pool is initialized on first use, not when the database router is
     /// retrieved from [`crate::context::Context::dbr`].
     pub async fn control(&self) -> anyhow::Result<&PgPool> {
+        if let Some(pools) = &self.fixed_pools {
+            return pools
+                .get(self.control_database_alias())
+                .map(|binding| &binding.pool)
+                .ok_or_else(|| anyhow::anyhow!("missing fixed database binding for control"));
+        }
         let started = Instant::now();
         self.control_pool
             .get_or_try_init(|| async {
@@ -333,7 +460,7 @@ impl DatabaseRouter {
                     self.acquire_timeout,
                     self.operation_timeout_config,
                 )
-                .connect(&self.uri)
+                .connect_with(standalone_connect_options(&self.uri)?)
                 .await
                 .map_err(|error| {
                     let message = format!("database connection failed: {error}");
@@ -523,18 +650,12 @@ impl DatabaseRouter {
         placement: &DatabasePlacement,
         started: Instant,
     ) -> anyhow::Result<PgPool> {
+        if self.fixed_pools.is_some() {
+            return Ok(self.fixed_placement_pool(placement)?.clone());
+        }
         let pools = self.placement_pools().await?;
         if placement.alias == self.placement_config.control_database_alias {
-            if let Some(configured) = pools.pools_by_alias.get(&placement.alias)
-                && configured.database_url_env != placement.database_url_env
-            {
-                anyhow::bail!(
-                    "database placement alias {} changed database_url_env from {} to {}; restart Vigilo to load new connection parameters",
-                    placement.alias,
-                    configured.database_url_env,
-                    placement.database_url_env
-                );
-            }
+            self.validate_control_pool_reference(placement)?;
             let pool = self.control().await?;
             debug!(
                 database_alias = %placement.alias,
@@ -698,7 +819,9 @@ impl DatabaseRouter {
         self.execution_database(&placement.database_alias).await
     }
 
-    /// Resolves an active execution route together with its current fence.
+    /// Fixture resolver for unscoped operator routing. Runtime dispatch uses its
+    /// scoped snapshot; exceptional workers require verified local identity.
+    #[cfg(test)]
     pub(crate) async fn execution_route(
         &self,
         run_id: Uuid,
@@ -714,6 +837,101 @@ impl DatabaseRouter {
             .into());
         }
 
+        let pool = self
+            .execution_database(&placement.database_alias)
+            .await?
+            .clone();
+        Ok(ExecutionRoute { placement, pool })
+    }
+
+    /// Resolve records read on the claimed dispatch transaction. Colocated
+    /// dispatch can proceed immediately without initializing the standalone
+    /// placement cache or borrowing another control connection.
+    pub(crate) async fn execution_route_from_placements(
+        &self,
+        placement: &ShardPlacement,
+        database: &DatabasePlacement,
+    ) -> anyhow::Result<DispatchExecutionRoute> {
+        validate_run_shard(placement.run_shard)?;
+        anyhow::ensure!(
+            placement.database_alias == database.alias,
+            "dispatch placement identity mismatch"
+        );
+        if !placement.is_dispatchable() {
+            return Err(ExecutionRouteError::NonDispatchableShardPlacement {
+                run_id: placement.run_id,
+                run_shard: placement.run_shard,
+                status: placement.status.clone(),
+            }
+            .into());
+        }
+        anyhow::ensure!(
+            database.can_serve_owned_shards(),
+            "dispatch database cannot serve owned shards"
+        );
+        require_shard_capable_placement(database)?;
+        if database.alias == self.control_database_alias() {
+            if self.fixed_pools.is_some() {
+                self.fixed_placement_pool(database)?;
+            } else {
+                self.validate_control_pool_reference(database)?;
+            }
+            return Ok(DispatchExecutionRoute::Colocated(placement.clone()));
+        }
+
+        let pool = self
+            .resolve_placement_pool(database, Instant::now())
+            .await?;
+        Ok(DispatchExecutionRoute::Separate(ExecutionRoute {
+            placement: placement.clone(),
+            pool,
+        }))
+    }
+
+    fn validate_control_pool_reference(&self, placement: &DatabasePlacement) -> anyhow::Result<()> {
+        if let Some(pools) = self.placement_pools.get()
+            && let Some(configured) = pools.pools_by_alias.get(&placement.alias)
+            && configured.database_url_env != placement.database_url_env
+        {
+            anyhow::bail!(
+                "database placement alias {} changed database_url_env from {} to {}; restart Vigilo to load new connection parameters",
+                placement.alias,
+                configured.database_url_env,
+                placement.database_url_env
+            );
+        }
+        Ok(())
+    }
+
+    /// Refresh exceptional routing under identity verified at the source. The
+    /// control transaction ends before resolving an execution pool, including
+    /// when control and execution share a single-connection pool.
+    pub(crate) async fn execution_route_for_verified_worker(
+        &self,
+        identity: crate::db::scope::VerifiedWorkerIdentity,
+    ) -> anyhow::Result<ExecutionRoute> {
+        let db = self.control().await?;
+        let mut tx = db.begin().await?;
+        crate::db::scope::set_system(&mut tx, identity.tenant_id(), identity.run_id()).await?;
+        let placement = shard_placements::select_shard_placement_with(
+            &mut *tx,
+            identity.run_id(),
+            identity.run_shard(),
+        )
+        .await?
+        .ok_or(ExecutionRouteError::MissingShardPlacement {
+            run_id: identity.run_id(),
+            run_shard: identity.run_shard(),
+        })?;
+        tx.commit().await?;
+        if !placement.is_dispatchable() {
+            return Err(ExecutionRouteError::NonDispatchableShardPlacement {
+                run_id: identity.run_id(),
+                run_shard: identity.run_shard(),
+                status: placement.status,
+            }
+            .into());
+        }
         let pool = self
             .execution_database(&placement.database_alias)
             .await?
@@ -742,7 +960,20 @@ impl DatabaseRouter {
         Ok(ExecutionWriteRoute { hint, pool })
     }
 
-    async fn execution_database_from_hint(&self, alias: &str) -> anyhow::Result<PgPool> {
+    pub(crate) async fn execution_database_from_hint(&self, alias: &str) -> anyhow::Result<PgPool> {
+        if let Some(pools) = &self.fixed_pools {
+            let binding = pools
+                .get(alias)
+                .ok_or_else(|| anyhow::anyhow!("missing fixed database binding for {alias}"))?;
+            anyhow::ensure!(
+                matches!(
+                    binding.role,
+                    DATABASE_PLACEMENT_ROLE_SHARD | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+                ),
+                "fixed database binding for {alias} cannot serve execution work"
+            );
+            return Ok(binding.pool.clone());
+        }
         if alias == self.control_database_alias() {
             return Ok(self.control().await?.clone());
         }
@@ -799,11 +1030,9 @@ impl DatabaseRouter {
             .clone())
     }
 
-    /// Acquires write admission for a previously resolved route.
-    ///
-    /// Movement takes the exclusive form of the same advisory lock. Holding
-    /// the shared lock from local epoch validation through the write closes
-    /// the cutover gap after pool resolution.
+    /// Acquires write admission for a previously resolved worker route.
+    /// The shared movement fence remains held through the caller's transaction.
+    #[cfg(test)]
     pub(crate) async fn begin_execution_admission(
         &self,
         route: &ExecutionRoute,
@@ -815,15 +1044,69 @@ impl DatabaseRouter {
             route.placement.run_shard,
         )
         .await?;
+        self.validate_or_repair_admission(&route.placement, &mut tx, AdmissionControl::Unclaimed)
+            .await?;
+        Ok(tx)
+    }
 
+    /// Acquires admission on a separate execution database. The already-held
+    /// control claim supplies its trusted identity and any missing route record.
+    pub(crate) async fn begin_dispatch_admission(
+        &self,
+        route: &ExecutionRoute,
+        tenant_id: Uuid,
+        control: &mut sqlx::PgConnection,
+    ) -> anyhow::Result<Transaction<'static, Postgres>> {
+        let mut tx = route.pool.begin().await?;
+        // Scope precedes protected reads. Canonical UUIDs and the typed shard
+        // let us submit the scope and fence without an extra round trip.
+        let setup = format!(
+            "{} SELECT pg_advisory_xact_lock_shared(hashtextextended('{}'::uuid::text, {}::bigint))",
+            crate::db::scope::system_settings(tenant_id, route.placement.run_id),
+            route.placement.run_id,
+            route.placement.run_shard,
+        );
+        (&mut *tx).execute(setup.as_str()).await?;
+        self.validate_or_repair_admission(
+            &route.placement,
+            &mut tx,
+            AdmissionControl::Separate(control),
+        )
+        .await?;
+        Ok(tx)
+    }
+
+    /// Retains the movement fence on the already-scoped control transaction
+    /// when that transaction also owns the execution writes.
+    pub(crate) async fn admit_colocated_dispatch(
+        &self,
+        placement: &ShardPlacement,
+        control: &mut Transaction<'static, Postgres>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            placement.database_alias == self.control_database_alias(),
+            "dispatch placement is not colocated with control"
+        );
+        crate::db::shard_write_fence::lock_shared(control, placement.run_id, placement.run_shard)
+            .await?;
+        self.validate_or_repair_admission(placement, control, AdmissionControl::Colocated)
+            .await
+    }
+
+    async fn validate_or_repair_admission(
+        &self,
+        placement: &ShardPlacement,
+        tx: &mut Transaction<'static, Postgres>,
+        control: AdmissionControl<'_>,
+    ) -> anyhow::Result<()> {
         let hint = LocalShardRouteHint {
-            run_id: route.placement.run_id,
-            run_shard: route.placement.run_shard,
-            database_alias: route.placement.database_alias.clone(),
-            write_epoch: route.placement.write_epoch,
+            run_id: placement.run_id,
+            run_shard: placement.run_shard,
+            database_alias: placement.database_alias.clone(),
+            write_epoch: placement.write_epoch,
         };
         let validation =
-            validate_local_shard_admission(&mut *tx, &hint, LocalShardWriteKind::NewWork).await;
+            validate_local_shard_admission(&mut **tx, &hint, LocalShardWriteKind::NewWork).await;
         if let Err(error) = validation {
             if !matches!(
                 error.downcast_ref::<LocalShardAdmissionError>(),
@@ -832,17 +1115,41 @@ impl DatabaseRouter {
                 return Err(error);
             }
 
-            // Upgrade/new-placement repair path only. The shared local fence
-            // prevents movement from changing admission while control metadata
-            // is re-read and the missing row is created.
-            let current = self
-                .select_control_shard_placement(hint.run_id, hint.run_shard)
-                .await?;
-            if !route.placement.same_route_fence(&current) || !current.is_dispatchable() {
+            // Repair a missing local admission under the shared movement fence.
+            // Reuse the claimed control transaction and its identity; a pool
+            // lookup would lose scope and could require a second credential.
+            let current = match control {
+                AdmissionControl::Colocated => {
+                    shard_placements::select_shard_placement_with(
+                        &mut **tx,
+                        hint.run_id,
+                        hint.run_shard,
+                    )
+                    .await?
+                }
+                AdmissionControl::Separate(control) => {
+                    shard_placements::select_shard_placement_with(
+                        control,
+                        hint.run_id,
+                        hint.run_shard,
+                    )
+                    .await?
+                }
+                #[cfg(test)]
+                AdmissionControl::Unclaimed => Some(
+                    self.select_control_shard_placement(hint.run_id, hint.run_shard)
+                        .await?,
+                ),
+            }
+            .ok_or(ExecutionRouteError::MissingShardPlacement {
+                run_id: hint.run_id,
+                run_shard: hint.run_shard,
+            })?;
+            if !placement.same_route_fence(&current) || !current.is_dispatchable() {
                 return Err(error);
             }
             upsert_local_shard_admission(
-                &mut *tx,
+                &mut **tx,
                 LocalShardAdmissionDraft {
                     run_id: hint.run_id,
                     run_shard: hint.run_shard,
@@ -856,19 +1163,55 @@ impl DatabaseRouter {
             .await?;
         }
 
-        Ok(tx)
+        Ok(())
     }
 
-    /// Acquires local write admission for a message-carried route hint.
+    /// Verifies queue identity before protected local admission reads. The lookup
+    /// retains the shared movement fence until the caller commits the chunk claim.
     pub(crate) async fn begin_execution_write_admission(
         &self,
         route: &ExecutionWriteRoute,
-    ) -> anyhow::Result<Transaction<'static, Postgres>> {
+        chunk_id: Uuid,
+        identity: Option<&crate::db::workflows::chunk_processing::AcceptedWork<'_>>,
+    ) -> anyhow::Result<Option<Transaction<'static, Postgres>>> {
+        #[cfg(not(test))]
+        anyhow::ensure!(identity.is_some(), "accepted work identity is required");
         let mut tx = route.pool.begin().await?;
-        crate::db::shard_write_fence::lock_shared(&mut tx, route.hint.run_id, route.hint.run_shard)
+        let verified = if let Some(identity) = identity {
+            let Some(verified) = crate::db::scope::verify_worker(
+                &mut tx,
+                route.hint.run_id,
+                route.hint.run_shard,
+                chunk_id,
+                identity.tenant_id,
+                identity.plan_digest,
+            )
+            .await?
+            else {
+                tx.rollback().await?;
+                return Ok(None);
+            };
+            Some(verified)
+        } else {
+            // Unscoped fixture setup only; production requires explicit identity.
+            crate::db::shard_write_fence::lock_shared(
+                &mut tx,
+                route.hint.run_id,
+                route.hint.run_shard,
+            )
             .await?;
-        validate_local_shard_admission(&mut *tx, &route.hint, LocalShardWriteKind::NewWork).await?;
-        Ok(tx)
+            None
+        };
+        if let Err(error) =
+            validate_local_shard_admission(&mut *tx, &route.hint, LocalShardWriteKind::NewWork)
+                .await
+        {
+            return Err(match verified {
+                Some(verified) => error.context(verified),
+                None => error,
+            });
+        }
+        Ok(Some(tx))
     }
 
     /// Acquires shared admission for cleanup across routes on one placement.
@@ -879,6 +1222,7 @@ impl DatabaseRouter {
     pub(crate) async fn begin_execution_cleanup_admission(
         &self,
         routes: &[ExecutionRoute],
+        tenant_id: Uuid,
     ) -> anyhow::Result<Transaction<'static, Postgres>> {
         let Some(first) = routes.first() else {
             anyhow::bail!("execution cleanup admission requires at least one route");
@@ -893,6 +1237,7 @@ impl DatabaseRouter {
         let mut ordered = routes.iter().collect::<Vec<_>>();
         ordered.sort_by_key(|route| route.placement.run_shard);
         let mut tx = first.pool.begin().await?;
+        crate::db::scope::set_system(&mut tx, tenant_id, first.placement.run_id).await?;
         for route in &ordered {
             crate::db::shard_write_fence::lock_shared(
                 &mut tx,
@@ -1013,6 +1358,21 @@ impl DatabaseRouter {
         shard_placements::list_shard_placements_for_run(db, run_id).await
     }
 
+    /// Read placements under trusted discovered ownership, releasing the control
+    /// transaction before any remote database work starts.
+    pub(crate) async fn execution_placements_for_run_with_context(
+        &self,
+        run_id: Uuid,
+        tenant_id: Uuid,
+    ) -> anyhow::Result<Vec<ShardPlacement>> {
+        let db = self.control().await?;
+        let mut tx = db.begin().await?;
+        crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
+        let rows = shard_placements::list_shard_placements_for_run(&mut *tx, run_id).await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
     /// Returns all readable execution routes for a run.
     ///
     /// Read paths such as results/export can read from `moving` or `draining`
@@ -1042,15 +1402,36 @@ impl DatabaseRouter {
         &self,
         run_id: Uuid,
     ) -> anyhow::Result<Vec<ExecutionRoute>> {
-        let db = self.control().await?;
-        let placements = shard_placements::list_shard_placements_for_run(db, run_id).await?;
-        let mut routed = Vec::with_capacity(placements.len());
+        self.execution_read_routes_with_context(run_id, None).await
+    }
 
-        for placement in placements {
-            let pool = self
-                .execution_database(&placement.database_alias)
+    /// Resolve exact route fences under a trusted cleanup claim. Release the
+    /// control transaction before opening remote pools or performing cleanup.
+    pub(crate) async fn execution_read_routes_with_context(
+        &self,
+        run_id: Uuid,
+        tenant_id: Option<Uuid>,
+    ) -> anyhow::Result<Vec<ExecutionRoute>> {
+        let db = self.control().await?;
+        let placements = if let Some(tenant) = tenant_id {
+            self.execution_placements_for_run_with_context(run_id, tenant)
                 .await?
-                .clone();
+        } else {
+            shard_placements::list_shard_placements_for_run(db, run_id).await?
+        };
+        let mut routed = Vec::with_capacity(placements.len());
+        // Validate each physical alias live once for this read operation. Logical
+        // shards sharing a placement do not require duplicate catalog round trips.
+        // No validation survives this call; subsequent pages recheck availability.
+        let mut validated: BTreeMap<String, PgPool> = BTreeMap::new();
+        for placement in placements {
+            let pool = if let Some(pool) = validated.get(&placement.database_alias) {
+                pool.clone()
+            } else {
+                let pool = self.execution_database(&placement.database_alias).await?;
+                validated.insert(placement.database_alias.clone(), pool.clone());
+                pool
+            };
             debug!(
                 run_id = %run_id,
                 run_shard = placement.run_shard,
@@ -1083,6 +1464,10 @@ impl DatabaseRouter {
     }
 
     pub(crate) async fn validate_placement_config(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.fixed_pools.is_none(),
+            "placement setup requires the standalone operator domain"
+        );
         let db = self.control().await?;
         let placements = database_placements::list_serviceable_database_placements(db).await?;
 
@@ -1141,6 +1526,10 @@ impl DatabaseRouter {
     }
 
     fn resolve_database_url_env(&self, database_url_env: &str) -> anyhow::Result<String> {
+        anyhow::ensure!(
+            self.fixed_pools.is_none(),
+            "fixed database bindings do not resolve environment credentials"
+        );
         if database_url_env == DEFAULT_DATABASE_URL_ENV {
             return Ok(self.uri.clone());
         }
@@ -1154,11 +1543,18 @@ impl DatabaseRouter {
     }
 
     pub(crate) fn database_url_env_is_resolved(&self, database_url_env: &str) -> bool {
+        if self.fixed_pools.is_some() {
+            return false;
+        }
         database_url_env == DEFAULT_DATABASE_URL_ENV || std::env::var_os(database_url_env).is_some()
     }
 
     #[allow(dead_code)]
     async fn placement_pools(&self) -> anyhow::Result<&PlacementPools> {
+        anyhow::ensure!(
+            self.fixed_pools.is_none(),
+            "fixed database bindings cannot discover standalone pools"
+        );
         self.placement_pools
             .get_or_try_init(|| async {
                 let db = self.control().await?;
@@ -1274,7 +1670,7 @@ impl PlacementPool {
                     acquire_timeout,
                     operation_timeout_config,
                 )
-                .connect(database_url)
+                .connect_with(standalone_connect_options(database_url)?)
                 .await
                 .map_err(|error| {
                     let message = format!("database placement {alias} connection failed: {error}");
@@ -1283,6 +1679,17 @@ impl PlacementPool {
             })
             .await
     }
+}
+
+/// Establish the standalone identity in PostgreSQL's startup packet, without
+/// adding a SQL exchange. Restricted request pools must not use this constructor.
+fn standalone_connect_options(uri: &str) -> Result<sqlx::postgres::PgConnectOptions, sqlx::Error> {
+    use std::str::FromStr;
+    Ok(sqlx::postgres::PgConnectOptions::from_str(uri)?.options([
+        ("vigilo.tenant_id", "00000000-0000-0000-0000-000000000000"),
+        ("vigilo.actor_id", ""),
+        ("vigilo.run_id", ""),
+    ]))
 }
 
 fn runtime_pool_options(
@@ -1793,6 +2200,7 @@ mod tests {
             7,
             chunk_id,
             60,
+            None,
         )
         .await
         .unwrap_err();
@@ -1865,6 +2273,7 @@ mod tests {
             &database_router,
             &hinted_route,
             chunk_id,
+            None,
         )
         .await
         .unwrap();
@@ -2135,7 +2544,7 @@ mod tests {
             .await
             .unwrap();
         database_router
-            .begin_execution_cleanup_admission(&draining_routes)
+            .begin_execution_cleanup_admission(&draining_routes, Uuid::nil())
             .await
             .unwrap()
             .rollback()
@@ -2148,7 +2557,7 @@ mod tests {
             .await
             .unwrap();
         let error = database_router
-            .begin_execution_cleanup_admission(&moving_routes)
+            .begin_execution_cleanup_admission(&moving_routes, Uuid::nil())
             .await
             .unwrap_err();
 
@@ -2432,20 +2841,13 @@ mod tests {
     }
 
     fn database_router_with_control_pool_and_uri(pool: PgPool, uri: String) -> DatabaseRouter {
-        let database_router = DatabaseRouter {
+        let database_router = DatabaseRouter::new(Config::new(
             uri,
-            max_connections_per_pool: 5,
-            acquire_timeout: Duration::from_secs(10),
-            placement_config: PlacementConfig::default_single_database(),
-            circuit_breakers: circuit_breaker::DatabaseCircuitBreakers::new(
-                CircuitBreakerConfig::default(),
-            ),
-            operation_timeout_config: None,
-            control_pool: OnceCell::new(),
-            placement_pools: OnceCell::new(),
-            dynamic_placement_pools: Cache::builder().max_capacity(1_000).build(),
-            shard_placement_cache: new_shard_placement_cache(),
-        };
+            5,
+            std::time::Duration::from_secs(10),
+            CircuitBreakerConfig::default(),
+            PlacementConfig::default_single_database(),
+        ));
         assert!(database_router.control_pool.set(pool).is_ok());
         database_router
     }
@@ -2499,6 +2901,7 @@ mod tests {
         database_alias: &str,
         status: &str,
     ) {
+        crate::db::test_support::seed_run_owner(db, run_id).await;
         sqlx::query(
             r#"
             INSERT INTO shard_placements (run_id, run_shard, database_alias, status)
@@ -2669,3 +3072,7 @@ mod tests {
         chunk_id
     }
 }
+
+#[cfg(test)]
+#[path = "database/fixed_pool_tests.rs"]
+mod fixed_pool_tests;

@@ -43,6 +43,25 @@ const SNAPSHOT_GROUP_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHUNKS: usize = 256;
 const CHUNK_GROUP_BYTES: usize = 256 * 1024;
 
+/// Begin one bounded seed transaction under the claimed work identity. Scope
+/// setup shares the timeout submission; cancellation drops the owned transaction.
+pub(crate) async fn begin(
+    db: &sqlx::PgPool,
+    lease: super::Lease,
+) -> Result<Transaction<'static, Postgres>> {
+    let mut tx = db.begin().await?;
+    sqlx::Executor::execute(
+        &mut *tx,
+        format!(
+            "{}SET LOCAL statement_timeout='30s'",
+            crate::db::scope::system_settings(lease.tenant_id, lease.run_id)
+        )
+        .as_str(),
+    )
+    .await?;
+    Ok(tx)
+}
+
 #[derive(Serialize)]
 struct Shard<'a> {
     run_shard: i16,
@@ -208,7 +227,7 @@ const SNAPSHOT: &str = "$3::jsonb || jsonb_build_object('settlement_plan',jsonb_
 /// each shard independently and resolves placement permission for every page.
 pub(crate) async fn read_chunks(
     db: &sqlx::PgPool,
-    run_id: Uuid,
+    lease: super::Lease,
     dataset_version_id: Uuid,
     alias: &str,
     shards: &[i16],
@@ -218,6 +237,14 @@ pub(crate) async fn read_chunks(
         !shards.is_empty() && shards.len() <= 128,
         "invalid placement verification shard count"
     );
-    Ok(sqlx::query_as("SELECT c.id,c.run_shard,c.ordinal_start,c.ordinal_end,c.dataset_version_id=$6 AND c.profile_group_id='default' AND c.status='pending' AND c.dispatched_at IS NULL AND EXISTS(SELECT 1 FROM local_shard_admissions a WHERE a.run_id=c.run_id AND a.run_shard=c.run_shard AND a.database_alias=$7 AND a.write_epoch=1 AND a.state='open') FROM run_chunks c WHERE c.run_id=$1 AND c.run_shard=ANY($2) AND (c.run_shard,c.ordinal_start,c.id)>($3,$4,$5) ORDER BY c.run_shard,c.ordinal_start,c.id LIMIT $8")
-        .bind(run_id).bind(shards).bind(after.0).bind(after.1).bind(after.2).bind(dataset_version_id).bind(alias).bind(MAX_CHUNKS as i64).fetch_all(db).await?)
+    let mut tx = db.begin().await?;
+    sqlx::Executor::execute(
+        &mut *tx,
+        crate::db::scope::system_settings(lease.tenant_id, lease.run_id).as_str(),
+    )
+    .await?;
+    let rows = sqlx::query_as("SELECT c.id,c.run_shard,c.ordinal_start,c.ordinal_end,c.dataset_version_id=$6 AND c.profile_group_id='default' AND c.status='pending' AND c.dispatched_at IS NULL AND EXISTS(SELECT 1 FROM local_shard_admissions a WHERE a.run_id=c.run_id AND a.run_shard=c.run_shard AND a.database_alias=$7 AND a.write_epoch=1 AND a.state='open') FROM run_chunks c WHERE c.run_id=$1 AND c.run_shard=ANY($2) AND (c.run_shard,c.ordinal_start,c.id)>($3,$4,$5) ORDER BY c.run_shard,c.ordinal_start,c.id LIMIT $8")
+        .bind(lease.run_id).bind(shards).bind(after.0).bind(after.1).bind(after.2).bind(dataset_version_id).bind(alias).bind(MAX_CHUNKS as i64).fetch_all(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(rows)
 }

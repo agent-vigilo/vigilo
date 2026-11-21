@@ -87,7 +87,7 @@ pub(super) fn run_export_payload(
                     let attempt_diagnostics = rows
                         .evaluator_diagnostics
                         .iter()
-                        .filter(|diagnostic| result_ids.contains(&diagnostic.evaluator_result_id))
+                        .filter(|diagnostic| diagnostic.run_shard == attempt.run_shard && result_ids.contains(&diagnostic.evaluator_result_id))
                         .collect::<Vec<_>>();
 
                     json!({
@@ -186,9 +186,9 @@ pub(super) async fn exec(
     let out = context.out().await?;
 
     let run = select_existing_run(db, run_id).await?;
-    let summary = run_results_workflow::select_run_results_summary(database_router, run_id).await?;
-    let scorecard = run_results_workflow::select_run_scorecard(db, run_id).await?;
     let routes = run_export_workflow::select_run_export_routes(database_router, run_id).await?;
+    let summary = run_export_workflow::select_summary(&routes, run_id).await?;
+    let scorecard = run_results_workflow::select_run_scorecard(db, run_id).await?;
 
     match format {
         RunExportFormat::Json => {
@@ -201,20 +201,28 @@ pub(super) async fn exec(
             let mut all_evaluator_results = Vec::new();
             let mut all_evaluator_diagnostics = Vec::new();
 
-            for route in &routes {
-                let mut cursor: Option<Uuid> = None;
+            for group in run_export_workflow::export_windows(&routes)
+                .into_iter()
+                .flat_map(|w| w.groups)
+            {
+                let mut cursor = None;
                 loop {
-                    let execution_batch = run_export_workflow::select_execution_batch(
-                        route, run_id, cursor, batch_size,
+                    let page = run_export_workflow::select_group_execution_page(
+                        &group,
+                        run_id,
+                        cursor.as_ref(),
+                        batch_size,
                     )
                     .await?;
+                    let has_more = page.has_more;
+                    let execution_batch = page.executions;
                     if execution_batch.is_empty() {
                         break;
                     }
 
-                    cursor = execution_batch.last().map(|execution| execution.id);
-                    let batch = run_export_workflow::select_batch_for_executions(
-                        route,
+                    cursor = page.cursor;
+                    let batch = run_export_workflow::select_batch_for_group(
+                        &group,
                         run_id,
                         execution_batch,
                     )
@@ -225,9 +233,13 @@ pub(super) async fn exec(
                     all_aggregates.extend(batch.aggregates);
                     all_evaluator_results.extend(batch.evaluator_results);
                     all_evaluator_diagnostics.extend(batch.evaluator_diagnostics);
+                    if !has_more {
+                        break;
+                    }
                 }
             }
 
+            all_executions.sort_unstable_by_key(|e| (e.run_shard, e.id));
             let payload = run_export_payload(
                 &run,
                 &summary,
@@ -285,150 +297,73 @@ pub(super) async fn exec(
                 }))?)?;
             }
 
-            for route in &routes {
-                let route_line = json!({
-                    "type": "execution_route",
-                    "run_id": run_id,
-                    "run_shard": route.run_shard(),
-                    "database_alias": route.database_alias(),
-                });
-                out.write_line(serde_json::to_string(&route_line)?)?;
-
-                let mut cursor: Option<Uuid> = None;
-                loop {
-                    // --- Load execution page ---
-                    // Page executions by id and load child attempts,
-                    // aggregates, and evaluator results only for that page.
-                    let execution_batch = run_export_workflow::select_execution_batch(
-                        route, run_id, cursor, batch_size,
-                    )
-                    .await?;
-                    if execution_batch.is_empty() {
-                        break;
+            for window in run_export_workflow::export_windows(&routes) {
+                let mut pending_routes = window.routes.into_iter().peekable();
+                let mut streams = run_export_workflow::streams_for_window(window.groups);
+                while let Some((index, execution)) =
+                    run_export_workflow::next_execution(&mut streams, run_id, batch_size).await?
+                {
+                    let (
+                        alias,
+                        run_export_workflow::ChildPages {
+                            attempts,
+                            aggregates,
+                            results,
+                            diagnostics,
+                        },
+                    ) = streams[index].current();
+                    while pending_routes
+                        .peek()
+                        .is_some_and(|(shard, _)| *shard <= execution.run_shard)
+                    {
+                        let (shard, route_alias) = pending_routes.next().expect("peeked route");
+                        out.write_line(serde_json::to_string(&json!({"type":"execution_route","run_id":run_id,"run_shard":shard,"database_alias":route_alias}))?)?;
                     }
-
-                    cursor = execution_batch.last().map(|execution| execution.id);
-                    let batch = run_export_workflow::select_batch_for_executions(
-                        route,
-                        run_id,
-                        execution_batch,
-                    )
-                    .await?;
-
-                    let mut attempts_by_execution: BTreeMap<(i16, Uuid), Vec<&ExecutionAttempt>> =
-                        BTreeMap::new();
-                    for attempt in &batch.attempts {
-                        attempts_by_execution
-                            .entry((attempt.run_shard, attempt.execution_id))
-                            .or_default()
-                            .push(attempt);
+                    out.write_line(serde_json::to_string(&json!({"type":"execution","run_id":run_id,"run_shard":execution.run_shard,"database_alias":alias,"execution":execution}))?)?;
+                    let aggregate = if aggregates.peek().await?.is_some_and(|a| {
+                        (a.aggregate.run_shard, a.aggregate.execution_id)
+                            == (execution.run_shard, execution.id)
+                    }) {
+                        Some(aggregates.pop())
+                    } else {
+                        None
+                    };
+                    if let Some(row) = &aggregate {
+                        let authoritative = row.attempt_terminal
+                            && execution.current_attempt_id == Some(row.aggregate.attempt_id)
+                            && matches!(
+                                execution.status.as_str(),
+                                "completed" | "failed" | "timed_out" | "cancelled"
+                            );
+                        out.write_line(serde_json::to_string(&json!({"type":"execution_aggregate","run_id":run_id,"run_shard":execution.run_shard,"database_alias":alias,"execution_id":execution.id,"aggregate":row.aggregate,"authoritative":authoritative}))?)?;
                     }
-
-                    let mut aggregates_by_execution: BTreeMap<(i16, Uuid), &ExecutionAggregate> =
-                        BTreeMap::new();
-                    for aggregate in &batch.aggregates {
-                        aggregates_by_execution
-                            .insert((aggregate.run_shard, aggregate.execution_id), aggregate);
-                    }
-
-                    let mut results_by_attempt: BTreeMap<(i16, Uuid), Vec<&EvaluatorResult>> =
-                        BTreeMap::new();
-                    for result in &batch.evaluator_results {
-                        results_by_attempt
-                            .entry((result.run_shard, result.attempt_id))
-                            .or_default()
-                            .push(result);
-                    }
-                    let mut diagnostics_by_result: BTreeMap<Uuid, Vec<&EvaluatorDiagnostic>> =
-                        BTreeMap::new();
-                    for diagnostic in &batch.evaluator_diagnostics {
-                        diagnostics_by_result
-                            .entry(diagnostic.evaluator_result_id)
-                            .or_default()
-                            .push(diagnostic);
-                    }
-
-                    // --- Emit execution group ---
-                    // Emit one execution record followed by its aggregate,
-                    // attempts, and attempt result rows. This preserves a
-                    // stable local grouping without holding the entire export
-                    // in memory.
-                    for execution in &batch.executions {
-                        let execution_line = json!({
-                            "type": "execution",
-                            "run_id": run_id,
-                            "run_shard": route.run_shard(),
-                            "database_alias": route.database_alias(),
-                            "execution": execution,
-                        });
-                        out.write_line(serde_json::to_string(&execution_line)?)?;
-
-                        if let Some(aggregate) =
-                            aggregates_by_execution.get(&(execution.run_shard, execution.id))
-                        {
-                            let aggregate_line = json!({
-                                "type": "execution_aggregate",
-                                "run_id": run_id,
-                                "run_shard": route.run_shard(),
-                                "database_alias": route.database_alias(),
-                                "execution_id": execution.id,
-                                "aggregate": aggregate,
-                                "authoritative": attempts_by_execution.get(&(execution.run_shard, execution.id))
-                                    .is_some_and(|attempts| attempts.iter().any(|attempt| evidence_state(execution, attempt, Some(aggregate)) == "authoritative")),
-                            });
-                            out.write_line(serde_json::to_string(&aggregate_line)?)?;
-                        }
-
-                        for attempt in attempts_by_execution
-                            .get(&(execution.run_shard, execution.id))
-                            .into_iter()
-                            .flatten()
-                        {
-                            let attempt_line = json!({
-                                "type": "execution_attempt",
-                                "run_id": run_id,
-                                "run_shard": route.run_shard(),
-                                "database_alias": route.database_alias(),
-                                "execution_id": execution.id,
-                                "attempt": attempt,
-                                "evidence_state": evidence_state(execution, attempt, aggregates_by_execution.get(&(execution.run_shard, execution.id)).copied()),
-                            });
-                            out.write_line(serde_json::to_string(&attempt_line)?)?;
-
-                            for result in results_by_attempt
-                                .get(&(attempt.run_shard, attempt.id))
-                                .into_iter()
-                                .flatten()
-                            {
-                                let result_line = json!({
-                                    "type": "evaluator_result",
-                                    "run_id": run_id,
-                                    "run_shard": route.run_shard(),
-                                    "database_alias": route.database_alias(),
-                                    "execution_id": execution.id,
-                                    "attempt_id": attempt.id,
-                                    "evaluator_result": result,
-                                    "evidence_state": evidence_state(execution, attempt, aggregates_by_execution.get(&(execution.run_shard, execution.id)).copied()),
-                                });
-                                out.write_line(serde_json::to_string(&result_line)?)?;
-                                for diagnostic in
-                                    diagnostics_by_result.get(&result.id).into_iter().flatten()
-                                {
-                                    let diagnostic_line = json!({
-                                        "type": "evaluator_diagnostic",
-                                        "run_id": run_id,
-                                        "run_shard": route.run_shard(),
-                                        "database_alias": route.database_alias(),
-                                        "execution_id": execution.id,
-                                        "attempt_id": attempt.id,
-                                        "evaluator_result_id": result.id,
-                                        "evaluator_diagnostic": diagnostic,
-                                    });
-                                    out.write_line(serde_json::to_string(&diagnostic_line)?)?;
-                                }
+                    while attempts.peek().await?.is_some_and(|a| {
+                        (a.run_shard, a.execution_id) == (execution.run_shard, execution.id)
+                    }) {
+                        let attempt = attempts.pop();
+                        let state = evidence_state(
+                            &execution,
+                            &attempt,
+                            aggregate.as_ref().map(|a| &a.aggregate),
+                        );
+                        out.write_line(serde_json::to_string(&json!({"type":"execution_attempt","run_id":run_id,"run_shard":execution.run_shard,"database_alias":alias,"execution_id":execution.id,"attempt":attempt,"evidence_state":state}))?)?;
+                        while results.peek().await?.is_some_and(|r| {
+                            (r.run_shard, r.attempt_id) == (attempt.run_shard, attempt.id)
+                        }) {
+                            let result = results.pop();
+                            out.write_line(serde_json::to_string(&json!({"type":"evaluator_result","run_id":run_id,"run_shard":execution.run_shard,"database_alias":alias,"execution_id":execution.id,"attempt_id":attempt.id,"evaluator_result":result,"evidence_state":state}))?)?;
+                            while diagnostics.peek().await?.is_some_and(|d| {
+                                (d.run_shard, d.evaluator_result_id)
+                                    == (result.run_shard, result.id)
+                            }) {
+                                let diagnostic = diagnostics.pop();
+                                out.write_line(serde_json::to_string(&json!({"type":"evaluator_diagnostic","run_id":run_id,"run_shard":execution.run_shard,"database_alias":alias,"execution_id":execution.id,"attempt_id":attempt.id,"evaluator_result_id":result.id,"evaluator_diagnostic":diagnostic}))?)?;
                             }
                         }
                     }
+                }
+                for (shard, alias) in pending_routes {
+                    out.write_line(serde_json::to_string(&json!({"type":"execution_route","run_id":run_id,"run_shard":shard,"database_alias":alias}))?)?;
                 }
             }
 

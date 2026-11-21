@@ -13,9 +13,12 @@ These rules add to the root guidance for crates under `evaluators/`.
 - One crate implements one evaluator component through one primary `evaluate`
   entrypoint. Keep evaluator logic self-contained.
 - Include `Vigilo.toml` and `example-input.json` in the crate root.
-- Make results deterministic for identical declared inputs. If the contract
-  intentionally permits nondeterminism, make its source explicit and controllable
-  in tests.
+- Use **Deterministic (Code Scorer)** for repeatable code-based measurement and
+  **Model-as-a-Judge** for model-based assessment. Both use the same evaluator ABI;
+  the harness obtains target evidence and host policy owns normalization/gates.
+- Make Code Scorer results repeatable for identical declared inputs/dependencies.
+  For Model-as-a-Judge and other intentionally nondeterministic behavior, document
+  its sources and control external dependencies in tests.
 - Implement the current contract from `vigilo/wit/evaluator/v1.0.0/evaluator.wit`.
   Evaluator crates select an ABI but never contain host adapters or compatibility
   dispatch; those remain under `vigilo/src/evaluator_abi/`.

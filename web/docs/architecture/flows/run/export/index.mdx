@@ -14,6 +14,8 @@ keywords:
 import Mermaid from '@theme/Mermaid';
 import executionFlowDiagram from './execution-flow.mmd';
 import decisionFlowDiagram from './decision-flow.mmd';
+import pageFlow from './page-flow.mmd';
+import pageDecision from './page-decision.mmd';
 
 # Export
 
@@ -35,6 +37,104 @@ retired attempts, and `partial` otherwise. Each execution has an
 `aggregate_authoritative` flag. JSONL carries the same attempt/result labels and
 an `authoritative` flag on aggregate records. Raw results and diagnostics remain
 available in all states. JSON materializes the run; JSONL pages and streams it.
+
+## Library pages
+
+`Client::export_page` reads one collection for a trusted standalone operator.
+`operations::export::ExportClient` reads ordinary metadata using dedicated fixed
+credentials. `SensitiveExportClient::content_page` and `diagnostics_page` read content and
+diagnostics through distinct operations on separately bound sensitive credentials. The embedding host authorizes each operation; database grants
+prevent ordinary credentials from selecting sensitive columns. Both restricted
+readers apply current caller context on every participating database. They do not
+borrow service credentials or fall back to a privileged pool. Create readers once
+per configured credential domain and clone them across requests to share pools.
+
+Collections page independently: executions, attempts, aggregates, evaluator
+results, and their separate content projections, plus diagnostics. Parent IDs
+connect records across collections. Ordinary metadata excludes case payloads,
+raw evaluator output, detailed errors, diagnostic evidence, worker/broker identity,
+leases and direct artifact paths. Retained response bodies are not part of these
+collections. Projection structs and effective grant checks define the boundary;
+field names do not imply automatic secret redaction. Reader roles use explicit
+application grants; owner/bypass rights, predefined privileged roles and broader
+column access are rejected, including grants reachable through role switching.
+Custom `SECURITY DEFINER` functions are rejected by default. A trusted host can
+use `with_trusted_policy_functions` on either reader to allow exact function
+signatures per bound database alias. These helpers must return one boolean, be
+declared `STABLE`, and set `search_path=pg_catalog, pg_temp`; references to private
+tables are schema-qualified. Reader credentials must not own the helper or its
+schema, or create objects there. Unknown aliases, missing functions, unsuitable definitions
+and additional accessible privileged functions fail closed. Trust does not grant
+`EXECUTE` or direct access to private tables.
+
+```rust
+let functions = std::collections::BTreeMap::from([(
+    "primary".into(), vec!["access.can_read_run(uuid)".into()],
+)]);
+let reader = vigilo::operations::export::ExportClient::with_trusted_policy_functions(
+    config, functions,
+)?;
+```
+
+Use canonical, schema-qualified PostgreSQL signatures, including argument types;
+overloads are distinct. Configuration permits at most 64 signatures per bound
+alias, each at most 1,024 bytes, without duplicates. Unspecified aliases retain
+the strict default. Function validation shares the existing connection check and
+adds no client SQL submissions per page. Policy execution still has its database
+cost. The deployment audits and owns function definitions, policy correctness and
+later grant changes; these checks do not certify arbitrary privileged code.
+
+Pages default to 250 records and 4 MiB, capped at 10,000 records and 16 MiB.
+The byte budget conservatively counts the larger database/compact-JSON encoding
+of each record plus array separators; it excludes the outer page/cursor envelope
+and transport framing. The first reached limit ends the page. A record that
+cannot fit an empty page returns an explicit error, without truncation or cursor
+advancement. Increasing the requested budget permits a retry within the ceiling.
+Oversized encoded bodies are withheld by the database before client transfer.
+
+Continuation cursors bind position to the run, collection and caller. Treat them
+as opaque strings, not authorization grants. Every page resolves current routing
+and permissions. Pages are live observations: concurrent writes can change data
+around a continuation position, and there is no cross-database snapshot guarantee.
+Revocation prevents subsequent reads, not recall of already delivered data.
+Within each execution database, one statement admits keys by encoded size, then
+loads only the fitting records in the same snapshot. Candidate buffers contain
+keys and sizes; excluded bodies are neither retained nor transferred. Hosted reads
+keep caller context in a short read-only transaction; operator reads use the
+statement snapshot directly. Abandoned streams have bounded payloads to drain.
+Database, routing and decoding errors return no successful partial page. An
+interface that already delivered earlier pages must report the resulting partial
+export as a failure.
+
+```rust
+use vigilo::operations::export::{ExportCollection, ExportLimits};
+
+let page = client.export_page(
+    run_id, ExportCollection::Executions, ExportLimits::default(), None,
+).await?;
+if let Some(cursor) = &page.next {
+    let _next = client.export_page(
+        run_id, ExportCollection::Executions, ExportLimits::default(), Some(cursor),
+    ).await?;
+}
+```
+
+<Mermaid value={pageFlow} />
+
+<Mermaid value={pageDecision} />
+
+## Operator output
+
+The CLI exports full operator records in JSON or JSONL. JSONL uses bounded
+execution and child buffers while preserving execution, aggregate, attempt, result
+and diagnostic grouping. Children are fetched across the execution batch rather
+than queried once per parent. Bounded logical windows group shards by database
+and merge at most four readers in shard/execution order. Each reader holds one
+execution page and four bounded child buffers; route frames keep their original
+aliases, including empty shards. Encoded records must fit the 16 MiB buffer ceiling.
+JSON intentionally materializes the complete document and has no bounded total
+memory guarantee. A failed JSONL export may have written a prefix; its unsuccessful
+exit status identifies that output as incomplete.
 
 ## Related
 

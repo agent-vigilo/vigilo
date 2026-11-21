@@ -21,6 +21,15 @@ Code identifiers and stored values appear in `code style`. For example, a run
 can have operational `status = completed` and policy `gate_status = fail` at
 the same time.
 
+## Harnesses And Evaluators
+
+Harnesses obtain evidence; evaluators measure it. Host policy normalizes the
+measurements, aggregates scores and applies gates. Harness type and evaluator type
+are independent: invoking an agent and asking a model to judge its response are
+different responsibilities even when both use HTTP.
+
+<GlossarySection section="harnesses-and-evaluators" />
+
 ## Runtime Roles
 
 <GlossarySection section="runtime-roles" />

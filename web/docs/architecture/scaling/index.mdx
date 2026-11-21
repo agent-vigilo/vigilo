@@ -199,11 +199,14 @@ Coordinator dispatch is route-constrained:
   `FOR UPDATE SKIP LOCKED` and retains that transaction through the routed
   write. Running dispatches share the run lifecycle lock; the initial
   pending-to-running transition is exclusive.
-- The database router resolves that shard placement to an execution database pool.
+- The scoped snapshot statement reads the shard and database placement records.
+  The router validates their purpose, lifecycle and matching alias, then routes
+  the write without another control-database lookup.
 - The execution database upserts `run_snapshots`, marks pending chunks
   dispatched, and inserts `run.chunk.ready` outbox event records.
-- The control cursor is released or marked `drained` after the execution
-  transaction commits.
+- On a colocated placement, the chunk writes and cursor update commit together
+  on one connection. On a separate execution placement, the execution
+  transaction commits before control releases the cursor or marks it `drained`.
 - If an execution placement operation fails, the cursor remains open and that
   database alias is excluded from the rest of the current dispatch pass.
   Healthy aliases continue within the same cycle.
@@ -267,8 +270,9 @@ Finalization fans in:
   bounds candidate inspections, not guaranteed successful finalizations; the
   default is `64`.
 - The control database claims the run without waiting behind active dispatch
-  lifecycle locks. The global outcome and `run.completed` event are written
-  only while that coordinator still owns an unexpired finalization lease.
+  lifecycle locks. The final write rechecks expiry after locking the run row.
+  A coordinator whose lease expired while waiting leaves the outcome for a
+  later claim.
 - The coordinator verifies every shard scorecard has the same policy hash and gate set, merges exact counters, evaluates run gates, and atomically stores `run_scorecards`, `runs.gate_status`, and the completion event.
 - A failed placement read defers that run without discarding summaries already
   read from healthy placements. The run cannot finalize until every routed
@@ -303,6 +307,12 @@ records publish from the control database. Execution event records publish from
 the execution database that owns the changed rows. Lease recovery and outbox
 publication iterate placements independently; a failed alias is logged and
 skipped while healthy aliases finish the pass.
+
+Within a placement, expired chunk recovery reads up to 32 extra candidates per
+retry class so it can skip contended shards and chunks within the window. The
+configured recovery batch still limits writes in each class. Standalone deferred
+discovery checks local ownership before limiting due work, so retained rows on
+closed placements do not use polling slots.
 
 ## Control Database Scale
 
@@ -531,9 +541,11 @@ replay, an empty-journal check, and route activation.
 After claim admission commits, an opaque chunk claim token and renewable
 deadline carry worker authority. Attempt allocation and result persistence lock
 and validate that live token; result persistence also requires the current live
-worker attempt. Recovery clears the chunk token, stales the attempt, and updates
-a failed chunk receipt atomically. Terminal worker settlement and cancellation
-also write receipts in the transaction that clears active work. Aggregation
+worker attempt. Recovery clears an expired chunk token and retires the running
+attempt. This can happen during drain. Requeued chunks can be claimed after
+admission opens, and exhausted chunks receive a terminal receipt. Terminal
+worker settlement and cancellation also write receipts in the transaction that
+clears active work. Aggregation
 checkpoints, receipt-consumption identities, and sealed summaries move with their
 shard under the same ownership fence.
 

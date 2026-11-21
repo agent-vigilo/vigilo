@@ -1,4 +1,10 @@
-//! Run finalization workflow helpers.
+//! Run finalization from immutable routed shard summaries.
+//!
+//! Restricted discovery and lease claims supply ownership. The coordinator scopes
+//! route/summary reads and candidate deferral separately, then the terminal write
+//! binds claimed identity and rechecks lease, control state and exact membership.
+//! Root counters, scorecard and completion event commit atomically; no execution
+//! rows are scanned or mutated during finalization.
 //!
 //! Finalization is coordinator-owned and guarded by leases. Workers write
 //! execution and aggregate state into shard-local storage. This workflow uses
@@ -27,6 +33,7 @@ pub(crate) use queries::{
 /// Minimal run projection returned when a coordinator claims finalization.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct ClaimedRunForFinalization {
+    pub(crate) tenant_id: Uuid,
     pub(crate) id: Uuid,
     pub(crate) run_key: String,
     pub(crate) aggregation_policy_hash: String,
@@ -198,6 +205,7 @@ pub(crate) async fn claim_next_finalizable_run(
 ///   control outbox.
 pub(crate) async fn finalize_claimed_run_from_summaries(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     coordinator_id: Uuid,
     aggregation_policy_hash: &str,
@@ -221,6 +229,7 @@ pub(crate) async fn finalize_claimed_run_from_summaries(
         .collect::<Vec<_>>();
     queries::finalize_claimed_run(
         db,
+        tenant_id,
         run_id,
         coordinator_id,
         &summary,

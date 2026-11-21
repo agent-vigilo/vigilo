@@ -4,6 +4,10 @@
 //! `vigilo run validate`. They are intentionally transport-focused contracts used
 //! for parsing and validation before orchestration/runtime execution logic.
 
+/// Shared contract-test input, packaged independently of repository examples.
+#[cfg(test)]
+pub(crate) const PROFILE_FIXTURE: &str = include_str!("../../tests/fixtures/run-profile.yaml");
+
 use std::collections::BTreeMap;
 
 use serde::{
@@ -15,10 +19,6 @@ use uuid::Uuid;
 
 fn default_json_object() -> Value {
     Value::Object(Default::default())
-}
-
-fn default_post_method() -> String {
-    "POST".to_string()
 }
 
 fn default_true() -> bool {
@@ -45,6 +45,7 @@ pub(crate) struct RunProfile {
     pub(crate) defaults: RunDefaults,
 
     /// Persistence behavior controls for run/evaluation artifacts.
+    #[serde(default)]
     pub(crate) persistence: PersistenceSettings,
 
     /// Run-level scorecard and gate policy applied after every shard completes.
@@ -53,6 +54,9 @@ pub(crate) struct RunProfile {
 
     /// Agent target invoked by workers before evaluator execution.
     pub(crate) agent: AgentProfile,
+
+    /// Explicit evidence-producing harness.
+    pub(crate) harness: vigilo::invocation::profile::Harness,
 
     /// Case-group specific evaluator bindings and aggregation policies.
     ///
@@ -109,6 +113,7 @@ pub(crate) struct ScorecardGate {
 
 /// Agent target configuration attached to this run profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AgentProfile {
     /// Provider/platform for the evaluated target.
     pub(crate) provider: String,
@@ -116,7 +121,7 @@ pub(crate) struct AgentProfile {
     /// Logical agent or model name under evaluation.
     pub(crate) name: String,
 
-    /// Optional version/deployment identifier for the evaluated target.
+    /// Exact version or deployment identifier required for an admitted run.
     #[serde(default)]
     pub(crate) version: Option<String>,
 
@@ -132,43 +137,13 @@ pub(crate) struct AgentProfile {
     #[serde(default)]
     pub(crate) prompt_config_version: Option<String>,
 
-    /// HTTP invocation configuration used by workers.
-    pub(crate) http: AgentHttpConfig,
+    /// Explicit response interpretation; omission means original-body evidence only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) response: Option<vigilo::response::ResponseConfiguration>,
 
-    /// Agent-specific unstructured configuration passed in invocation metadata.
+    /// Agent-specific configuration used to construct the invocation request.
     #[serde(default = "default_json_object")]
     pub(crate) config: Value,
-}
-
-/// HTTP settings workers use to invoke the configured agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct AgentHttpConfig {
-    /// Absolute URI for the agent invocation endpoint.
-    pub(crate) url: String,
-
-    /// HTTP method used for invocation. Defaults to `POST`.
-    #[serde(default = "default_post_method")]
-    pub(crate) method: String,
-
-    /// Static headers to attach to every invocation.
-    #[serde(default)]
-    pub(crate) headers: BTreeMap<String, String>,
-
-    /// Optional per-request timeout override. Falls back to profile defaults.
-    #[serde(default)]
-    pub(crate) timeout_secs: Option<u32>,
-
-    /// Optional serialized request-body limit, bounded by the worker ceiling.
-    #[serde(default)]
-    pub(crate) max_request_bytes: Option<u64>,
-
-    /// Optional response-body limit, bounded by the worker ceiling.
-    #[serde(default)]
-    pub(crate) max_response_bytes: Option<u64>,
-
-    /// Maximum accepted Retry-After delay in seconds (default 600, maximum 86400).
-    #[serde(default)]
-    pub(crate) max_retry_after_secs: Option<u32>,
 }
 
 /// Default execution policy for run processing.
@@ -189,6 +164,7 @@ pub(crate) struct RunDefaults {
 
 /// Persistence policy controls for run output and evidence retention.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct PersistenceSettings {
     /// High-level persistence strategy (`full` vs `summary`).
     pub(crate) mode: PersistenceMode,
@@ -198,6 +174,16 @@ pub(crate) struct PersistenceSettings {
 
     /// Whether evaluator evidence blobs should be retained.
     pub(crate) persist_evaluator_evidence: bool,
+}
+
+impl Default for PersistenceSettings {
+    fn default() -> Self {
+        Self {
+            mode: PersistenceMode::Full,
+            persist_raw_outputs: PersistRawOutputsMode::All,
+            persist_evaluator_evidence: true,
+        }
+    }
 }
 
 /// Persistence breadth mode for run artifacts.
@@ -456,6 +442,10 @@ agent:
   model: demo-classifier-v1
   prompt_config_id: sentiment-demo
   prompt_config_version: 1.0.0
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
   http:
     url: http://127.0.0.1:8787/v1/agent/invoke
     headers:
@@ -492,7 +482,7 @@ case_groups:
         assert_eq!(profile.agent.provider, "example");
         assert_eq!(profile.agent.name, "sentiment-demo-agent");
         assert_eq!(profile.agent.model.as_deref(), Some("demo-classifier-v1"));
-        assert_eq!(profile.agent.http.method, "POST");
+        assert_eq!(profile.harness.http().method, "POST");
         assert_eq!(profile.case_groups.len(), 1);
         assert_eq!(
             profile.case_groups[0].evaluators[0].evaluator_ref,
@@ -565,7 +555,7 @@ case_groups: []
     }
 
     #[test]
-    fn parse_profile_requires_agent_http() {
+    fn parse_profile_requires_explicit_harness() {
         let raw = r#"
 profile_id: mixed_agent_release
 profile_version: 1.0.0
@@ -586,7 +576,7 @@ case_groups: []
 "#;
 
         let err = serde_yaml::from_str::<RunProfile>(raw).unwrap_err();
-        assert!(err.to_string().contains("missing field `http`"));
+        assert!(err.to_string().contains("missing field `harness`"));
     }
 
     #[test]

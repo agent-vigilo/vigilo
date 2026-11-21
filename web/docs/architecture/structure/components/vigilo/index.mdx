@@ -1,6 +1,6 @@
 ---
 title: Vigilo Components
-description: Component diagram for Agent Vigilo CLI command handling, configuration, registry, run, and reporting boundaries.
+description: Shared Agent Vigilo library operations, CLI adapter, runtime ownership, registry, runs, and reporting boundaries.
 keywords:
   - Vigilo CLI components
   - Agent Vigilo internals
@@ -11,10 +11,166 @@ keywords:
 
 import Mermaid from '@theme/Mermaid';
 import vigiloDiagram from './diagram.mmd';
+import statusFlow from './status-flow.mmd';
+import bindingFlow from './binding-flow.mmd';
 
 # Vigilo Components
 
-Describes the major internal responsibilities of the Vigilo command runtime.
+The library owns runtime implementation and database workflows. The CLI adapter
+owns argument parsing, process logging, signal handling and output formatting.
+`vigilo::operations::Client` exposes typed standalone status, cancellation and execution control without CLI parsing
+or process setup. Its operator-supplied configuration creates shared lazy database
+pools; the caller owns the Tokio runtime. Database models and pools remain private.
+
+```rust
+use vigilo::operations::{Client, Config};
+
+async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = Client::new(Config::new(std::env::var("DATABASE_URL")?))?;
+let run_id = "0198f36d-f7db-7d90-998c-d60d498dd979".parse()?;
+let status = client.run_status(run_id).await?;
+println!("{}", status.details.status);
+Ok(())
+}
+```
+
+The client assumes an authorized standalone operator. It does not authenticate
+callers. Status reports progress source and completeness explicitly; observations
+across databases are not one atomic snapshot. Missing runs and dependency failures
+have typed errors. Dropping a status future cancels the read, not the run.
+
+`Client::runs` binds operator-owned storage configuration to a shared run client.
+`prepare_run` returns privately constructed verified work without authorizing
+execution. `accept_run` commits acceptance of that exact work; `create_run` combines
+the two for a trusted operator. `resume_creation` retries the same immutable inputs
+and run ID. It is distinct from resuming paused execution. Dropping a request does
+not undo committed preparation, acceptance or control changes.
+
+Preparation retains command identity on its actual metadata transactions,
+including lease renewal, file checkpoints, publication and progress reads. A
+supplied caller context keeps its actor identity until exact plan acceptance;
+accepted admission obtains a separate system claim. Caller-scoped acceptance
+commits approval and reports progress without borrowing scheduler authority.
+No preparation or acceptance transaction spans blob I/O, and pooled connections
+retain no request settings after commit, rollback or cancellation.
+
+`Client::datasets` and caller-bound dataset services share bounded preparation,
+upload, resume and exact cleanup. Typed dataset status and abort operations
+reuse the same ledger protocol. Hosts supply admitted readers and pinned storage
+bindings; the CLI supplies regular files and formats its operator JSON. See
+[dataset ingestion](/docs/architecture/case-storage/ingestion/) for resource budgets
+and the upload-specific signing contract.
+
+The CLI uses typed operations for creation, cancellation, status/watch,
+results summaries, datasets and evaluators. Operator setup and placement commands
+use private library workflows. CLI and hosted daemon
+adapters share orchestration and worker cycles. Neither pools nor persistence
+records are part of the public operation API.
+
+## Operation boundary
+
+The public `operations` module returns typed values for interface adapters:
+
+| Operation | Library entry point |
+| --- | --- |
+| Run preparation and acceptance | `RunClient` |
+| Status, summary and execution control | `Client` and caller-bound `HostedUser` |
+| Bounded ordinary and sensitive exports | `export::ExportClient` and `export::SensitiveExportClient` |
+| Dataset upload, resume and cleanup | `datasets::DatasetClient` |
+| Evaluator discovery, publication, state and tests | `evaluators::EvaluatorClient` |
+| Coordinator and worker execution | `Coordinator` and `Worker` handles from `HostedRuntime` |
+| Authenticated callback acceptance and due invocation work | `HostedRuntime::invocations` when a callback issuer is configured |
+
+Prepared runs, datasets and evaluator packages are sealed verification results;
+interfaces cannot deserialize them from a request body. Preparation validates the
+input and returns the proof consumed by acceptance or publication. Public async
+operations return `Send` futures for use on the host's executor. The host owns
+request authentication, authorization and response formatting; operation errors
+have safe display text, while dependency error chains are trusted diagnostics.
+
+Setup, database placement administration, source compilation and local authoring
+commands are operator CLI tools. They share private library workflows without
+exposing database executors or CLI parser types as application operations.
+`vigilo::cli::run` is the process entry adapter, not the embedding API.
+
+## Hosted runtime
+
+`operations::HostedRuntime::new(HostedConfig)` validates the supplied fixed database
+bindings before returning a usable runtime. Construct it once for the serving
+runtime and reuse it across requests and services; validation is startup work.
+Configuration requires a resource
+resolver, explicit broker settings and placement routing; it never selects
+standalone file or environment credentials. Broker connections and Wasm compilation
+are lazy. The host owns authentication, access policies, the Tokio runtime and
+presentation. No process signal handlers or logging subscribers are installed.
+Outbound credentials use the same secure destination rules as standalone providers;
+the [credential configuration](/docs/configuration/agent-credentials#host-resource-resolution)
+describes the explicit local-development exception.
+
+The trusted runtime root creates separate handles:
+
+- `user(UserContext)` fixes caller identity for preparation, explicit acceptance,
+  status and execution control. Keep the handle or its clones with the prepared
+  value until acceptance. Combined creation is restricted to standalone operators.
+- `coordinator()` exposes one bounded cycle with `once()` or a loop with
+  `run(CancellationToken)` using scheduler authority.
+- `worker()` exposes one delivery with `once()` or a consumer with
+  `run(CancellationToken)` using execution authority and persistent service caches.
+
+Clones of a daemon handle share one service and reject concurrent invocations;
+create another handle for another service. Worker handles have distinct broker
+consumer identities. User handles cannot create daemon handles. Execution control records durable
+intent; coordinator delivery and worker quiescence follow asynchronously. The
+same workflow bodies serve the CLI and library, without invoking a CLI process.
+Runtime options bound concurrency, HTTP sizes, Wasm execution and coordinator work.
+Wasm options follow the CLI bounds; zero `max_log_messages` disables evaluator logging.
+Derived handles share database pools, resource admission and outbound HTTP limits.
+Broker namespaces are explicit; `None` selects the standard topology.
+
+Cancel and join running services before calling `close()`, which closes all supplied
+shared database pools, including externally retained clones. Coordinator shutdown
+drains its active cycle; worker shutdown drains admitted chunks. Dropping worker
+work stops its lease heartbeat; uncompleted work follows lease recovery rather
+than being reported as completed. Dropping a request cannot undo committed work.
+
+## Fixed database bindings
+
+`operations::DatabasePools` holds separate scheduler, execution and user pools
+for each explicitly configured database. Clones share those pools; pool limits
+apply per database and authority. `user_client()` reuses the user pools for typed
+status reads. Raw SQL executors and credentials are not exposed to requests.
+
+The trusted host supplies `DatabaseBindings` with a control alias and a
+`DatabaseBinding` for every placement. Each binding declares its purpose, schema,
+limited non-login function owner and three distinct `DatabaseCredential` logins.
+Connection URIs include the host, database, username and password; TLS settings
+are explicit URI options. These bindings reject ambient `PG*` connection overrides
+and arbitrary startup options. Standalone `Client` configuration is separate.
+
+Internal authority-bound routing reuses these exact pools. Supplied aliases and
+placement purposes bound the available databases; catalog rows cannot supply new
+credentials. Catalog-backed routes retain active/draining lifecycle checks and
+reject purpose changes or missing bindings. Known worker hints select a bound
+execution-capable pool without another control read; execution-local admission
+still verifies work identity and ownership before processing. Fixed routing does
+not discover environment credentials or open replacement operator pools.
+Administrative setup uses the separate standalone operator domain.
+
+Construction validates configuration without opening connections. Call `validate()`
+before serving requests. Each new physical connection independently checks its
+login, role memberships, table protections, function definitions and grants.
+Scheduler logins have explicit access to installed discovery, claim and placement-lock functions.
+Narrow table grants support scoped follow-up work on the transaction retaining its
+claim. Scheduler, user and execution work-table access requires row policies.
+Deployment metadata is read-only. The host installs and tests policy semantics;
+structural validation does not prove that an arbitrary policy is correct.
+
+Validation uses bounded catalog reads at connection opening and explicit
+revalidation, not per operation. Hosts revalidate or replace pools after permission
+or installation changes. `close()` closes all shared clones and waits for borrowed
+connections. The caller owns the Tokio runtime and shutdown lifecycle.
+
+<Mermaid value={bindingFlow} />
 
 <Mermaid value={vigiloDiagram} />
 
@@ -31,9 +187,63 @@ foreground caller resumes preparation; coordinators recover requested admission
 under the run creation lease. See
 [Run Preparation](/docs/architecture/case-storage/run-preparation).
 
+## Results summary operations
+
+`operations::Client::run_results(run_id)` and `HostedUser::run_results(run_id)`
+return the same typed `RunResults` projection used by `vigilo run results`.
+`UserClient::run_results(context, run_id)` supports explicit caller-bound reads
+with fixed database bindings. These operations return values; interfaces own output
+formatting, HTTP responses and delivery.
+
+The projection contains `ResultsDetails`, numeric `ResultsSummary`, an optional
+published scorecard, and route/summary coverage counts. `summary_complete` means
+every discovered route has a summary and the route set is nonempty. It does not
+mean the run is terminal or sealed. Unscored averages remain absent; missing
+summaries contribute no invented scores. An unavailable route or missing credential
+binding returns an error rather than a control-database fallback.
+
+Hosted reads bind current caller context on the control transaction, commit it
+before remote I/O, then read summaries once per bound execution placement using
+new caller-scoped transactions. No execution bodies, attempt records, credentials
+or evaluator diagnostics are part of this operation. The CLI retains its JSON
+envelope; see [Results](/docs/architecture/flows/run/results).
+
+## Status read flow
+
+Restricted database reads use fixed credential bindings and transaction-local
+caller context. Connections are checked before serving reads; committing,
+rolling back, or dropping the transaction clears its context. Routing groups
+summary reads by database and never falls back to another credential binding.
+The embedding host supplies trusted identity and installs database access policy.
+
+<Mermaid value={statusFlow} />
+
 ## Related
 
 - [Structure overview](../..)
 - [Container view](../../containers)
 - [Coordinator components](../coordinator)
 - [Worker components](../worker)
+
+## Export readers
+
+`Client::export_page` exposes bounded typed collection reads for standalone
+operators. Dedicated `operations::export::ExportClient` and
+`SensitiveExportClient` retain separate fixed read-only credential pools for
+ordinary results versus content/diagnostics. Hosts authorize operations and supply
+current caller context; connection guards validate effective column access and row
+protections, including direct partition grants. Pools are shared by credential
+domain, not created per caller. Neither reader exposes a SQL executor or borrows
+runtime service authority. See [Export](/docs/architecture/flows/run/export) for
+collection boundaries, byte limits and live continuation semantics.
+
+
+## Evaluator Operations
+
+`operations::evaluators` shares registry publication, metadata discovery,
+inspection, state changes and isolated testing with the CLI. Trusted roots bind
+publication namespaces and optional HTTP test authority; caller handles retain
+current row-policy context on fixed pools. Portable imports accept bounded readers,
+not request-selected host paths. Shared immutable artifact identity remains
+separate from host access policy. See the [evaluator operations](/docs/architecture/flows/evaluators/)
+and [test boundary](/docs/architecture/flows/evaluators/test/) for limits and lifecycle.

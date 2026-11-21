@@ -40,6 +40,8 @@ pub(crate) struct OutboxEventPatch {
 /// Persisted outbox event row.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub(crate) struct OutboxEvent {
+    /// Authoritative ledger owner returned by restricted discovery.
+    pub(crate) tenant_id: Uuid,
     /// Event row id.
     pub(crate) id: Uuid,
     /// Routing key or semantic event type to publish.

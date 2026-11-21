@@ -1,4 +1,5 @@
 CREATE TABLE outbox_events (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     event_type TEXT NOT NULL,
@@ -6,7 +7,7 @@ CREATE TABLE outbox_events (
     aggregate_id UUID NOT NULL,
 
     -- useful for run.completed dedupe, etc.
-    dedupe_key TEXT NOT NULL UNIQUE,
+    dedupe_key TEXT NOT NULL,
 
     payload JSONB NOT NULL DEFAULT '{}'::jsonb,
 
@@ -16,7 +17,9 @@ CREATE TABLE outbox_events (
     error_message TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, id),
+    UNIQUE (tenant_id, dedupe_key)
 );
 
 CREATE INDEX idx_outbox_events_status_created_at

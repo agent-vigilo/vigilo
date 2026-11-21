@@ -26,7 +26,19 @@ async fn competing_admission_does_not_read_blobs_before_claim(db: PgPool) {
     let f = Fixture::new(&db).await;
     let lease = claim(&db, f.plan.run_id).await.unwrap();
     f.prepare(&db, lease).await.unwrap();
-    admission::request(&db, f.plan.run_id).await.unwrap();
+    admission::accept(
+        &db,
+        f.plan.run_id,
+        load(&db, f.plan.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .manifest
+            .as_ref()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let owner = admission::claim(&db, f.plan.run_id).await.unwrap();
     let plan = load(&db, f.plan.run_id).await.unwrap().unwrap();
     let before = f.memory.0.lock().unwrap().reads;

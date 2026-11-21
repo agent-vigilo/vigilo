@@ -98,9 +98,11 @@ enum RetrySettlement {
 
 #[derive(Debug)]
 struct WorkerRunContext {
+    resources: crate::context::resources::Services,
     reader: Arc<crate::case_reader::RunReader>,
     profile: RunProfile,
     evaluator_catalog: execution_processing::RunEvaluatorCatalog,
+    response_identity: execution_processing::response::Identity,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +113,7 @@ struct WorkerRuntime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct WorkerRunContextKey {
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
 }
@@ -118,6 +121,8 @@ struct WorkerRunContextKey {
 #[derive(Debug, Deserialize)]
 /// Queue payload that signals a run chunk is ready for processing.
 struct ChunkReadyMessage {
+    tenant_id: Uuid,
+    plan_digest: String,
     run_id: Uuid,
     run_shard: i16,
     chunk_id: Uuid,
@@ -126,6 +131,7 @@ struct ChunkReadyMessage {
 }
 
 struct ChunkLeaseGuard {
+    control: crate::operations::control::Observation,
     db: sqlx::PgPool,
     chunk: Mutex<crate::models::run_chunk::RunChunk>,
     lease_seconds: i32,
@@ -134,7 +140,7 @@ struct ChunkLeaseGuard {
 struct ChunkHeartbeat {
     guard: Arc<ChunkLeaseGuard>,
     cancel: CancellationToken,
-    handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -162,6 +168,7 @@ impl ChunkLeaseGuard {
     ) -> Arc<Self> {
         Arc::new(Self {
             db: db.clone(),
+            control: crate::operations::control::Observation::new(chunk.execution_control),
             chunk: Mutex::new(chunk),
             lease_seconds,
         })
@@ -178,6 +185,7 @@ impl ChunkLeaseGuard {
         else {
             return Ok(false);
         };
+        self.control.update(renewed.execution_control);
         *self.chunk.lock().await = renewed;
         Ok(true)
     }
@@ -209,16 +217,27 @@ impl ChunkHeartbeat {
         Self {
             guard,
             cancel,
-            handle,
+            handle: Some(handle),
         }
     }
 
-    async fn stop(self) -> crate::models::run_chunk::RunChunk {
+    async fn stop(mut self) -> crate::models::run_chunk::RunChunk {
         self.cancel.cancel();
-        if let Err(err) = self.handle.await {
+        if let Some(handle) = self.handle.take()
+            && let Err(err) = handle.await
+        {
             warn!(error = %err, "worker heartbeat task failed to join");
         }
         self.guard.current_chunk().await
+    }
+}
+
+impl Drop for ChunkHeartbeat {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -260,7 +279,7 @@ async fn run_chunk_heartbeat(
                         let renewed = guard.renew().await?;
                         let renewed_attempts = if renewed {
                             Some(execution_processing::heartbeat_running_attempts_for_chunk(
-                                &guard.db,
+                                &guard.db, chunk.tenant_id,
                                 chunk.run_id,
                                 chunk.run_shard,
                                 chunk.id,
@@ -439,13 +458,18 @@ impl EvaluatorLoaderService {
     /// Returns run-scoped profile and evaluator metadata, using cache when available.
     async fn get_or_build_run_context(
         &self,
+        tenant_id: Uuid,
         run_id: Uuid,
         run_shard: i16,
         execution_db: &sqlx::PgPool,
         database_alias: &str,
         cancel: &CancellationToken,
     ) -> anyhow::Result<Arc<WorkerRunContext>> {
-        let key = WorkerRunContextKey { run_id, run_shard };
+        let key = WorkerRunContextKey {
+            tenant_id,
+            run_id,
+            run_shard,
+        };
         let cell = self
             .run_context_cache
             .get_with(key, async { Arc::new(OnceCell::new()) })
@@ -453,10 +477,14 @@ impl EvaluatorLoaderService {
         let context = cell
             .get_or_try_init(|| async {
                 let raw: serde_json::Value = self.context.dbr().await?.run_database_operation(database_alias,"worker_run_snapshot",async {
-                    Ok(sqlx::query_scalar("SELECT config_snapshot FROM run_snapshots WHERE run_id=$1 AND run_shard=$2")
-                        .bind(run_id).bind(run_shard).fetch_one(execution_db).await?)
+                    let mut tx=execution_db.begin().await?;
+                    crate::db::scope::set_system(&mut tx,tenant_id,run_id).await?;
+                    let raw=sqlx::query_scalar("SELECT config_snapshot FROM run_snapshots WHERE run_id=$1 AND run_shard=$2")
+                        .bind(run_id).bind(run_shard).fetch_one(&mut *tx).await?;
+                    tx.commit().await?;
+                    Ok(raw)
                 }).await?;
-                let reference = serde_json::from_value(
+                let reference: crate::contracts::case_storage::ObjectRef = serde_json::from_value(
                     raw.get("run_plan")
                         .ok_or_else(|| anyhow::anyhow!("run snapshot has no immutable plan"))?
                         .clone(),
@@ -465,7 +493,8 @@ impl EvaluatorLoaderService {
                 let binding = raw["storage_binding_hash"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("missing storage binding"))?;
-                let store = self.context.storage(binding, &limits).await?;
+                let request = crate::operations::resources::Request::accepted(tenant_id,run_id,&reference.digest,binding.to_owned())?;
+                let (resources, store) = self.context.execution_resources(request,&limits,cancel).await?;
                 let reader = Arc::new(
                     crate::case_reader::RunReader::open_cached(
                         store,
@@ -495,7 +524,15 @@ impl EvaluatorLoaderService {
                         run_id
                     );
                 }
+                let response_identity = execution_processing::response::Identity {
+                    profile_hash: reader.configuration.snapshot["profile_hash"].as_str()
+                        .ok_or_else(|| anyhow::anyhow!("missing profile identity"))?.to_owned(),
+                    execution_plan_hash: snapshot.execution_plan_hash.clone(),
+                    runtime_artifact_digest: execution_processing::response::runtime_digest().await?,
+                };
                 Ok::<_, anyhow::Error>(Arc::new(WorkerRunContext {
+                    resources: resources.resource_services(),
+                    response_identity,
                     reader,
                     profile: snapshot.profile,
                     evaluator_catalog,
@@ -503,6 +540,43 @@ impl EvaluatorLoaderService {
             })
             .await?;
         Ok(context.clone())
+    }
+}
+
+/// Persistent library-owned worker state. The host supplies identity explicitly;
+/// standalone commands retain their existing process-label discovery separately.
+pub(crate) struct Service {
+    context: Context,
+    loader: EvaluatorLoaderService,
+    runtime: WorkerRuntime,
+}
+impl Service {
+    pub(crate) fn new(context: Context, id: Uuid, host: Option<String>) -> Self {
+        Self {
+            loader: EvaluatorLoaderService::new(context.clone()),
+            context,
+            runtime: WorkerRuntime {
+                worker_id: id,
+                worker_host: host,
+            },
+        }
+    }
+    pub(crate) async fn once(&self) -> anyhow::Result<usize> {
+        run_worker_drain_pass(self.context.clone(), &self.loader, self.runtime.clone(), 1).await
+    }
+    pub(crate) async fn run(
+        &self,
+        max_inflight: u16,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        start::run(
+            self.context.clone(),
+            self.runtime.clone(),
+            self.loader.clone(),
+            max_inflight,
+            cancel,
+        )
+        .await
     }
 }
 
@@ -537,6 +611,10 @@ pub(crate) struct Command {
 
     #[command(flatten)]
     pub(crate) agent_http: crate::cli::args::AgentHttpOptions,
+
+    /// Trusted JSON credential provider configuration (never a run-profile input)
+    #[arg(long, env = "VIGILO_AGENT_CREDENTIALS")]
+    pub(crate) agent_credentials: Option<std::path::PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<SubCommand>,
@@ -992,7 +1070,15 @@ async fn run_worker_message_admitted(
         .run_database_operation(
             &payload.database_alias,
             "worker_chunk_claim",
-            claim_hinted_chunk_with_route_refresh(database_router, &hinted_route, payload.chunk_id),
+            claim_hinted_chunk_with_route_refresh(
+                database_router,
+                &hinted_route,
+                payload.chunk_id,
+                Some(&chunk_processing::AcceptedWork {
+                    tenant_id: payload.tenant_id,
+                    plan_digest: &payload.plan_digest,
+                }),
+            ),
         )
         .await
     {
@@ -1019,6 +1105,27 @@ async fn run_worker_message_admitted(
     };
     let db = &db;
     let Some(mut chunk) = claimed else {
+        let paused = chunk_processing::is_verified_chunk_paused(
+            db,
+            payload.run_id,
+            payload.run_shard,
+            payload.chunk_id,
+            &chunk_processing::AcceptedWork {
+                tenant_id: payload.tenant_id,
+                plan_digest: &payload.plan_digest,
+            },
+        )
+        .await?;
+        if paused {
+            mq.delay_worker_message(
+                &message.raw,
+                WORKER_ROUTE_RETRY_DELAY_SECONDS,
+                "run execution is paused",
+                "run_paused",
+            )
+            .await?;
+            return Ok(WorkerCycleOutcome::Processed);
+        }
         mq.ack(&message.raw).await?;
         info!(
             chunk_id = %payload.chunk_id,
@@ -1078,7 +1185,7 @@ async fn run_worker_message_admitted(
         runtime.clone(),
     );
     let loaded = tokio::select! {
-        result=evaluator_loader.get_or_build_run_context(chunk.run_id,chunk.run_shard,db,&payload.database_alias,&heartbeat.cancel)=>result,
+        result=evaluator_loader.get_or_build_run_context(chunk.tenant_id,chunk.run_id,chunk.run_shard,db,&payload.database_alias,&heartbeat.cancel)=>result,
         _=heartbeat.cancel.cancelled()=>Err(anyhow::anyhow!("chunk authority lost during context read")),
     };
     let run_context = match loaded {
@@ -1173,18 +1280,23 @@ async fn run_worker_message_admitted(
             // for retry_after.
             let processed = match async {
                 let mut outcomes = Vec::new();
-                while let Some(cases) = batches.next(&heartbeat.cancel).await? {
+                while heartbeat.guard.control.enabled() {
+                    let Some(cases) = batches.next(&heartbeat.cancel).await? else {
+                        break;
+                    };
                     case_ids.extend(cases.iter().map(|case| case.case_id));
                     outcomes.extend(
                         execution_processing::process_case_batch_execution(
-                            &context,
+                            &run_context.resources.apply(&context),
                             db,
                             &payload.database_alias,
                             &chunk,
                             &attempt_lease,
                             &run_context.profile,
                             &run_context.evaluator_catalog,
+                            &run_context.response_identity,
                             &cases,
+                            &heartbeat.guard.control,
                         )
                         .await?,
                     );
@@ -1260,6 +1372,7 @@ async fn run_worker_message_admitted(
                     "worker_terminal_transitions",
                     execution_processing::finalize_execution_terminal_transitions(
                         db,
+                        chunk.tenant_id,
                         chunk.run_id,
                         chunk.run_shard,
                         runtime.worker_id,
@@ -1296,6 +1409,24 @@ async fn run_worker_message_admitted(
                 return Ok(WorkerCycleOutcome::Processed);
             }
 
+            if !heartbeat.guard.control.enabled() {
+                let chunk = heartbeat.stop().await;
+                settle_chunk_waiting_for_execution_retry(
+                    ChunkSettlementContext::new(
+                        database_router,
+                        &payload.database_alias,
+                        db,
+                        mq,
+                        message,
+                        &chunk,
+                    ),
+                    "run execution is suspended",
+                    None,
+                )
+                .await?;
+                return Ok(WorkerCycleOutcome::Processed);
+            }
+
             // --- Check for pending execution retries ---
             // Open retry work releases the chunk and delays the message until
             // the next retry window.
@@ -1305,12 +1436,33 @@ async fn run_worker_message_admitted(
                     "worker_execution_state_summary",
                     execution_processing::summarize_chunk_execution_state(
                         db,
+                        chunk.tenant_id,
                         chunk.run_id,
                         chunk.run_shard,
                         &case_ids,
                     ),
                 )
                 .await?;
+            if chunk_state.open_execution_count > 0
+                && !run_context.profile.harness.is_inline()
+                && chunk_state.retry_scheduled_count == 0
+            {
+                let chunk = heartbeat.stop().await;
+                database_router
+                    .run_database_operation(
+                        &payload.database_alias,
+                        "worker_release_deferred_chunk",
+                        execution_processing::deferred::release(db, &chunk),
+                    )
+                    .await?;
+                mq.ack(&message.raw).await?;
+                debug!(
+                    chunk_id = %chunk.id,
+                    awaiting_agent_count = chunk_state.awaiting_agent_count,
+                    "released deferred chunk"
+                );
+                return Ok(WorkerCycleOutcome::Processed);
+            }
             if chunk_state.open_execution_count > 0 {
                 let chunk = heartbeat.stop().await;
                 let reason = format!(
@@ -1420,12 +1572,14 @@ pub(crate) async fn claim_hinted_chunk_with_route_refresh(
     database_router: &crate::context::database::DatabaseRouter,
     hinted_route: &crate::context::database::ExecutionWriteRoute,
     chunk_id: Uuid,
+    identity: Option<&chunk_processing::AcceptedWork<'_>>,
 ) -> anyhow::Result<(sqlx::PgPool, Option<crate::models::run_chunk::RunChunk>)> {
     match chunk_processing::claim_hinted_chunk_for_processing(
         database_router,
         hinted_route,
         chunk_id,
         CHUNK_LEASE_SECONDS,
+        identity,
     )
     .await
     {
@@ -1441,9 +1595,20 @@ pub(crate) async fn claim_hinted_chunk_with_route_refresh(
                     hinted_route.hint.run_shard,
                 )
                 .await;
-            let route = database_router
-                .execution_route(hinted_route.hint.run_id, hinted_route.hint.run_shard)
-                .await?;
+            let route = if let Some(verified) =
+                error.downcast_ref::<crate::db::scope::VerifiedWorkerIdentity>()
+            {
+                database_router
+                    .execution_route_for_verified_worker(*verified)
+                    .await?
+            } else {
+                #[cfg(not(test))]
+                anyhow::bail!("worker route refresh requires verified local identity");
+                #[cfg(test)]
+                database_router
+                    .execution_route(hinted_route.hint.run_id, hinted_route.hint.run_shard)
+                    .await?
+            };
             let claim = chunk_processing::claim_routed_chunk_for_processing(
                 database_router,
                 &route,
@@ -1451,6 +1616,7 @@ pub(crate) async fn claim_hinted_chunk_with_route_refresh(
                 hinted_route.hint.run_shard,
                 chunk_id,
                 CHUNK_LEASE_SECONDS,
+                identity,
             )
             .await?;
             Ok((route.pool, claim))
@@ -1487,6 +1653,45 @@ mod tests {
         output::OutputFormat,
     };
 
+    #[tokio::test]
+    async fn dropping_a_chunk_heartbeat_stops_its_owned_task() {
+        let chunk = serde_json::from_value(json!({
+            "tenant_id": Uuid::nil(), "execution_control": "enabled", "id": Uuid::nil(),
+            "run_id": Uuid::nil(), "run_shard": 0, "dataset_version_id": Uuid::nil(),
+            "profile_group_id": "default", "ordinal_start": 0, "ordinal_end": 1,
+            "status": "leased", "lease_token": null, "leased_until": null,
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost:1/vigilo")
+            .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let handle = tokio::spawn(std::future::pending());
+        let abort = handle.abort_handle();
+        let heartbeat = super::ChunkHeartbeat {
+            guard: super::ChunkLeaseGuard::new(&pool, chunk, 60),
+            cancel: cancel.clone(),
+            handle: Some(handle),
+        };
+        drop(heartbeat);
+        let cancelled = cancel.is_cancelled();
+        let stopped = tokio::time::timeout(Duration::from_secs(1), async {
+            while !abort.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        // Exact cleanup even when running this test against the broken implementation.
+        abort.abort();
+        assert!(
+            cancelled,
+            "dropping work must stop background lease renewal"
+        );
+        assert!(stopped, "owned heartbeat task must exit after owner drop");
+    }
+
     #[test]
     fn default_worker_processes_one_chunk_at_a_time() {
         assert_eq!(DEFAULT_WORKER_MAX_INFLIGHT_CHUNKS, 1);
@@ -1509,6 +1714,8 @@ mod tests {
         let chunk_id = Uuid::now_v7();
 
         let message: ChunkReadyMessage = serde_json::from_value(json!({
+            "tenant_id": "00000000-0000-0000-0000-000000000000",
+            "plan_digest": "fixture-digest",
             "run_id": run_id,
             "run_shard": 42,
             "chunk_id": chunk_id,
@@ -1623,6 +1830,7 @@ mod tests {
         for _ in 0..2 {
             let error = loader
                 .get_or_build_run_context(
+                    Uuid::nil(),
                     run_id,
                     1,
                     &unavailable,

@@ -135,19 +135,23 @@ async fn failed_chunk_retains_scores_and_fences_unfinished_evidence(pool: PgPool
     );
     let late = crate::db::workflows::execution_processing::finalize_execution_terminal_transitions(
         &pool,
+        uuid::Uuid::nil(),
         run,
         4,
         Uuid::now_v7(),
         1,
         &[
             crate::db::workflows::execution_processing::ExecutionTerminalTransition {
+                http_policy_revisions: Default::default(),
                 execution_id: partial,
                 attempt_id: partial_attempt,
                 attempt_no: 1,
                 completed: true,
                 error_message: None,
                 requires_worker_lease: false,
+                agent_invocation: None,
                 agent_failure: None,
+                response_evidence: None,
             },
         ],
     )
@@ -649,18 +653,22 @@ async fn terminal_failure_serializes_with_a_waiting_result_writer(pool: PgPool) 
     let writer = tokio::spawn(async move {
         finalize_execution_terminal_transitions(
             &writer_pool,
+            uuid::Uuid::nil(),
             run,
             4,
             worker,
             1,
             &[ExecutionTerminalTransition {
+                http_policy_revisions: Default::default(),
                 execution_id: execution,
                 attempt_id: attempt,
                 attempt_no: 1,
                 completed: true,
                 error_message: None,
                 requires_worker_lease: true,
+                agent_invocation: None,
                 agent_failure: None,
+                response_evidence: None,
             }],
         )
         .await
@@ -806,6 +814,23 @@ async fn undispatched_cancellation_settles_without_promoting_unfinished_evidence
         .unwrap();
     assert!(again.already_cancelled);
     assert_eq!(again.chunks_cancelled, 0);
+    let events: Vec<serde_json::Value> = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.cancelled'",
+    )
+    .bind(run)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 1);
+    for (summary_field, event_field) in [
+        ("chunks_cancelled_by_request", "chunks_cancelled"),
+        ("executions_cancelled_by_request", "executions_cancelled"),
+        ("attempts_cancelled_by_request", "attempts_cancelled"),
+    ] {
+        assert_eq!(again.run.summary[summary_field], events[0][event_field]);
+    }
+    assert_eq!(again.run.summary, cancelled.run.summary);
+
     assert_eq!(
         super::advance_pending_summaries(&pool, &aggregation)
             .await

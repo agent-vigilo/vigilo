@@ -25,11 +25,22 @@ It focuses on the parts of AI evaluation that become hard as systems grow: idemp
 - **Ship versioned evaluators**: publish WASI Preview 2 WebAssembly evaluators with strict WIT contracts.
 - **Protect the runtime**: Wasmtime fuel, memory, timeout, log, and concurrency limits isolate evaluator execution.
 - **Avoid lost events**: durable outbox ledger plus hot delivery queue, RabbitMQ publisher confirms, and idempotency keys.
-- **Gate deployments**: turn evaluator measurements and host-owned profile policy into dimension scores, total aggregate scores, and reproducible release decisions.
+- **Gate deployments**: turn evaluator measurements and host-owned profile policy into dimension scores, total aggregate scores, and auditable release decisions.
+
+## Harnesses And Evaluators
+
+The **Direct Probe (Direct Execution of Target Agent)** harness invokes the target
+and captures evidence. A **Delegated Trial (Harness-Orchestrated Session)** gives
+the interaction to a separate harness and collects its evidence. Both support
+inline or polling completion through the CLI, and callback completion through the
+library. **Deterministic (Code Scorer)** and **Model-as-a-Judge** evaluators
+measure evidence. Host policy owns normalization and release gates.
+See the [canonical vocabulary](https://agentvigilo.com/docs/glossary#harnesses-and-evaluators)
+for session ownership, evaluator types and completion-delivery boundaries.
 
 ## How Results Are Calculated
 
-Each evaluator invocation returns one measurement or abstention plus optional diagnostics. The profile binding owns normalization, threshold, dimension, weight, requiredness, and blocking policy. Missing, errored, abstained, duplicated, or invalid required output produces an errored execution aggregate with no score. An execution passes when completeness is satisfied, `aggregate_score >= min_execution_score`, and no host-derived blocking result fails.
+Each evaluator invocation returns one measurement or abstention plus optional diagnostics. The profile binding owns normalization, threshold, dimension, weight, requiredness, and blocking policy. Missing, errored, abstained, duplicated, or invalid required output produces an errored execution aggregate with no score. An execution passes when completeness is satisfied, `aggregate_score >= min_execution_score`, and the configured blocking policy permits it.
 
 Run scorecard gates enforce dimension or evaluator thresholds across the full run, including configured case-group and tag slices. Shards publish bounded rollups; the coordinator merges those rollups and persists the authoritative scorecard without scanning execution rows centrally.
 
@@ -118,28 +129,63 @@ checks frozen inputs and finalized reuse, verifies the dispatch boundary, and
 checks exact cleanup. Both storage tiers contribute to the same aggregate
 coverage report and 80% gate.
 
-Agent HTTP transport tests use a disposable loopback server and run separately
+Agent and evaluator HTTP transport tests use disposable loopback servers and run separately
 from service-free tests:
 
 ```bash
 cargo test -p vigilo --locked --features agent-http-services --test agent_http_services
+cargo build -p http-request-fixture --locked --target wasm32-wasip2 --release
+cargo test -p vigilo --locked --features evaluator-http-services --test evaluator_http_services
 ```
 
-CI includes these transport tests in the end-to-end coverage report.
-
-After setting `DATABASE_URL`, run every PostgreSQL-backed SQLx test with:
+The public evaluator-operation tier also requires disposable PostgreSQL and the
+existing sentiment and HTTP Wasm fixtures:
 
 ```bash
-cargo test -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
+cargo build -p sentiment-basic-en -p http-request-fixture --locked --target wasm32-wasip2 --release
+cargo test -p vigilo --locked --features evaluator-http-services --test evaluator_operations_services -- --nocapture
 ```
 
-Within the `vigilo` binary target, `#[ignore]` is reserved for this database
+It verifies immutable publication, caller-bound registry access and test-specific
+HTTP policy/credentials through the public library. CI includes these transport
+and operation tests in the end-to-end coverage report and the same 80% gate.
+
+Use the database connection settings from `.github/workflows/build.yaml` for
+`DATABASE_URL`; direct fixture SQL needs the same explicit connection defaults as
+the runtime. Run every PostgreSQL-backed SQLx test with:
+
+```bash
+cargo test -p vigilo --locked --lib -- --ignored --nocapture --test-threads=4
+```
+
+Within the `vigilo` library target, `#[ignore]` is reserved for this database
 integration tier so the command remains complete.
+
+The independent library consumer fixture lives in `vigilo/tests/fixtures/library-consumer`.
+CI seeds its lockfile from the workspace lockfile and builds it as a separate package
+using only the supported public API. It checks typed operation results, `Send`
+futures and host resolver implementations across run, export, dataset, evaluator
+and daemon interfaces. These service-free checks construct and drop I/O futures;
+the named integration tiers verify live authority, persistence and execution.
+
+The crate release workflow also verifies the actual package outside the checkout,
+including its library/binary tests and operation doctests. With Python 3.12+, run:
+
+```bash
+cargo fetch --locked
+python3 scripts/releases/verify_package.py --allow-dirty
+```
+
+The verification step runs offline after dependency preparation and does not publish.
 
 The end-to-end tier runs `multi_database_routing` and `multi_database_e2e`
 separately because they require the complete distributed dependency set. The
 workflow builds the evaluator Wasm and supplies the required database,
 messaging, storage-owner configuration (`VIGILO_STORAGE_CONFIG`), and opt-in environment variables.
+It exercises the public hosted library with restricted database roles, injected
+resources, two owners, concurrent coordinators and workers, forged queue hints,
+pause/resume, revocation, and lease recovery. Synthetic row policies belong to the
+test fixture; they are not installed by the runtime.
 
 The pre-commit hook runs nightly rustfmt only. The pre-push hook runs clippy, the service-free Rust tier, and the web typecheck. Database integration, blob storage integration, performance service integration, migration, end-to-end, evaluator compatibility, and documentation checks run as separate required CI jobs.
 
@@ -172,7 +218,9 @@ cargo llvm-cov --no-report -p xtask --locked --features performance-services --t
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test blob_storage_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features blob-storage-services --test dataset_ingestion_services -- --nocapture
 cargo llvm-cov --no-report -p vigilo --locked --features agent-http-services --test agent_http_services
-cargo llvm-cov --no-report -p vigilo --locked --bin vigilo -- --ignored --nocapture --test-threads=4
+cargo llvm-cov --no-report -p vigilo --locked --features evaluator-http-services --test evaluator_http_services
+cargo llvm-cov --no-report -p vigilo --locked --features evaluator-http-services --test evaluator_operations_services
+cargo llvm-cov --no-report -p vigilo --locked --lib -- --ignored --nocapture --test-threads=4
 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_routing -- --nocapture
 VIGILO_E2E_MULTI_DATABASE=1 cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e -- --nocapture
 cargo llvm-cov report --fail-under-lines 80 --ignore-filename-regex '[/\\]postgres_tests(\.rs|[/\\])' --lcov --output-path lcov.info

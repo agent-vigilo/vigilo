@@ -96,22 +96,90 @@ const OUTBOX_LEASE_SECONDS: i32 = 60;
 const OUTBOX_RETRY_DELAY_SECONDS: i32 = 10;
 
 #[derive(Debug, Clone)]
-struct CoordinatorRuntimeConfig {
-    run_creation: run_creation::Config,
-    tick_seconds: u64,
-    lease_seconds: i32,
-    max_create_recovery_per_cycle: usize,
-    max_dispatch_per_cycle: usize,
-    max_finalize_per_cycle: usize,
-    aggregation: run_shard_summary::AggregationConfig,
-    aggregation_database_parallelism: NonZeroUsize,
-    run_chunk_dispatch_window_size: i64,
-    chunk_lease_recovery_batch_size: i64,
-    chunk_lease_max_recoveries: i32,
-    outbox_batch_size: i64,
-    outbox_publish_parallelism: usize,
-    outbox_lease_seconds: i32,
-    outbox_retry_delay_seconds: i32,
+/// Bounded orchestration settings shared by CLI adaptation and embedding hosts.
+pub struct CoordinatorRuntimeConfig {
+    pub run_creation: run_creation::Config,
+    pub tick_seconds: u64,
+    pub lease_seconds: i32,
+    pub max_create_recovery_per_cycle: usize,
+    pub max_dispatch_per_cycle: usize,
+    pub max_finalize_per_cycle: usize,
+    pub aggregation: run_shard_summary::AggregationConfig,
+    pub aggregation_database_parallelism: NonZeroUsize,
+    pub run_chunk_dispatch_window_size: i64,
+    pub chunk_lease_recovery_batch_size: i64,
+    pub chunk_lease_max_recoveries: i32,
+    pub outbox_batch_size: i64,
+    pub outbox_publish_parallelism: usize,
+    pub outbox_lease_seconds: i32,
+    pub outbox_retry_delay_seconds: i32,
+}
+
+impl Default for CoordinatorRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            run_creation: Default::default(),
+            tick_seconds: COORDINATOR_TICK_SECONDS,
+            lease_seconds: COORDINATOR_LEASE_SECONDS,
+            max_create_recovery_per_cycle: COORDINATOR_MAX_CREATE_RECOVERY_PER_CYCLE as usize,
+            max_dispatch_per_cycle: COORDINATOR_MAX_DISPATCH_PER_CYCLE as usize,
+            max_finalize_per_cycle: COORDINATOR_MAX_FINALIZE_PER_CYCLE as usize,
+            aggregation: run_shard_summary::AggregationConfig {
+                max_pages: COORDINATOR_MAX_AGGREGATION_PAGES_PER_CYCLE as usize,
+                time_budget: Duration::from_millis(COORDINATOR_AGGREGATION_TIME_BUDGET_MS),
+                parallelism: COORDINATOR_AGGREGATION_PARALLELISM as usize,
+            },
+            aggregation_database_parallelism: NonZeroUsize::new(
+                COORDINATOR_AGGREGATION_DATABASE_PARALLELISM as usize,
+            )
+            .unwrap(),
+            run_chunk_dispatch_window_size: RUN_CHUNK_DISPATCH_WINDOW_SIZE,
+            chunk_lease_recovery_batch_size: CHUNK_LEASE_RECOVERY_BATCH_SIZE,
+            chunk_lease_max_recoveries: CHUNK_LEASE_MAX_RECOVERIES,
+            outbox_batch_size: OUTBOX_BATCH_SIZE,
+            outbox_publish_parallelism: OUTBOX_PUBLISH_PARALLELISM as usize,
+            outbox_lease_seconds: OUTBOX_LEASE_SECONDS,
+            outbox_retry_delay_seconds: OUTBOX_RETRY_DELAY_SECONDS,
+        }
+    }
+}
+impl CoordinatorRuntimeConfig {
+    pub(crate) fn validate(&self) -> Result<(), crate::operations::Error> {
+        let count = |v: usize| (1..=100_000).contains(&v);
+        if !(1..=3600).contains(&self.tick_seconds)
+            || !(1..=86400).contains(&self.lease_seconds)
+            || !count(self.max_create_recovery_per_cycle)
+            || !count(self.max_dispatch_per_cycle)
+            || !count(self.max_finalize_per_cycle)
+            || !count(self.aggregation.max_pages)
+            || !(Duration::from_millis(1)..=Duration::from_secs(60))
+                .contains(&self.aggregation.time_budget)
+            || !(1..=128).contains(&self.aggregation.parallelism)
+            || self.aggregation_database_parallelism.get() > 128
+            || !(1..=1_000_000).contains(&self.run_chunk_dispatch_window_size)
+            || !(1..=1_000_000).contains(&self.chunk_lease_recovery_batch_size)
+            || !(0..=10_000).contains(&self.chunk_lease_max_recoveries)
+            || !(1..=1_000_000).contains(&self.outbox_batch_size)
+            || !(1..=10_000).contains(&self.outbox_publish_parallelism)
+            || !(1..=86400).contains(&self.outbox_lease_seconds)
+            || !(1..=86400).contains(&self.outbox_retry_delay_seconds)
+            || !(1..=1_000_000).contains(&self.run_creation.case_batch_size)
+            || !(1..=100_000).contains(&self.run_creation.case_page_budget)
+        {
+            return Err(crate::operations::Error::InvalidConfiguration(
+                "invalid coordinator work limits",
+            ));
+        }
+        Ok(())
+    }
+}
+/// Library-owned cycle entry: no argument parsing, output or process signals.
+pub(crate) async fn cycle(
+    context: Context,
+    id: Uuid,
+    config: &CoordinatorRuntimeConfig,
+) -> anyhow::Result<()> {
+    run_coordinator_cycle(context, id, config).await
 }
 
 #[derive(Debug, Subcommand)]
@@ -142,6 +210,10 @@ pub(crate) struct Command {
 
     #[command(flatten)]
     pub(crate) run_creation: RunCreationOptions,
+
+    /// Trusted JSON credential provider configuration for deferred harness requests
+    #[arg(long, env = "VIGILO_AGENT_CREDENTIALS")]
+    pub(crate) agent_credentials: Option<std::path::PathBuf>,
 
     /// Seconds between coordinator cycles in start mode
     #[arg(long, env = "VIGILO_COORDINATOR_TICK_SECONDS", default_value_t = COORDINATOR_TICK_SECONDS, value_parser = clap::value_parser!(u64).range(1..=3600))]
@@ -262,11 +334,12 @@ impl Executable for Command {
 /// Executes one full coordinator cycle.
 ///
 /// The cycle is intentionally ordered to keep run progression deterministic:
-/// 1. resume stale multi-database run creation
-/// 2. recover expired worker chunk leases
-/// 3. atomically start pending runs and dispatch bounded chunk windows
-/// 4. aggregate bounded receipt pages, then finalize exact sealed shard sets
-/// 5. publish bounded batches of pending outbox records from serviceable placements
+/// 1. deliver pending execution control and settle quiescent revocations
+/// 2. resume stale multi-database run creation
+/// 3. recover expired worker chunk leases
+/// 4. atomically start pending runs and dispatch bounded chunk windows
+/// 5. aggregate bounded receipt pages, then finalize exact sealed shard sets
+/// 6. publish bounded batches of pending outbox records from serviceable placements
 async fn run_coordinator_cycle(
     context: Context,
     coordinator_id: Uuid,
@@ -282,6 +355,8 @@ async fn run_coordinator_cycle(
     let database_router = context.dbr().await?;
     debug!(coordinator_id = %coordinator_id, "database router ready");
 
+    crate::db::workflows::run_control::deliver(database_router, None).await?;
+
     // --- Resume incomplete run creation ---
     let creation_recovery_started = Instant::now();
     let creation_recovery = crate::run_admission::recover(
@@ -296,7 +371,8 @@ async fn run_coordinator_cycle(
     // Recovery runs before new dispatch so dead workers do not block
     // finalization or leave ready work stranded.
     let recovery_started = Instant::now();
-    let recovery = recover_expired_chunk_leases(database_router, coordinator_id, config).await?;
+    let (recovery, cancellations) =
+        recover_expired_chunk_leases(&context, database_router, coordinator_id, config).await?;
     let recovery_ms = recovery_started.elapsed().as_millis() as u64;
 
     // --- Dispatch runnable chunk windows ---
@@ -330,6 +406,7 @@ async fn run_coordinator_cycle(
     let publication =
         publish_outbox_events(database_router, &publisher, &outbox_config, coordinator_id).await?;
     let outbox_publish_ms = outbox_started.elapsed().as_millis() as u64;
+    crate::deferred_runtime::deliver_cancellations(&context, cancellations).await;
 
     let mut placement_failures = PlacementFailureStats::default();
     placement_failures.merge(recovery.failures);
@@ -410,10 +487,14 @@ fn log_database_operation_error(
 }
 
 async fn recover_expired_chunk_leases(
+    context: &Context,
     database_router: &database::DatabaseRouter,
     coordinator_id: Uuid,
     config: &CoordinatorRuntimeConfig,
-) -> anyhow::Result<PlacementPassResult<run_dispatch::ChunkLeaseRecoveryStats>> {
+) -> anyhow::Result<(
+    PlacementPassResult<run_dispatch::ChunkLeaseRecoveryStats>,
+    crate::deferred_runtime::Work,
+)> {
     // --- Expired lease recovery pass ---
     // The workflow returns both recovered chunks and chunks failed after
     // exhausting recovery attempts.
@@ -437,13 +518,19 @@ async fn recover_expired_chunk_leases(
         |alias| async move {
             let db = database_router.execution_database(&alias).await?;
             let recovery_started = Instant::now();
-            let stats = run_dispatch::recover_expired_chunk_leases(
+            let (stats, jobs) = run_dispatch::recover_expired_work(
                 &db,
                 config.chunk_lease_max_recoveries,
                 config.chunk_lease_recovery_batch_size,
+                database_router.supports_standalone_polling(),
             )
             .await?;
-            Ok((stats, recovery_started.elapsed().as_millis() as u64))
+            Ok((
+                stats,
+                recovery_started.elapsed().as_millis() as u64,
+                db,
+                jobs,
+            ))
         },
     )
     .await;
@@ -453,7 +540,9 @@ async fn recover_expired_chunk_leases(
     for skip in batch.skipped {
         record_placement_skip(&mut failures, coordinator_id, "chunk_lease_recovery", skip);
     }
-    for (alias, (alias_stats, recovery_ms)) in batch.successes {
+    let mut deferred = Vec::new();
+    for (alias, (alias_stats, recovery_ms, db, jobs)) in batch.successes {
+        deferred.extend(jobs.into_iter().map(|job| (db.clone(), job)));
         stats.recovered_chunks += alias_stats.recovered_chunks;
         stats.failed_chunks += alias_stats.failed_chunks;
 
@@ -499,10 +588,14 @@ async fn recover_expired_chunk_leases(
         );
     }
 
-    Ok(PlacementPassResult {
-        output: stats,
-        failures,
-    })
+    let cancellations = crate::deferred_runtime::run(context, deferred).await;
+    Ok((
+        PlacementPassResult {
+            output: stats,
+            failures,
+        },
+        cancellations,
+    ))
 }
 
 /// Drains placement-local summaries within independent aggregation budgets.
@@ -650,7 +743,10 @@ async fn dispatch_ready_chunk_windows(
             .deadline_database_operation(
                 &database_alias,
                 "dispatch_execution_pool",
-                database_router.execution_route(route.run_id, route.run_shard),
+                database_router.execution_route_from_placements(
+                    &snapshot.shard_placement,
+                    &snapshot.database_placement,
+                ),
             )
             .await
             .map_err(anyhow::Error::new)
@@ -676,16 +772,18 @@ async fn dispatch_ready_chunk_windows(
                 continue;
             }
         };
-        if execution_route.placement.database_alias != route.database_alias
-            || execution_route.placement.route_version != route.route_version
+        let execution_placement = execution_route.placement();
+        if execution_placement.database_alias != route.database_alias
+            || execution_placement.route_version != route.route_version
+            || execution_placement.write_epoch != route.write_epoch
         {
             debug!(
                 run_id = %route.run_id,
                 run_shard = route.run_shard,
                 selected_database_alias = %route.database_alias,
                 selected_route_version = route.route_version,
-                current_database_alias = %execution_route.placement.database_alias,
-                current_route_version = execution_route.placement.route_version,
+                current_database_alias = %execution_placement.database_alias,
+                current_route_version = execution_placement.route_version,
                 "dispatch route changed before execution pool resolution"
             );
             dispatch_claim.control_tx.rollback().await?;
@@ -947,7 +1045,8 @@ async fn finalize_ready_runs(
         checked_run_ids.push(run.id);
 
         let collection =
-            collect_run_shard_summaries(database_router, coordinator_id, run.id).await?;
+            collect_run_shard_summaries(database_router, coordinator_id, run.tenant_id, run.id)
+                .await?;
         let placement_failure_count = collection.failures.failed_operation_count();
         failures.merge(collection.failures);
         let summaries = collection.output.summaries;
@@ -963,7 +1062,8 @@ async fn finalize_ready_runs(
                 finalization_candidate_select_ms,
                 "finalization candidate is waiting for sealed shard summaries"
             );
-            run_finalize::mark_finalization_candidate_checked(control_db, run.id).await?;
+            run_finalize::mark_finalization_candidate_checked(control_db, run.tenant_id, run.id)
+                .await?;
             continue;
         }
 
@@ -971,7 +1071,8 @@ async fn finalize_ready_runs(
             run_finalize::validate_summary_set(run.id, &summaries, &run.aggregation_policy_hash)
         {
             warn!(run_id = %run.id, error = %error, "invalid finalization summary; deferred this candidate");
-            run_finalize::mark_finalization_candidate_checked(control_db, run.id).await?;
+            run_finalize::mark_finalization_candidate_checked(control_db, run.tenant_id, run.id)
+                .await?;
             continue;
         }
 
@@ -986,10 +1087,15 @@ async fn finalize_ready_runs(
             continue;
         };
 
+        anyhow::ensure!(
+            claimed.tenant_id == run.tenant_id,
+            "finalization ownership changed after summary collection"
+        );
         debug!(run_id = %claimed.id, run_key = %claimed.run_key, "claimed run for finalization");
         let finalize_started = Instant::now();
         if let Some(done) = run_finalize::finalize_claimed_run_from_summaries(
             control_db,
+            claimed.tenant_id,
             claimed.id,
             coordinator_id,
             &claimed.aggregation_policy_hash,
@@ -1040,12 +1146,72 @@ struct RunShardSummaryCollection {
     complete: bool,
 }
 
+/// Attempts finalization only for the specified run under its existing lease
+/// and exact sealed-membership checks. Work that is not ready keeps its state.
+pub(crate) async fn finalize_target(
+    router: &database::DatabaseRouter,
+    coordinator_id: Uuid,
+    tenant_id: Uuid,
+    run_id: Uuid,
+    lease_seconds: i32,
+) -> anyhow::Result<bool> {
+    let control = router.control().await?;
+    let mut tx = control.begin().await?;
+    crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
+    let candidate: Option<String> = sqlx::query_scalar(
+        "SELECT aggregation_policy_hash FROM runs WHERE id=$1 AND tenant_id=$2
+          AND status IN ('running','finalizing') AND execution_control='enabled'
+          AND EXISTS (SELECT 1 FROM run_shard_dispatch_cursors WHERE run_id=$1)
+          AND NOT EXISTS (SELECT 1 FROM run_shard_dispatch_cursors WHERE run_id=$1 AND status<>'drained')",
+    ).bind(run_id).bind(tenant_id).fetch_optional(&mut *tx).await?;
+    tx.commit().await?;
+    let Some(policy) = candidate else {
+        return Ok(false);
+    };
+    let collection = collect_run_shard_summaries(router, coordinator_id, tenant_id, run_id).await?;
+    anyhow::ensure!(
+        collection.failures.failed_operation_count() == 0,
+        "a routed summary is unavailable"
+    );
+    let summaries = collection.output.summaries;
+    if !collection.output.complete
+        || summaries.is_empty()
+        || summaries.iter().any(|s| !s.is_terminal())
+    {
+        return Ok(false);
+    }
+    run_finalize::validate_summary_set(run_id, &summaries, &policy)?;
+    let Some(claimed) =
+        run_finalize::claim_finalization_candidate(control, run_id, coordinator_id, lease_seconds)
+            .await?
+    else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        claimed.tenant_id == tenant_id && claimed.aggregation_policy_hash == policy,
+        "finalization authority changed after summary collection"
+    );
+    Ok(run_finalize::finalize_claimed_run_from_summaries(
+        control,
+        tenant_id,
+        run_id,
+        coordinator_id,
+        &policy,
+        &summaries,
+    )
+    .await?
+    .is_some())
+}
+
 async fn collect_run_shard_summaries(
     database_router: &database::DatabaseRouter,
     coordinator_id: Uuid,
+    tenant_id: Uuid,
     run_id: Uuid,
 ) -> anyhow::Result<PlacementPassResult<RunShardSummaryCollection>> {
-    let placements = database_router.execution_placements_for_run(run_id).await?;
+    let placements = database_router
+        .execution_placements_for_run_with_context(run_id, tenant_id)
+        .await?;
     let mut placements_by_alias = BTreeMap::new();
     for placement in placements {
         placements_by_alias
@@ -1083,8 +1249,12 @@ async fn collect_run_shard_summaries(
                     .iter()
                     .map(|placement| placement.run_shard)
                     .collect::<Vec<_>>();
+                let mut tx = db.begin().await?;
+                crate::db::scope::set_system(&mut tx, tenant_id, run_id).await?;
                 let summaries =
-                    run_shard_summary::select_run_shard_summaries(&db, run_id, &shards).await?;
+                    run_shard_summary::select_run_shard_summaries(&mut *tx, run_id, &shards)
+                        .await?;
+                tx.commit().await?;
                 let complete = summaries.len() == shards.len();
                 for placement in &placements {
                     if summaries

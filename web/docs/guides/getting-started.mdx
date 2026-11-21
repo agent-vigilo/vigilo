@@ -27,6 +27,20 @@ Instead of a one-off script that prints a score, Vigilo gives you a system for p
 - **Execution is distributed.** Coordinators create chunk-ready outbox event records that are published through RabbitMQ; workers claim the identified chunks, call the agent target, run evaluators, and persist normalized results.
 - **The CLI is automation-friendly.** Commands return structured output, support quiet mode, and expose watch/status/results/export flows for CI and agentic clients.
 
+## Harnesses And Evaluators
+
+The <GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm> harness invokes
+your target agent and captures evidence. An
+<GlossaryTerm term="evaluator">evaluator</GlossaryTerm> measures that evidence.
+The bundled sentiment evaluator is a
+<GlossaryTerm term="code-scorer">Deterministic (Code Scorer)</GlossaryTerm>.
+<GlossaryTerm term="model-as-a-judge">Model-as-a-Judge</GlossaryTerm> evaluators
+use model assessments through authorized host requests; a judge is not bundled.
+Both return measurements to the same host-owned scoring and gate policy.
+
+See the [canonical vocabulary](/docs/glossary#harnesses-and-evaluators) for
+harness and evaluator definitions, including the session-orchestration boundary.
+
 ## The Mental Model
 
 ```text
@@ -65,7 +79,8 @@ evaluator measurement -> host binding policy -> dimension_scores -> execution st
 - `aggregate_score` is one total score for the execution, calculated across scored dimensions.
 - `defaults.min_execution_score` is an overall score gate for `aggregate_score`, not a per-dimension threshold.
 - An <GlossaryTerm term="execution">execution</GlossaryTerm> passes when
-  evaluator completeness is satisfied, `aggregate_score >= defaults.min_execution_score`, and no host-derived blocking result fails.
+  evaluator completeness is satisfied and `aggregate_score >= defaults.min_execution_score`.
+  With `defaults.fail_on_any_blocking_failure: true`, no host-derived blocking result may fail.
 - A run passes when execution coverage is complete, no chunk or execution failed, and every configured run scorecard gate passes.
 
 A result is blocking only when its evaluator binding or dimension policy says
@@ -81,7 +96,7 @@ case attempt -> execution -> run -> gate
 
 - <GlossaryTerm term="attempt">Attempts</GlossaryTerm> can fail because the
   agent call, evaluator runtime, persistence, or retry budget failed.
-- Executions can fail because evaluator completeness is not satisfied, the total `aggregate_score` is below the overall score gate, or a host-derived blocking result failed.
+- Executions can fail because evaluator completeness is not satisfied, the total `aggregate_score` is below the overall score gate, or a host-derived blocking result failed while `defaults.fail_on_any_blocking_failure` is enabled.
 - Runs with settled failed chunks or incomplete results complete with a failed
   gate and explicit missing/unresolved counts. An unavailable shard keeps
   finalization pending. Invalid immutable admission can fail creation.

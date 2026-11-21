@@ -70,10 +70,12 @@ class LicensePackagingTests(unittest.TestCase):
         for member in workspace["workspace"]["members"]:
             with self.subTest(crate=member):
                 crate = root / member
-                is_evaluator = member.startswith("evaluators/")
+                package = tomllib.loads((crate / "Cargo.toml").read_text())["package"]
+                # ABI fixtures are evaluators even when stored under host tests.
+                is_fixture = package.get("metadata", {}).get("vigilo", {}).get("abi-fixture") is True
+                is_evaluator = member.startswith("evaluators/") or is_fixture
                 license_text = evaluator_license if is_evaluator else engine_license
                 self.assertEqual((crate / "LICENSE").read_bytes(), license_text)
-                package = tomllib.loads((crate / "Cargo.toml").read_text())["package"]
                 self.assertEqual(package["license"], "Apache-2.0" if is_evaluator else "FSL-1.1-ALv2")
                 self.assertNotIn("license-file", package)
 

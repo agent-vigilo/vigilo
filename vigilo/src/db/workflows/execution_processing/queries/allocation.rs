@@ -1,4 +1,4 @@
-//! allocation queries for execution processing.
+//! Batched attempt allocation under verified chunk ownership.
 
 use super::super::*;
 
@@ -92,6 +92,7 @@ pub(in crate::db::workflows::execution_processing) async fn allocate_execution_a
     //                   - create the new running attempt.
     // authority update  - point each execution at its new attempt.
     let mut tx = db.begin().await?;
+    crate::db::scope::set_system(&mut tx, chunk.tenant_id, chunk.run_id).await?;
     lock_live_chunk_lease(&mut tx, chunk).await?;
     let mut query_builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -234,14 +235,38 @@ pub(in crate::db::workflows::execution_processing) async fn allocate_execution_a
         );
     }
 
-    let mut query_builder = QueryBuilder::<Postgres>::new(
-        r#"
-        WITH input (case_id, input_ordinal) AS (
-        "#,
+    let mut resumed = BTreeMap::new();
+    if !run_profile.harness.is_inline() {
+        let ids = cases.iter().map(|case| case.case_id).collect::<Vec<_>>();
+        resumed.extend(
+            deferred::resume(&mut tx, chunk, lease, &ids)
+                .await?
+                .into_iter()
+                .map(|allocation| (allocation.case_id, allocation)),
+        );
+        if resumed.len() == cases.len() {
+            tx.commit().await?;
+            return cases
+                .iter()
+                .map(|case| {
+                    resumed
+                        .remove(&case.case_id)
+                        .ok_or_else(|| anyhow::anyhow!("missing deferred allocation"))
+                })
+                .collect();
+        }
+    }
+
+    let mut query_builder =
+        QueryBuilder::<Postgres>::new("WITH input (case_id, input_ordinal) AS (");
+    query_builder.push_values(
+        inputs
+            .iter()
+            .filter(|row| !resumed.contains_key(&row.case.case_id)),
+        |mut b, row| {
+            b.push_bind(row.case.case_id).push_bind(row.input_ordinal);
+        },
     );
-    query_builder.push_values(inputs.iter(), |mut b, row| {
-        b.push_bind(row.case.case_id).push_bind(row.input_ordinal);
-    });
     query_builder.push(
         r#"
         ),
@@ -518,15 +543,15 @@ pub(in crate::db::workflows::execution_processing) async fn allocate_execution_a
         "#,
     );
 
-    let allocations = query_builder
+    let mut allocations = query_builder
         .build_query_as::<AttemptAllocation>()
         .fetch_all(&mut *tx)
         .await?;
 
-    if allocations.len() != cases.len() {
+    if allocations.len() + resumed.len() != cases.len() {
         anyhow::bail!(
             "allocated {} execution attempts for {} cases",
-            allocations.len(),
+            allocations.len() + resumed.len(),
             cases.len()
         );
     }
@@ -591,6 +616,21 @@ pub(in crate::db::workflows::execution_processing) async fn allocate_execution_a
 
     tx.commit().await?;
 
+    if !resumed.is_empty() {
+        resumed.extend(
+            allocations
+                .into_iter()
+                .map(|allocation| (allocation.case_id, allocation)),
+        );
+        allocations = cases
+            .iter()
+            .map(|case| {
+                resumed
+                    .remove(&case.case_id)
+                    .ok_or_else(|| anyhow::anyhow!("missing allocation for case {}", case.case_id))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+    }
     Ok(allocations)
 }
 

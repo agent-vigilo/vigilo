@@ -19,6 +19,25 @@ results, and publishes gate decisions after exact settlement.
 
 ---
 
+## Harness And Evaluator Boundary
+
+The worker uses the configured harness to obtain evidence. A
+<GlossaryTerm term="direct-probe">Direct Probe</GlossaryTerm> calls the target. A
+<GlossaryTerm term="delegated-trial">Delegated Trial</GlossaryTerm> calls the
+service that orchestrates the target session and verifies its reported target. Evaluators consume
+that evidence and return measurements or abstentions; host policy owns
+normalization, aggregation and gates.
+
+A <GlossaryTerm term="code-scorer">Deterministic (Code Scorer)</GlossaryTerm>
+measures through repeatable code. A
+<GlossaryTerm term="model-as-a-judge">Model-as-a-Judge</GlossaryTerm> obtains a
+model assessment through permitted evaluator HTTP and interprets it in evaluator
+code. Both use the same versioned `input`/`output` ABI. The target invocation and
+a judge request have different ownership and permissions even when both use HTTP.
+
+The [glossary](/docs/glossary#harnesses-and-evaluators) defines session ownership
+and separates harness type from synchronous or asynchronous completion.
+
 ## Overview
 
 At a high level, the system follows a fan-out / fan-in pattern:
@@ -140,10 +159,17 @@ The dataset `case_group` value is part of immutable case content. It is loaded f
 The worker invokes the configured agent target:
 
 - may be a single model call
-- may be a multi-step workflow
-- is invoked through the run profile `agent.http` endpoint
+- may run an internal multi-step workflow within the HTTP response deadline
+- is invoked directly or through a Delegated Trial service at `harness.http`
 
-The worker sends run/attempt ids, the agent identity, the case input, and non-oracle case metadata. The response is mapped into the evaluator `actual` envelope before evaluators run.
+The native invocation envelope carries a schema version, invocation ID, deadline,
+requested agent and case input, with optional case context and callback details.
+An inline Direct Probe can also use the Vigilo case request with run, execution
+and attempt IDs, or Chat Completions with `model` and `messages`. Requests carry
+attempt correlation. The worker preserves the complete evidence body and applies the profile
+[response mapping](/docs/configuration/run-profile#explicit-response-contracts)
+once per attempt before evaluation. Evaluators consume `input.response-evidence`;
+Vigilo does not infer an answer from familiar response fields.
 
 If the agent call fails:
 
@@ -151,6 +177,19 @@ If the agent call fails:
 attempt.status = failed_agent_call
 execution.status = retry_scheduled (if retryable)
 ```
+
+For polling completion, the worker commits submission intent, stores the
+receipt, and releases the chunk when no cases are ready. The coordinator
+discovers due invocations on the execution placement. Poll claims, deadlines and
+outcomes stay on that placement. A committed outcome records scoring readiness.
+A worker resumes the original attempt from the saved result when the chunk can
+run. Remote cancellation follows local settlement.
+
+For callback completion, the application authenticates the delivery and supplies
+the verified invocation route. The library accepts eligible outcomes in the
+same execution-shard transaction and coalesces scoring wakeups by chunk.
+The application schedules invocation recovery and publishes ready work from the
+owning placement. See [callback completion](/docs/configuration/run-profile#callback-completion).
 
 ### 4. Evaluation Phase
 
@@ -314,7 +353,7 @@ open run → cancellation → cancelled
 
 Completion requires exact settlement, not a successful result for every case.
 Missing or unresolved results remain explicit and fail the gate. See the
-[Run Lifecycle](./state/run-lifecycle/) for guarded transitions and recovery.
+[Run Lifecycle](./state/run-lifecycle/index.mdx) for guarded transitions and recovery.
 
 ### Execution Lifecycle
 

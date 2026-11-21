@@ -17,6 +17,7 @@ pub(crate) const MAX_RETRY_AFTER_SECS: u32 = 86_400;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Kind {
     Configuration,
+    CredentialUnavailable,
     Authentication,
     RateLimited,
     HttpStatus,
@@ -24,6 +25,7 @@ pub(crate) enum Kind {
     Transport,
     BodyLimit,
     InvalidResponse,
+    RemoteFailure,
     RetryDelayExceeded,
 }
 
@@ -36,6 +38,9 @@ pub(crate) struct Failure {
     pub(crate) retry_not_before: Option<DateTime<Utc>>,
     /// Delta-seconds advice is also applied against database time at persistence.
     pub(crate) retry_delay_secs: Option<u32>,
+    /// Carried to the workflow; persisted separately as uniform attempt evidence.
+    #[serde(skip)]
+    pub(crate) invocation: Option<Box<super::diagnostics::Diagnostics>>,
     message: String,
 }
 
@@ -47,9 +52,21 @@ impl std::fmt::Display for Failure {
 impl std::error::Error for Failure {}
 
 impl Failure {
+    /// Transient resolver failures reuse durable attempt retries, with no remote
+    /// diagnostic body or credential material in persisted error details.
+    pub(crate) fn credential_unavailable() -> Self {
+        let mut failure = Self::terminal(
+            Kind::CredentialUnavailable,
+            "credential provider unavailable",
+        );
+        failure.retryable = true;
+        failure
+    }
+
     pub(crate) fn terminal(kind: Kind, message: impl ToString) -> Self {
         Self {
             kind,
+            invocation: None,
             message: message.to_string(),
             http_status: None,
             retryable: false,
@@ -72,6 +89,7 @@ impl Failure {
             retryable: matches!(kind, Kind::Timeout | Kind::Transport),
             retry_not_before: None,
             retry_delay_secs: None,
+            invocation: None,
             message: format!("{phase}: {}", error.without_url()),
         }
     }
@@ -95,6 +113,7 @@ impl Failure {
             retryable: matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504),
             retry_not_before: None,
             retry_delay_secs: None,
+            invocation: None,
             message: format!("agent HTTP request failed with status {status}"),
         };
         if !result.retryable {

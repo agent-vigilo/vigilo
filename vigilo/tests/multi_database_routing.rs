@@ -743,6 +743,11 @@ persistence:
 agent:
   provider: example
   name: integration-agent
+  version: "1.0.0"
+harness:
+  kind: direct_probe
+  completion:
+    kind: inline
   http:
     url: http://127.0.0.1:8787/v1/agent/invoke
 case_groups:

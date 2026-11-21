@@ -46,25 +46,25 @@ jobs:
             echo "The Build workflow must pass for $GITHUB_SHA before publication. Rerun this job after CI succeeds." >&2
             exit 1
           fi
-      - name: Check whether the crate version is already published
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch locked build dependencies
+        run: cargo fetch --locked
+      - name: Verify the packaged crate outside the workspace
+        id: package
+        run: |
+          python3 scripts/releases/verify_package.py --checksum-output "$RUNNER_TEMP/vigilo-checksum"
+          echo "checksum=$(cat "$RUNNER_TEMP/vigilo-checksum")" >> "$GITHUB_OUTPUT"
+      - name: Check for an identical published crate
         id: registry
         env:
           CRATE_VERSION: ${{ steps.version.outputs.version }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
         run: |
-          status="$(curl --silent --show-error --retry 3 --retry-max-time 30 \
-            --connect-timeout 10 --max-time 30 --user-agent vigilo-release-workflow \
-            --output /dev/null --write-out '%{http_code}' \
-            "https://crates.io/api/v1/crates/vigilo/$CRATE_VERSION")"
-          case "$status" in
-            200)
-              echo "published=true" >> "$GITHUB_OUTPUT"
-              echo "vigilo $CRATE_VERSION already exists on crates.io; skipping publication." >> "$GITHUB_STEP_SUMMARY"
-              ;;
-            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "Unexpected crates.io response: HTTP $status" >&2; exit 1 ;;
-          esac
-      - uses: dtolnay/rust-toolchain@stable
-        if: steps.registry.outputs.published != 'true'
+          published="$(python3 scripts/releases/registry.py --version "$CRATE_VERSION" --checksum "$CHECKSUM")"
+          echo "published=$published" >> "$GITHUB_OUTPUT"
+          if [[ "$published" == true ]]; then
+            echo "Verified the published vigilo $CRATE_VERSION checksum." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Publish to crates.io
         if: steps.registry.outputs.published != 'true'
         env:
@@ -75,3 +75,22 @@ jobs:
             exit 1
           fi
           cargo publish -p vigilo --locked
+      - name: Verify publication on crates.io
+        if: steps.registry.outputs.published != 'true'
+        env:
+          CRATE_VERSION: ${{ steps.version.outputs.version }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: python3 scripts/releases/registry.py --version "$CRATE_VERSION" --checksum "$CHECKSUM" --wait
+
+  deploy-docs:
+    name: Deploy Vigilo release docs
+    needs: publish
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy-web.yaml
+    with:
+      release_tag: ${{ github.event.release.tag_name }}
+      release_sha: ${{ github.sha }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}

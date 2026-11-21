@@ -6,7 +6,9 @@ flowchart TD
     Freeze --> Prepare[Verify cases and publish immutable configuration and plan]
     Prepare --> Hold{Prepare only?}
     Hold -- Yes --> Held([Creating run with held ready plan])
-    Hold -- No --> Seed[Seed bounded execution-local metadata pages]
+    Hold -- No --> Accept{Exact published plan accepted?}
+    Accept -- Yes --> Seed[Claim system admission and seed bounded metadata pages]
+    Accept -- No --> Error
     Seed --> Verify{Exact local chunk coverage?}
     Verify -- Yes --> Activate[Publish routes and cursors with pending state]
     Activate --> Pending([Pending run])

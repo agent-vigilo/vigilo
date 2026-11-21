@@ -1,4 +1,7 @@
 CREATE TABLE run_chunks (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
+    execution_control execution_control NOT NULL DEFAULT 'enabled',
+    control_revision BIGINT NOT NULL DEFAULT 0 CHECK (control_revision >= 0),
     id UUID NOT NULL,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
@@ -12,6 +15,7 @@ CREATE TABLE run_chunks (
     leased_until TIMESTAMPTZ,
     recovery_count INTEGER NOT NULL DEFAULT 0 CHECK (recovery_count >= 0),
     last_recovered_at TIMESTAMPTZ,
+    deferred_wakeup_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -24,7 +28,8 @@ CREATE TABLE run_chunks (
         (status = 'leased' AND lease_token IS NOT NULL AND leased_until IS NOT NULL)
         OR (status <> 'leased' AND lease_token IS NULL AND leased_until IS NULL)
     ),
-    CONSTRAINT pk_run_chunks PRIMARY KEY (run_id, run_shard, id)
+    CONSTRAINT pk_run_chunks PRIMARY KEY (run_id, run_shard, id),
+    CONSTRAINT fk_run_chunks_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 ) PARTITION BY LIST (run_shard);
 
 DO $$
@@ -104,3 +109,85 @@ COMMENT ON COLUMN run_chunks.updated_at IS
 
 COMMENT ON INDEX idx_run_chunks_expired_leases IS
     'Hot index for coordinator recovery scans over expired leased chunks.';
+
+-- Discover bounded expired work and retain movement admission in the caller's
+-- transaction. Recovery writes use a subsequent statement/fresh snapshot.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_claim_chunk_recovery(p_max_recoveries integer, p_batch_size bigint)
+RETURNS TABLE(run_id uuid, run_shard smallint, tenant_id uuid)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+DECLARE candidate record;
+BEGIN
+    IF p_max_recoveries IS NULL OR p_max_recoveries < 0 OR p_max_recoveries > 10000
+       OR p_batch_size IS NULL OR p_batch_size < 1 OR p_batch_size > 1000000 THEN
+        RAISE EXCEPTION 'invalid chunk recovery limits' USING ERRCODE = '22023';
+    END IF;
+    -- Keep a bounded reserve for candidates skipped by the movement fence or
+    -- the later chunk row claim. Recovery writes still use p_batch_size.
+    FOR candidate IN
+        SELECT DISTINCT c.run_id, c.run_shard, c.tenant_id FROM (
+            (SELECT rc.run_id, rc.run_shard, rc.tenant_id FROM %1$I.run_chunks rc
+             WHERE rc.status = 'leased' AND rc.leased_until < now()
+               AND rc.recovery_count < p_max_recoveries
+             ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size + 32)
+            UNION ALL
+            (SELECT rc.run_id, rc.run_shard, rc.tenant_id FROM %1$I.run_chunks rc
+             WHERE rc.status = 'leased' AND rc.leased_until < now()
+               AND rc.recovery_count >= p_max_recoveries
+             ORDER BY rc.leased_until, rc.run_id, rc.id LIMIT p_batch_size + 32)
+        ) c ORDER BY c.run_id, c.run_shard
+    LOOP
+        IF pg_try_advisory_xact_lock_shared(
+            hashtextextended(candidate.run_id::text, candidate.run_shard::bigint)
+        ) THEN
+            run_id := candidate.run_id;
+            run_shard := candidate.run_shard;
+            tenant_id := candidate.tenant_id;
+            RETURN NEXT;
+        END IF;
+    END LOOP;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format(
+        'REVOKE ALL ON FUNCTION %I.vigilo_claim_chunk_recovery(integer,bigint) FROM PUBLIC',
+        installation_schema
+    );
+END;
+$install$;
+
+-- Verify queue hints against accepted local work before protected worker reads.
+DO $install$
+DECLARE installation_schema TEXT := current_schema();
+BEGIN
+    EXECUTE format($definition$
+CREATE FUNCTION %1$I.vigilo_verify_worker_identity(p_run_id uuid, p_run_shard smallint, p_chunk_id uuid, p_tenant_id uuid, p_plan_digest text)
+RETURNS TABLE(tenant_id uuid, run_id uuid)
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $function$
+BEGIN
+    IF p_run_id IS NULL OR p_run_shard IS NULL OR p_run_shard < 0 OR p_run_shard >= 128
+       OR p_chunk_id IS NULL OR p_tenant_id IS NULL OR p_plan_digest IS NULL
+       OR length(p_plan_digest) < 1 OR length(p_plan_digest) > 256 THEN
+        RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended(p_run_id::text, p_run_shard::bigint));
+    RETURN QUERY
+    SELECT c.tenant_id, c.run_id
+    FROM %1$I.run_chunks c
+    JOIN %1$I.run_snapshots s ON s.tenant_id=c.tenant_id AND s.run_id=c.run_id AND s.run_shard=c.run_shard
+    WHERE c.run_id=p_run_id AND c.run_shard=p_run_shard AND c.id=p_chunk_id
+      AND c.tenant_id=p_tenant_id
+      AND s.config_snapshot #>> '{run_plan,digest}'=p_plan_digest;
+END;
+$function$;
+$definition$, installation_schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.vigilo_verify_worker_identity(uuid,smallint,uuid,uuid,text) FROM PUBLIC', installation_schema);
+END;
+$install$;

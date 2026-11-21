@@ -448,7 +448,7 @@ pub(crate) async fn seed_aggregate(
 
 pub(crate) fn profile_snapshot(gates: serde_json::Value) -> serde_json::Value {
     let mut profile: serde_json::Value =
-        serde_yaml::from_str(include_str!("../../../../../example/profile.yaml")).unwrap();
+        serde_yaml::from_str(crate::contracts::run::PROFILE_FIXTURE).unwrap();
     profile["case_groups"][0]["id"] = json!("sentiment");
     profile["case_groups"][0]["evaluators"][0]["id"] = json!("quality_eval");
     profile["scorecard"]["gates"] = gates;

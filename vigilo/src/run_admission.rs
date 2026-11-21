@@ -46,10 +46,7 @@ use crate::{
             Manifest,
         },
     },
-    models::{
-        run::RunDraft,
-        run_chunk::RunChunkDraft,
-    },
+    models::run_chunk::RunChunkDraft,
 };
 
 /// Seeds bounded pages; activation releases its lease atomically on completion.
@@ -68,7 +65,16 @@ pub(crate) async fn resume(
         "admission budgets must be positive"
     );
     let budget = Budget::standard();
-    with_claim(context, plan, |lease| async move {
+    // Test callers act as the trusted submitter of their fixture's exact root.
+    ledger::accept(
+        context.dbr().await?.control().await?,
+        plan.run_id,
+        plan.manifest
+            .as_ref()
+            .context("run plan is not published")?,
+    )
+    .await?;
+    with_claim(context, plan.run_id, |lease| async move {
         let reader = open_reader(plan, std::future::ready(Ok(store)), budget, cancel).await?;
         admit(context, plan, &reader, config, cancel, lease).await
     })
@@ -76,7 +82,8 @@ pub(crate) async fn resume(
 }
 
 /// Reuses roots already verified by the foreground creator, avoiding duplicate
-/// storage reads just to emit its existing creation response metadata.
+/// storage reads just to emit its existing creation response metadata. The caller
+/// must first commit exact acceptance; this function cannot manufacture it.
 pub(crate) async fn resume_verified(
     context: &Context,
     plan: &Plan,
@@ -93,7 +100,7 @@ pub(crate) async fn resume_verified(
                 .is_some_and(|r| r.0 == reader.reference),
         "reader differs from published run plan"
     );
-    with_claim(context, plan, |lease| async move {
+    with_claim(context, plan.run_id, |lease| async move {
         admit(context, plan, reader, config, cancel, lease).await
     })
     .await
@@ -103,16 +110,21 @@ pub(crate) async fn resume_verified(
 /// admission. Confirmed activation already released ownership atomically;
 /// deferred work and errors (including uncertain commits) attempt release.
 /// A replaced owner cannot release its successor's generation.
-async fn with_claim<F, Fut>(context: &Context, plan: &Plan, work: F) -> Result<bool>
+async fn with_claim<F, Fut>(context: &Context, run_id: Uuid, work: F) -> Result<bool>
 where
     F: FnOnce(run_plan::Lease) -> Fut,
     Fut: std::future::Future<Output = Result<bool>>,
 {
     let db = context.dbr().await?.control().await?;
-    if !plan.execution_requested {
-        ledger::request(db, plan.run_id).await?;
-    }
-    let lease = ledger::claim(db, plan.run_id).await?;
+    let lease = ledger::claim(db, run_id).await?;
+    with_lease(db, lease, work).await
+}
+
+async fn with_lease<F, Fut>(db: &sqlx::PgPool, lease: run_plan::Lease, work: F) -> Result<bool>
+where
+    F: FnOnce(run_plan::Lease) -> Fut,
+    Fut: std::future::Future<Output = Result<bool>>,
+{
     let result = work(lease).await;
     // Only the confirmed activation commit returns true. Another write must not
     // turn committed success into a reported failure if the database goes away.
@@ -124,7 +136,7 @@ where
         && run_create::is_seed_invariant_error(error)
         && let Err(failure) = ledger::fail(db, lease, &format!("{error:#}")).await
     {
-        tracing::warn!(run_id=%plan.run_id,error=%failure,"could not mark failed admission");
+        tracing::warn!(run_id=%lease.run_id,error=%failure,"could not mark failed admission");
     }
     let release = run_plan::release(db, lease, error.as_deref()).await;
     let complete = result?;
@@ -132,7 +144,62 @@ where
     Ok(complete)
 }
 
-/// Include adapter initialization and all root reads in one pre-claim deadline.
+async fn resume_claimed(
+    context: &Context,
+    db: &sqlx::PgPool,
+    config: crate::db::workflows::run_creation::Config,
+    cancel: &CancellationToken,
+    lease: run_plan::Lease,
+) -> Result<bool> {
+    let budget = Budget::standard();
+    let plan = ledger::load(db, lease).await?.context("plan disappeared")?;
+    let reference = plan
+        .manifest
+        .as_ref()
+        .context("accepted plan has no manifest")?;
+    let request = crate::operations::resources::Request::accepted(
+        lease.tenant_id,
+        lease.run_id,
+        &reference.digest,
+        plan.storage_binding_hash.clone(),
+    )?;
+    let reader = open_reader(
+        &plan,
+        async {
+            context
+                .execution_resources(request, &plan.limits, cancel)
+                .await
+                .map(|(_, store)| store)
+        },
+        budget,
+        cancel,
+    )
+    .await?;
+    admit(context, &plan, &reader, config, cancel, lease).await
+}
+
+/// Advances one accepted plan under its creation budget and authoritative owner.
+pub(crate) async fn advance(
+    context: &Context,
+    run_id: Uuid,
+    tenant_id: Uuid,
+    config: crate::db::workflows::run_creation::Config,
+    cancel: &CancellationToken,
+) -> Result<Option<bool>> {
+    let db = context.dbr().await?.control().await?;
+    let Some(lease) = ledger::try_claim(db, run_id, Some(tenant_id)).await? else {
+        return Ok(None);
+    };
+    // A scheduler can compose this operation in a small-stack async task.
+    // Keep the storage and admission future out of its caller's frame.
+    with_lease(db, lease, |lease| {
+        Box::pin(resume_claimed(context, db, config, cancel, lease))
+    })
+    .await
+    .map(Some)
+}
+
+/// Include adapter initialization and all root reads in one metadata deadline.
 /// Cancellation drops the read future; the surrounding owner still releases.
 async fn open_reader(
     plan: &Plan,
@@ -174,10 +241,7 @@ async fn admit(
         reader.manifest.execution_plan_hash == plan.execution_plan.hash()?,
         "published evaluator identity changed"
     );
-    let draft: RunDraft = sqlx::query_as("SELECT * FROM runs WHERE id=$1 AND status='creating'")
-        .bind(plan.run_id)
-        .fetch_one(db)
-        .await?;
+    let draft = ledger::draft(db, lease).await?;
     ensure!(
         draft.profile_hash == reader.manifest.profile_hash
             && draft.aggregation_policy_hash == reader.manifest.aggregation_policy_hash
@@ -196,6 +260,12 @@ async fn admit(
     let mut snapshot_template = draft.config_snapshot.clone();
     snapshot_template["storage_limits"] = serde_json::to_value(&reader.limits)?;
     snapshot_template["profile"] = json!({"scorecard":{"gates":gates}});
+    let profile = serde_json::from_value(reader.configuration.snapshot["profile"].clone())?;
+    snapshot_template["response_policy"] =
+        crate::contracts::response_retention::policy_identity(&profile)?;
+    if let Some(route) = crate::agent_client::deferred::Route::from_profile(&profile)? {
+        snapshot_template["invocation_transport"] = serde_json::to_value(route)?;
+    }
     let mut gate_counts = BTreeMap::new();
     let mut expected = BTreeMap::new();
     let mut clock = lease::Clock::new();
@@ -269,9 +339,7 @@ async fn admit(
         gate_counts: &gate_counts,
     };
     async {
-        let fresh = run_plan::load(db, plan.run_id)
-            .await?
-            .context("plan disappeared")?;
+        let fresh = ledger::load(db, lease).await?.context("plan disappeared")?;
         let mut state: BTreeMap<i16, Manifest> = serde_json::from_value(fresh.admission_state.0)?;
         if fresh.admission_cursor < fresh.chunk_cursor {
             let mut cursor = IndexCursor::new(
@@ -346,10 +414,7 @@ async fn admit(
                             cancel,
                             router.run_database_operation(alias, "immutable_plan_seed", async {
                                 let local = router.execution_database(alias).await?;
-                                let mut tx = local.begin().await?;
-                                sqlx::query("SET LOCAL statement_timeout='30s'")
-                                    .execute(&mut *tx)
-                                    .await?;
+                                let mut tx = ledger::placement::begin(&local, lease).await?;
                                 let status = if alias == router.control_database_alias() {
                                     "creating"
                                 } else {
@@ -376,9 +441,7 @@ async fn admit(
                 }
             }
         }
-        let fresh = run_plan::load(db, plan.run_id)
-            .await?
-            .context("plan disappeared")?;
+        let fresh = ledger::load(db, lease).await?.context("plan disappeared")?;
         if fresh.admission_cursor != fresh.chunk_cursor {
             return Ok(false);
         }
@@ -410,7 +473,7 @@ async fn admit(
                             let local = router.execution_database(alias).await?;
                             ledger::placement::read_chunks(
                                 &local,
-                                plan.run_id,
+                                lease,
                                 draft.dataset_version_id,
                                 alias,
                                 &shards,
@@ -475,28 +538,17 @@ pub(crate) async fn recover(
         "creation budgets must be positive"
     );
     let db = context.dbr().await?.control().await?;
-    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT r.id FROM runs r JOIN run_plans p ON p.run_id=r.id WHERE r.status='creating' AND p.status='ready' AND p.execution_requested AND (r.coordinator_leased_until IS NULL OR r.coordinator_leased_until<=clock_timestamp()) ORDER BY r.updated_at,r.id LIMIT $1")
-        .bind(i64::try_from(limit.min(1024))?).fetch_all(db).await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar("SELECT run_id FROM vigilo_ready_admissions($1)")
+        .bind(i32::try_from(limit.min(1024))?)
+        .fetch_all(db)
+        .await?;
     let mut stats = crate::db::workflows::run_creation::RunCreationRecoveryStats::default();
     for id in ids {
         stats.claimed_runs += 1;
-        let budget = Budget::standard();
-        let result = async {
-            let plan = run_plan::load(db, id).await?.context("plan disappeared")?;
-            let plan = &plan;
-            with_claim(context, plan, |lease| async move {
-                let cancel = CancellationToken::new();
-                let reader = open_reader(
-                    plan,
-                    context.storage(&plan.storage_binding_hash, &plan.limits),
-                    budget,
-                    &cancel,
-                )
-                .await?;
-                admit(context, plan, &reader, config, &cancel, lease).await
-            })
-            .await
-        }
+        let cancel = CancellationToken::new();
+        let result = with_claim(context, id, |lease| {
+            resume_claimed(context, db, config, &cancel, lease)
+        })
         .await;
         match result {
             Ok(true) => stats.completed_runs += 1,

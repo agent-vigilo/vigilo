@@ -114,6 +114,7 @@ mod tests {
     #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx migration tests"]
     async fn shard_placements_enforce_alias_status_and_shard_range(pool: PgPool) {
         let run_id = Uuid::now_v7();
+        crate::db::test_support::seed_run_owner(&pool, run_id).await;
 
         sqlx::query(
             r#"
@@ -150,7 +151,7 @@ mod tests {
             VALUES ($1::uuid, 128, 'primary', 'active')
             "#,
         )
-        .bind(Uuid::now_v7())
+        .bind(run_id)
         .execute(&pool)
         .await;
         assert!(invalid_shard.is_err());
@@ -161,7 +162,7 @@ mod tests {
             VALUES ($1::uuid, 1, 'missing', 'active')
             "#,
         )
-        .bind(Uuid::now_v7())
+        .bind(run_id)
         .execute(&pool)
         .await;
         assert!(invalid_alias.is_err());
@@ -172,7 +173,7 @@ mod tests {
             VALUES ($1::uuid, 2, 'primary', 'paused')
             "#,
         )
-        .bind(Uuid::now_v7())
+        .bind(run_id)
         .execute(&pool)
         .await;
         assert!(invalid_status.is_err());
@@ -189,7 +190,7 @@ mod tests {
             VALUES ($1::uuid, 3, 'primary', 'active', 'shard_001')
             "#,
         )
-        .bind(Uuid::now_v7())
+        .bind(run_id)
         .execute(&pool)
         .await;
         assert!(active_with_target.is_err());
@@ -200,7 +201,7 @@ mod tests {
             VALUES ($1::uuid, 4, 'primary', 'moving')
             "#,
         )
-        .bind(Uuid::now_v7())
+        .bind(run_id)
         .execute(&pool)
         .await;
         assert!(moving_without_target.is_err());
@@ -217,7 +218,7 @@ mod tests {
             VALUES ($1::uuid, 5, 'primary', 'draining', 'primary')
             "#,
         )
-        .bind(Uuid::now_v7())
+        .bind(run_id)
         .execute(&pool)
         .await;
         assert!(move_target_matches_owner.is_err());
@@ -234,7 +235,7 @@ mod tests {
             VALUES ($1::uuid, 6, 'primary', 'draining', 'shard_001')
             "#,
         )
-        .bind(Uuid::now_v7())
+        .bind(run_id)
         .execute(&pool)
         .await
         .unwrap();

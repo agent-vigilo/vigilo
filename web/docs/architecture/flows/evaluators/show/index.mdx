@@ -19,6 +19,10 @@ import decisionFlowDiagram from './decision-flow.mmd';
 
 How `vigilo evaluator show` resolves a fully qualified evaluator identifier and returns evaluator details.
 
+Inspection uses one bounded metadata query and returns no Wasm bytes. Missing
+and inaccessible versions return no descriptor. Metadata over 8 MiB is rejected
+explicitly.
+
 ## Execution Flow
 
 <Mermaid value={executionFlowDiagram} />

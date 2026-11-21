@@ -12,16 +12,22 @@ flowchart TD
     AgentClient(["fa:fa-robot <br/> <b>Agentic Client</b> <br/> <small>[Software System]</small>"]):::actor
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
+    LibraryHost(["Rust Application<br/>Public library operations"]):::actor
+
     %% main system
     AgentVigilo["fa:fa-diagram-project <br/> <b>Agent Vigilo</b> <br/> <small>[Software System]</small> <br/> <small>Orchestrates distributed evaluation runs.</small>"]:::system
 
     %% external target
     TargetAgent["fa:fa-brain <br/> <b>Agent / AI Provider</b> <br/> <small>[External System]</small> <br/> <small>The model, agent wrapper, or <br/> API endpoint being evaluated.</small>"]:::external
+    Trial["<b>Delegated Trial Harness</b><br/><small>[External System]</small>"]:::external
 
     %% edges
     User & AgentClient -->|"Manages evaluators, runs <br/> and runtime services using"| AgentVigilo
     CICD -->|Creates runs and <br/> gates deployments via| AgentVigilo
-    AgentVigilo -->|Sends evaluation <br/> case prompts to| TargetAgent
+    LibraryHost -->|"Calls typed operations in process"| AgentVigilo
+    AgentVigilo -->|Direct Probe| TargetAgent
+    AgentVigilo -->|Delegated Trial| Trial
+    Trial -->|Drives the session with| TargetAgent
 
     %% links
     click AgentVigilo "/docs/architecture/structure/containers/agent-vigilo/"

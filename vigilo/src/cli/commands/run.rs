@@ -40,7 +40,10 @@ use super::{
     shard,
 };
 #[cfg(test)]
-use crate::contracts::case_storage::identity::normalized_case_payload;
+use crate::contracts::case_storage::identity::{
+    hash_serialized_json,
+    normalized_case_payload,
+};
 #[cfg(test)]
 use crate::models::{
     case_blob::CaseBlobDraft,
@@ -55,10 +58,8 @@ use crate::{
     contracts::{
         case_storage::identity::{
             canonical_json,
-            hash_serialized_json,
             uuid_from_json,
         },
-        evaluator_abi::EvaluatorExecutionPlan,
         run::{
             RunDataset,
             RunProfile,
@@ -67,8 +68,6 @@ use crate::{
     db::{
         tables::runs,
         workflows::{
-            run_cancel,
-            run_create,
             run_export as run_export_workflow,
             run_profile_validation,
             run_results::{
@@ -86,15 +85,14 @@ use crate::{
         execution::Execution,
         execution_aggregate::ExecutionAggregate,
         execution_attempt::ExecutionAttempt,
-        run::{
-            Run,
-            RunDraft,
-        },
+        run::Run,
     },
 };
 #[cfg(test)]
 mod identity_tests;
 
+#[cfg(test)]
+use crate::db::workflows::run_cancel;
 mod cancel;
 mod create;
 mod create_blob;
@@ -104,7 +102,6 @@ mod status;
 mod validate;
 mod watch;
 
-const DEFAULT_CHUNK_SIZE: usize = 100;
 const DEFAULT_WATCH_INTERVAL_SECONDS: u64 = 5;
 const MAX_WATCH_INTERVAL_SECONDS: u64 = 3_600;
 const MAX_WATCH_TIMEOUT_SECONDS: u64 = 604_800;
@@ -210,30 +207,8 @@ fn compute_dataset_version_id(
     }))
 }
 
-/// Computes the hash of all profile policy that can change scoring or gating.
-fn compute_aggregation_policy_hash(profile: &RunProfile) -> anyhow::Result<String> {
-    let groups = profile
-        .case_groups
-        .iter()
-        .map(|group| {
-            json!({
-                "id": group.id,
-                "applies_to": group.applies_to,
-                "evaluators": group.evaluators,
-                "aggregation": group.aggregation,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    hash_serialized_json(&json!({
-        "defaults": {
-            "fail_on_any_blocking_failure": profile.defaults.fail_on_any_blocking_failure,
-            "min_execution_score": profile.defaults.min_execution_score,
-        },
-        "case_groups": groups,
-        "scorecard": profile.scorecard,
-    }))
-}
+#[cfg(test)]
+use crate::operations::creation::compute_aggregation_policy_hash;
 
 /// Builds run chunk drafts from total case count and requested chunk size.
 ///
@@ -427,59 +402,19 @@ fn run_watch_payload_from_status(
     status: &run_status_workflow::RunStatusProjection,
     terminal: bool,
 ) -> Value {
-    let run = &status.run;
+    let mut result = crate::operations::RunStatus::from(status);
+    result.terminal = terminal;
+    status_payload(&result)
+}
+
+fn status_payload(status: &crate::operations::RunStatus) -> Value {
     json!({
-        "data": {
-            "run_id": run.id,
-            "run_key": run.run_key,
-            "status": run.status,
-            "gate_status": run.gate_status,
-            "expected_execution_count": run.expected_execution_count,
-            "terminal_execution_count": run.terminal_execution_count,
-            "passed_execution_count": run.passed_execution_count,
-            "failed_execution_count": run.failed_execution_count,
-            "errored_execution_count": run.errored_execution_count,
-            "summary": run.summary,
-            "error_message": run.error_message,
-            "created_at": run.created_at,
-            "started_at": run.started_at,
-            "dispatched_at": run.dispatched_at,
-            "finalized_at": run.finalized_at,
-            "completed_at": run.completed_at,
-            "updated_at": run.updated_at,
-            "live_progress": {
-                "expected_execution_count": status.live_progress.expected_execution_count,
-                "execution_count": status.live_progress.execution_count,
-                "terminal_execution_count": status.live_progress.terminal_execution_count,
-                "passed_execution_count": status.live_progress.passed_execution_count,
-                "failed_execution_count": status.live_progress.failed_execution_count,
-                "errored_execution_count": status.live_progress.errored_execution_count,
-                "skipped_execution_count": status.live_progress.skipped_execution_count,
-                "missing_aggregate_count": status.live_progress.missing_aggregate_count,
-                "missing_execution_count": status.live_progress.missing_execution_count,
-                "unresolved_execution_count": status.live_progress.unresolved_execution_count,
-                "planned_chunk_count": status.live_progress.planned_chunk_count,
-                "settled_chunk_count": status.live_progress.settled_chunk_count,
-                "sealed_shard_count": status.live_progress.sealed_shard_count,
-                "failed_chunk_count": status.live_progress.failed_chunk_count,
-                "cancelled_chunk_count": status.live_progress.cancelled_chunk_count,
-            },
-            "creation_progress": status.creation_progress.as_ref().map(|progress| json!({
-                "placement_count": progress.placement_count,
-                "pending_placement_count": progress.pending_placement_count,
-                "seeded_placement_count": progress.seeded_placement_count,
-                "failed_placement_count": progress.failed_placement_count,
-                "attempt_count": progress.attempt_count,
-                "last_error": progress.last_error,
-                "plan_status": progress.plan_status,
-                "plan_chunk_cursor": progress.plan_chunk_cursor,
-            })),
-        },
+        "data": status.details,
         "meta": {
-            "terminal": terminal,
-            "gate_passed": run.status == "completed" && run.gate_status == "pass",
-            "progress_source": status.progress_source(),
-            "live_progress_complete": status.live_progress_complete(),
+            "terminal": status.terminal,
+            "gate_passed": status.gate_passed,
+            "progress_source": status.progress_source,
+            "live_progress_complete": status.live_progress_complete,
             "execution_route_count": status.execution_route_count,
             "shard_summary_count": status.shard_summary_count,
         }
@@ -833,7 +768,10 @@ mod tests {
             RunProfile,
         },
         models::{
-            evaluator_result::EvaluatorResult,
+            evaluator_result::{
+                EvaluatorDiagnostic,
+                EvaluatorResult,
+            },
             execution::Execution,
             execution_aggregate::ExecutionAggregate,
             execution_attempt::ExecutionAttempt,
@@ -867,7 +805,7 @@ mod tests {
     #[test]
     fn aggregation_policy_hash_includes_all_binding_policy() {
         let mut profile: RunProfile =
-            serde_yaml::from_str(include_str!("../../../../example/profile.yaml")).unwrap();
+            serde_yaml::from_str(crate::contracts::run::PROFILE_FIXTURE).unwrap();
         let required_hash = compute_aggregation_policy_hash(&profile).unwrap();
         let binding = &mut profile.case_groups[0].evaluators[0];
         binding.required = false;
@@ -1031,34 +969,58 @@ mod tests {
 
     #[test]
     fn run_results_payload_is_summary_only() {
-        let run = run_with_status("completed", "fail");
+        let mut run = run_with_status("completed", "fail");
+        run.config_snapshot = json!({"secret": "configuration-only"});
         let summary = RunResultsSummary {
             execution_count: 10,
             aggregate_count: 8,
             passed_execution_count: 5,
             failed_execution_count: 3,
-            error_execution_count: 0,
-            skipped_execution_count: 0,
+            error_execution_count: 1,
+            skipped_execution_count: 2,
             missing_aggregate_count: 2,
             evaluator_result_count: 24,
             blocking_failure_count: 3,
             average_score: Some(0.72),
             min_score: Some(0.2),
             max_score: Some(1.0),
-            ..Default::default()
+            planned_chunk_count: 4,
+            settled_chunk_count: 3,
+            sealed_shard_count: 1,
+            missing_execution_count: 2,
+            unresolved_execution_count: 1,
         };
-        let payload = results::run_results_payload(&run, &summary, None);
-
-        assert_eq!(payload["meta"]["summary_only"], json!(true));
-        assert!(payload["data"]["executions"].is_null());
-        assert_eq!(payload["data"]["results"]["execution_count"], json!(10));
-        assert_eq!(
-            payload["data"]["results"]["missing_aggregate_count"],
-            json!(2)
+        let typed = crate::operations::RunResults::from_projection(
+            &run,
+            crate::db::workflows::run_results::RunResultsProjection {
+                summary,
+                execution_route_count: 2,
+                shard_summary_count: 1,
+            },
+            Some(json!({"gates": []})),
         );
+        assert!(!typed.summary_complete);
+        let value = serde_json::to_value(&typed).unwrap();
+        assert!(!value.to_string().contains("configuration-only"));
+        assert!(value["details"].get("config_snapshot").is_none());
+        assert!(value.get("attempts").is_none());
+        assert!(value.get("evaluator_diagnostics").is_none());
+        let payload = results::run_results_payload(&typed);
         assert_eq!(
-            payload["data"]["results"]["status_counts"]["failed"],
-            json!(3)
+            payload,
+            json!({"data":{
+            "run": {"run_id":run.id,"run_key":run.run_key,"status":run.status,"gate_status":run.gate_status,
+                "expected_execution_count":run.expected_execution_count,"terminal_execution_count":run.terminal_execution_count,
+                "passed_execution_count":run.passed_execution_count,"failed_execution_count":run.failed_execution_count,
+                "errored_execution_count":run.errored_execution_count,"summary":run.summary,"error_message":run.error_message,
+                "created_at":run.created_at,"completed_at":run.completed_at,"updated_at":run.updated_at},
+            "results":{"execution_count":10,"aggregate_count":8,"missing_aggregate_count":2,
+                "missing_execution_count":2,"unresolved_execution_count":1,"planned_chunk_count":4,
+                "settled_chunk_count":3,"sealed_shard_count":1,
+                "status_counts":{"passed":5,"failed":3,"error":1,"skipped":2},
+                "score":{"average":0.72,"min":0.2,"max":1.0},"evaluator_result_count":24,
+                "blocking_failure_count":3,"scorecard":{"gates":[]}}
+        },"meta":{"summary_only":true}})
         );
     }
 
@@ -1104,6 +1066,56 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().starts_with("invalid run_id"));
+    }
+
+    #[test]
+    fn typed_status_preserves_cli_fields_and_lifecycle_metadata() {
+        for state in ["creating", "running", "completed", "failed", "cancelled"] {
+            let projection = run_status_workflow::RunStatusProjection::from_control_run(
+                run_with_status(state, "pass"),
+            );
+            let typed = crate::operations::RunStatus::from(&projection);
+            let payload = super::status_payload(&typed);
+            let mut keys = payload["data"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut expected = vec![
+                "run_id",
+                "run_key",
+                "status",
+                "gate_status",
+                "expected_execution_count",
+                "terminal_execution_count",
+                "passed_execution_count",
+                "failed_execution_count",
+                "errored_execution_count",
+                "summary",
+                "error_message",
+                "created_at",
+                "started_at",
+                "dispatched_at",
+                "finalized_at",
+                "completed_at",
+                "live_progress",
+                "creation_progress",
+            ];
+            expected.sort_unstable();
+            assert_eq!(keys, expected);
+            assert_eq!(
+                typed.terminal,
+                matches!(state, "completed" | "failed" | "cancelled")
+            );
+            assert_eq!(typed.gate_passed, state == "completed");
+            assert_eq!(typed.details.run_id, projection.run.id);
+            assert_eq!(typed.details.summary, projection.run.summary);
+            assert_eq!(typed.progress_source, "control_run");
+            assert!(!typed.live_progress_complete);
+            assert!(payload["data"]["creation_progress"].is_null());
+        }
     }
 
     #[test]
@@ -1326,6 +1338,54 @@ mod tests {
             payload["data"]["executions"][0]["attempts"][0]["evidence_state"],
             "authoritative"
         );
+        // Result UUIDs can repeat on another shard. JSON evidence must stay
+        // attached to its own shard even when every parent UUID is identical.
+        let mut other_execution = executions[0].clone();
+        other_execution.run_shard = 1;
+        let mut other_attempt = attempts[0].clone();
+        other_attempt.run_shard = 1;
+        let mut other_result = evaluator_results[0].clone();
+        other_result.run_shard = 1;
+        let diagnostic = EvaluatorDiagnostic {
+            id: Uuid::now_v7(),
+            run_id: run.id,
+            run_shard: 0,
+            evaluator_result_id,
+            diagnostic_index: 0,
+            severity: "low".into(),
+            category: "fixture".into(),
+            reason: None,
+            evidence: json!({"shard":0}),
+            tags: Vec::new(),
+            created_at: now,
+        };
+        let mut other_diagnostic = diagnostic.clone();
+        other_diagnostic.run_shard = 1;
+        other_diagnostic.evidence = json!({"shard":1});
+        let shared_ids = export::run_export_payload(
+            &run,
+            &summary,
+            &export::RunExportRows {
+                executions: &[executions[0].clone(), other_execution],
+                attempts: &[attempts[0].clone(), other_attempt],
+                aggregates: &[],
+                evaluator_results: &[evaluator_results[0].clone(), other_result],
+                evaluator_diagnostics: &[diagnostic, other_diagnostic],
+                scorecard: None,
+            },
+        );
+        for shard in 0..2 {
+            let rows =
+                shared_ids["data"]["executions"][shard]["attempts"][0]["evaluator_diagnostics"]
+                    .as_array()
+                    .unwrap();
+            assert_eq!(
+                rows.len(),
+                1,
+                "diagnostics crossed logical shard boundaries"
+            );
+            assert_eq!(rows[0]["run_shard"], json!(shard));
+        }
         // Preserve all artifact rows, but label unfinished and superseded evidence.
         for (execution_status, attempt_status, current, has_aggregate, expected) in [
             ("running", "completed", true, true, "partial"),

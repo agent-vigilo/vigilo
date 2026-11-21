@@ -1,4 +1,5 @@
 CREATE TABLE shard_rebalance_items (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     operation_id UUID NOT NULL REFERENCES shard_rebalance_operations(id) ON DELETE CASCADE,
     sequence_no INTEGER NOT NULL CHECK (sequence_no >= 0),
 
@@ -36,7 +37,8 @@ CREATE TABLE shard_rebalance_items (
             AND claimed_by IS NULL
             AND claimed_until IS NULL
         )
-    )
+    ),
+    CONSTRAINT fk_shard_rebalance_items_owner FOREIGN KEY (tenant_id, run_id) REFERENCES runs(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_shard_rebalance_items_operation_status_sequence

@@ -207,10 +207,8 @@ impl Fixture {
             .unwrap();
         drop(prepared);
         let mut payload = canonical_json(
-            &serde_yaml::from_str::<serde_json::Value>(include_str!(
-                "../../../../../example/profile.yaml"
-            ))
-            .unwrap(),
+            &serde_yaml::from_str::<serde_json::Value>(crate::contracts::run::PROFILE_FIXTURE)
+                .unwrap(),
         );
         let gate = payload["scorecard"]["gates"][0].clone();
         payload["scorecard"]["gates"] = serde_json::Value::Array(
@@ -919,7 +917,19 @@ async fn preparation_only_is_held_until_execution_is_requested(db: PgPool) {
     .await
     .unwrap();
     assert_eq!(stats.claimed_runs, 0);
-    admission::request(&db, f.plan.run_id).await.unwrap();
+    admission::accept(
+        &db,
+        f.plan.run_id,
+        load(&db, f.plan.run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .manifest
+            .as_ref()
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let lease = admission::claim(&db, f.plan.run_id).await.unwrap();
     assert!(
         admission::activate(&db, lease, &std::collections::BTreeMap::new())
@@ -1044,3 +1054,89 @@ mod publication;
 
 #[path = "postgres_tests/intent.rs"]
 mod intent;
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_admission_claim_requires_grant_and_rolls_back_ownership(db: PgPool) {
+    let f = Fixture::new(&db).await;
+    let lease = claim(&db, f.plan.run_id).await.unwrap();
+    f.prepare(&db, lease).await.unwrap();
+    let plan = load(&db, f.plan.run_id).await.unwrap().unwrap();
+    let held: i64 = sqlx::query_scalar("SELECT count(*) FROM vigilo_ready_admissions(1024)")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(held, 0, "prepared work is not accepted work");
+    admission::accept(&db, plan.run_id, plan.manifest.as_ref().unwrap())
+        .await
+        .unwrap();
+    let role = format!("admission_test_{}", Uuid::new_v4().simple());
+    let function_owner = format!("admission_owner_{}", Uuid::new_v4().simple());
+    let mut tx = db.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_claim_admission(gen_random_uuid(),gen_random_uuid()); RAISE EXCEPTION 'unexpected permission'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {function_owner} NOLOGIN; GRANT USAGE ON SCHEMA public TO {function_owner}; GRANT SELECT,UPDATE ON public.runs,public.run_plans TO {function_owner}; ALTER FUNCTION public.vigilo_claim_admission(uuid,uuid) OWNER TO {function_owner}; ALTER FUNCTION public.vigilo_ready_admissions(integer) OWNER TO {function_owner}; GRANT EXECUTE ON FUNCTION public.vigilo_claim_admission(uuid,uuid),public.vigilo_ready_admissions(integer) TO {role}; SET LOCAL ROLE {role};"))
+        .execute(&mut *tx).await.unwrap();
+    let ready: Vec<Uuid> = sqlx::query_scalar("SELECT run_id FROM vigilo_ready_admissions(1)")
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(ready, vec![plan.run_id]);
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_ready_admissions(1025); RAISE EXCEPTION 'accepted unbounded discovery'; EXCEPTION WHEN invalid_parameter_value THEN NULL; END; BEGIN PERFORM * FROM public.vigilo_claim_admission(NULL,NULL); RAISE EXCEPTION 'accepted missing identity'; EXCEPTION WHEN invalid_parameter_value THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    let permitted:bool=sqlx::query_scalar("SELECT has_table_privilege(current_user,'runs','UPDATE') OR has_table_privilege(current_user,'run_plans','SELECT')")
+        .fetch_one(&mut *tx).await.unwrap();
+    assert!(!permitted);
+    let owner = Uuid::now_v7();
+    let first: (Uuid, Uuid, Uuid, i64) =
+        sqlx::query_as("SELECT * FROM vigilo_claim_admission($1,$2)")
+            .bind(plan.run_id)
+            .bind(owner)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(first.1, plan.run_id);
+    assert_eq!(first.2, owner);
+    let duplicate: Option<(Uuid, Uuid, Uuid, i64)> =
+        sqlx::query_as("SELECT * FROM vigilo_claim_admission($1,$2)")
+            .bind(plan.run_id)
+            .bind(Uuid::now_v7())
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap();
+    assert!(duplicate.is_none());
+    tx.rollback().await.unwrap();
+    let (retry, queries) = crate::db::workflows::run_shard_summary::test_support::record_queries(
+        admission::claim(&db, plan.run_id),
+    )
+    .await;
+    let retry = retry.unwrap();
+    assert_eq!(queries.len(), 1, "{queries:#?}");
+    assert_eq!(retry.generation, first.3);
+    assert_ne!(retry.owner, owner);
+    release(&db, retry, None).await.unwrap();
+    let (left, right) = tokio::join!(
+        admission::claim(&db, plan.run_id),
+        admission::claim(&db, plan.run_id)
+    );
+    assert_ne!(
+        left.is_ok(),
+        right.is_ok(),
+        "only one claimant can own the lease"
+    );
+    let winner = left.or(right).unwrap();
+    assert!(admission::renew(&db, retry).await.is_err());
+    release(&db, winner, None).await.unwrap();
+}
+
+#[path = "postgres_tests/admission_scope.rs"]
+mod admission_scope;
+
+#[path = "postgres_tests/scoped_preparation.rs"]
+mod scoped_preparation;

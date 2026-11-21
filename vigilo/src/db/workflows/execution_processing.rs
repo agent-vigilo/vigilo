@@ -1,9 +1,17 @@
 //! Execution processing workflow.
 //!
+//! The configured harness obtains target evidence before evaluator execution.
+//! Code Scorers and Model-as-a-Judge implementations share the same evaluator
+//! boundary; host policy owns normalization, aggregation and gates.
+//!
 //! This module owns the worker-side path from a leased dataset case to persisted
 //! evaluator results, execution aggregate, and terminal execution transition.
 //! It also owns evaluator runtime lookup and single-flight component loading so
 //! concurrent workers do not repeatedly compile the same evaluator artifact.
+
+pub(crate) mod deferred;
+pub(crate) mod deferred_jobs;
+pub(crate) mod response;
 
 use std::{
     collections::{
@@ -264,6 +272,7 @@ fn persisted_evaluator_manifest(
 /// Runtime metadata needed to execute one evaluator binding for a run.
 #[derive(Debug, Clone)]
 pub(crate) struct RunEvaluatorCatalogEntry {
+    pub(crate) http_policy: vigilo::evaluator_http::Snapshot,
     pub(crate) evaluator_id: Uuid,
     pub(crate) evaluator_version: String,
     pub(crate) content_hash: String,
@@ -330,6 +339,10 @@ pub(crate) fn build_pinned_evaluator_catalog(
         crate::evaluator_abi::resolve_identity(&evaluator.abi)?;
         let identity = parse_fully_qualified_evaluator(&evaluator.evaluator_ref)?;
         let entry = RunEvaluatorCatalogEntry {
+            http_policy: vigilo::evaluator_http::Snapshot::new(
+                evaluator.evaluator_id,
+                evaluator.http_rules,
+            )?,
             evaluator_id: evaluator.evaluator_id,
             evaluator_version: identity.version,
             content_hash: evaluator.content_hash,
@@ -363,13 +376,16 @@ const EXECUTION_RETRY_MAX_SECONDS: i32 = 600;
 /// worker-owned transitions, the worker still owns a live attempt lease.
 #[derive(Debug, Clone)]
 pub(crate) struct ExecutionTerminalTransition {
+    pub(crate) http_policy_revisions: BTreeMap<Uuid, String>,
     pub(crate) execution_id: Uuid,
     pub(crate) attempt_id: Uuid,
     pub(crate) attempt_no: i32,
     pub(crate) completed: bool,
     pub(crate) error_message: Option<String>,
     pub(crate) requires_worker_lease: bool,
+    pub(crate) agent_invocation: Option<crate::agent_client::diagnostics::Diagnostics>,
     pub(crate) agent_failure: Option<crate::agent_client::failure::Failure>,
+    pub(crate) response_evidence: Option<crate::contracts::response_retention::RetainedResponse>,
 }
 
 /// Worker ownership attached to newly allocated execution attempts.
@@ -414,6 +430,7 @@ fn validate_attempt_allocation_batch(
 
 pub(crate) async fn heartbeat_running_attempts_for_chunk(
     db: &PgPool,
+    tenant_id: Uuid,
     run_id: Uuid,
     run_shard: i16,
     chunk_id: Uuid,
@@ -423,6 +440,7 @@ pub(crate) async fn heartbeat_running_attempts_for_chunk(
     validate_attempt_lease_seconds(lease_seconds)?;
     heartbeat_running_attempts_for_chunk_query(
         db,
+        tenant_id,
         run_id,
         run_shard,
         chunk_id,
@@ -451,11 +469,14 @@ struct AttemptAllocation {
     already_terminal: bool,
     retry_not_due: bool,
     max_attempts_exhausted: bool,
+    #[sqlx(skip)]
+    deferred_output: Option<deferred::ScoringInput>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub(crate) struct ChunkExecutionState {
     pub(crate) open_execution_count: i64,
+    pub(crate) awaiting_agent_count: i64,
     pub(crate) retry_scheduled_count: i64,
     pub(crate) next_retry_after: Option<DateTime<Utc>>,
 }
@@ -498,13 +519,16 @@ fn processed_terminal_failure(
         attempt_id,
         result_count: 0,
         terminal_transition: ExecutionTerminalTransition {
+            http_policy_revisions: Default::default(),
             execution_id,
             attempt_id,
             attempt_no,
             completed: false,
             error_message: Some(error_message),
             requires_worker_lease: true,
+            agent_invocation: None,
             agent_failure: None,
+            response_evidence: None,
         },
     }
 }
@@ -520,13 +544,16 @@ fn processed_terminal_failure_without_worker_lease(
         attempt_id,
         result_count: 0,
         terminal_transition: ExecutionTerminalTransition {
+            http_policy_revisions: Default::default(),
             execution_id,
             attempt_id,
             attempt_no,
             completed: false,
             error_message: Some(error_message),
             requires_worker_lease: false,
+            agent_invocation: None,
             agent_failure: None,
+            response_evidence: None,
         },
     }
 }
@@ -856,10 +883,12 @@ fn interpret_measurement(
 #[allow(clippy::too_many_arguments)]
 async fn evaluate_case_execution(
     context: &Context,
+    http_policies: &BTreeMap<Uuid, std::sync::Arc<vigilo::evaluator_http::Snapshot>>,
     run_id: Uuid,
     run_shard: i16,
     run_profile: &RunProfile,
     evaluator_catalog: &RunEvaluatorCatalog,
+    response_identity: &response::Identity,
     case: &chunk_processing::WorkerCaseBatchItem,
     evaluator_bindings: &[EvaluatorBinding],
     aggregation: &AggregationSettings,
@@ -883,25 +912,63 @@ async fn evaluate_case_execution(
         };
     };
     let attempt_no = allocation.attempt_no;
+    let mut agent_invocation = None;
+    let mut response_evidence = None;
+    let provenance = crate::contracts::response_retention::Provenance {
+        run_id,
+        execution_id,
+        attempt_id,
+        case_hash: case.case_hash.clone(),
+        profile_hash: response_identity.profile_hash.clone(),
+        execution_plan_hash: response_identity.execution_plan_hash.clone(),
+        runtime_artifact_digest: response_identity.runtime_artifact_digest.clone(),
+        external_dependencies: crate::contracts::response_retention::ExternalDependencies::None,
+    };
 
     let evaluation_result: anyhow::Result<(
         Vec<AggregationBinding>,
         Vec<EvaluatorExecutionRecord>,
         Vec<evaluator_results::EvaluatorResultInsertRow>,
     )> = async {
+        response_evidence = Some(
+            crate::contracts::response_retention::RetainedResponse::capture(
+                provenance.clone(),
+                run_profile.persistence.mode.clone(),
+                None,
+                run_profile.agent.response.as_ref(),
+                None,
+            )?,
+        );
+        response::validate_limits(context.agent_http_limits(), run_profile)?;
         let test_case = make_test_case(case)?;
-        let http = context.http().await?;
-        let agent_output = agent_client::invoke(
-            http,
-            context.agent_http_limits(),
-            run_id,
-            execution_id,
-            attempt_id,
-            run_profile,
-            &test_case,
-        )
-        .await
-        .map_err(|err| err.context("agent invocation failed"))?;
+        let output = match &allocation.deferred_output {
+            Some(input) => input.output()?,
+            None => {
+                anyhow::ensure!(
+                    run_profile.harness.is_inline(),
+                    "deferred submission requires a delivery adapter"
+                );
+                let invocation = agent_client::invoke(
+                    agent_client::Services {
+                        client: context.http().await?,
+                        limits: context.agent_http_limits(),
+                        credentials: context.agent_credentials(),
+                        resources: context.accepted_resources(),
+                    },
+                    run_id,
+                    execution_id,
+                    attempt_id,
+                    run_profile,
+                    &test_case,
+                )
+                .await
+                .map_err(|err| err.context("agent invocation failed"))?;
+                agent_invocation = Some(invocation.diagnostics);
+                invocation.output
+            }
+        };
+        let (agent_output, retained) = response::prepare(output, run_profile, provenance).await?;
+        response_evidence = Some(retained);
 
         let aggregation_bindings = evaluator_bindings
             .iter()
@@ -953,6 +1020,10 @@ async fn evaluate_case_execution(
                     .get(&binding.dimension)
                     .map(|policy| policy.blocking)
                     .unwrap_or(false);
+                let http_policy = http_policies
+                    .get(&evaluator_entry.evaluator_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("evaluator policy snapshot missing"))?;
                 let context = context.clone();
                 let test_case = test_case.clone();
                 let agent_output = agent_output.clone();
@@ -967,7 +1038,18 @@ async fn evaluate_case_execution(
                             .await?;
                     let wasm_permit = wasm.acquire_evaluation_permit().await?;
 
+                    let (http_invocation, _http_cancellation) = context.evaluator_http(
+                        http_policy.clone(),
+                        crate::agent_client::credentials::Execution {
+                            resources: context.accepted_resources(),
+                            run_id,
+                            execution_id,
+                            attempt_id,
+                        },
+                    )?;
                     let evaluator_input = EvaluatorInput {
+                        http_invocation: Some(http_invocation),
+                        http_policy: Some(http_policy),
                         run_id: run_id.to_string(),
                         execution_id: execution_id.to_string(),
                         attempt_id: attempt_id.to_string(),
@@ -1273,12 +1355,17 @@ async fn evaluate_case_execution(
                 Err(err) => {
                     let failure_message = format!("case execution result count overflow: {}", err);
                     return CaseExecutionOutcome {
-                        processed: Some(processed_terminal_failure(
-                            execution_id,
-                            attempt_id,
-                            attempt_no,
-                            failure_message,
-                        )),
+                        processed: Some({
+                            let mut processed = processed_terminal_failure(
+                                execution_id,
+                                attempt_id,
+                                attempt_no,
+                                failure_message,
+                            );
+                            processed.terminal_transition.agent_invocation = agent_invocation;
+                            processed.terminal_transition.response_evidence = response_evidence;
+                            processed
+                        }),
                         persistence: None,
                     };
                 }
@@ -1299,13 +1386,16 @@ async fn evaluate_case_execution(
                 attempt_id,
                 result_count: records.len(),
                 terminal_transition: ExecutionTerminalTransition {
+                    http_policy_revisions: Default::default(),
                     execution_id,
                     attempt_id,
                     attempt_no,
                     completed: true,
                     error_message: None,
                     requires_worker_lease: true,
+                    agent_invocation: agent_invocation.clone(),
                     agent_failure: None,
+                    response_evidence,
                 },
             };
 
@@ -1336,7 +1426,12 @@ async fn evaluate_case_execution(
             };
             let mut processed =
                 processed_terminal_failure(execution_id, attempt_id, attempt_no, failure_message);
+            processed.terminal_transition.agent_invocation = agent_failure
+                .as_ref()
+                .and_then(|failure| failure.invocation.as_deref().cloned())
+                .or(agent_invocation);
             processed.terminal_transition.agent_failure = agent_failure;
+            processed.terminal_transition.response_evidence = response_evidence;
             CaseExecutionOutcome {
                 processed: Some(processed),
                 persistence: None,
@@ -1357,6 +1452,8 @@ async fn evaluate_case_execution(
 /// - Resolve evaluator bindings from the run profile for each case.
 /// - Ask the database which executions are due, waiting, terminal, or exhausted.
 /// - Run only due cases; waiting and terminal cases are skipped for this pass.
+/// - Pause prevents batch admission; once allocated, drain under the existing
+///   concurrency and deadline limits. Revocation interrupts the drain.
 /// - Convert exhausted open cases into failed terminal transitions so retry
 ///   loops cannot continue indefinitely.
 /// - Persist successful evaluator evidence before returning terminal
@@ -1370,9 +1467,11 @@ pub(crate) async fn process_case_batch_execution(
     lease: &AttemptLeaseContext,
     run_profile: &RunProfile,
     evaluator_catalog: &RunEvaluatorCatalog,
+    response_identity: &response::Identity,
     cases: &[chunk_processing::WorkerCaseBatchItem],
+    control: &crate::operations::control::Observation,
 ) -> anyhow::Result<Vec<ProcessedExecution>> {
-    if cases.is_empty() {
+    if cases.is_empty() || !control.enabled() {
         return Ok(Vec::new());
     }
 
@@ -1385,7 +1484,7 @@ pub(crate) async fn process_case_batch_execution(
         .collect::<anyhow::Result<Vec<_>>>()?;
 
     let database_router = context.dbr().await?;
-    let allocations = database_router
+    let mut allocations = database_router
         .run_database_operation(
             database_alias,
             "worker_attempt_allocation",
@@ -1400,6 +1499,50 @@ pub(crate) async fn process_case_batch_execution(
         )
         .await?;
 
+    let ids = evaluation_plans_by_case
+        .iter()
+        .zip(&allocations)
+        .filter(|(_, allocation)| {
+            allocation.should_process
+                && (run_profile.harness.is_inline() || allocation.deferred_output.is_some())
+        })
+        .flat_map(|(plan, _)| plan.evaluator_bindings.iter())
+        .map(|binding| {
+            evaluator_catalog
+                .get(&binding.evaluator_ref)
+                .map(|entry| entry.evaluator_id)
+                .ok_or_else(|| anyhow::anyhow!("evaluator missing from pinned catalog"))
+        })
+        .collect::<anyhow::Result<std::collections::BTreeSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let http_policies = context
+        .http_policies()
+        .snapshots(chunk.tenant_id, &ids, |ids| async move {
+            let control = database_router.control().await?;
+            crate::db::tables::evaluator_http_policies::load_for_run(
+                control,
+                chunk.tenant_id,
+                chunk.run_id,
+                &ids,
+            )
+            .await
+        })
+        .await?;
+    let accepted_policies = evaluator_catalog
+        .values()
+        .map(|entry| (entry.evaluator_id, &entry.http_policy))
+        .collect::<BTreeMap<_, _>>();
+    let http_policies = http_policies
+        .into_iter()
+        .map(|(id, current)| {
+            let accepted = accepted_policies.get(&id).ok_or_else(|| {
+                anyhow::anyhow!("HTTP policy missing from accepted evaluator catalog")
+            })?;
+            Ok((id, std::sync::Arc::new(current.restrict_to(accepted)?)))
+        })
+        .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+
     debug!(
         run_id = %run_id,
         case_count = cases.len(),
@@ -1408,19 +1551,37 @@ pub(crate) async fn process_case_batch_execution(
     );
 
     let parallelism = CASE_EXECUTION_PARALLELISM.min(cases.len().max(1));
-    let mut next_index = 0usize;
-    let mut pending = FuturesUnordered::new();
-    let mut ordered_outcomes = Vec::with_capacity(cases.len());
-
-    while next_index < cases.len() || !pending.is_empty() {
-        while next_index < cases.len() && pending.len() < parallelism {
-            let index = next_index;
-            next_index += 1;
-
+    let mut processed = Vec::with_capacity(cases.len());
+    let mut completed = Vec::new();
+    let window = if run_profile.harness.is_inline() {
+        cases.len()
+    } else {
+        parallelism
+    };
+    for offset in (0..cases.len()).step_by(window) {
+        let count = window.min(cases.len() - offset);
+        let range = offset..offset + count;
+        if !run_profile.harness.is_inline() {
+            database_router
+                .run_database_operation(
+                    database_alias,
+                    "worker_deferred_evidence_load",
+                    deferred::load_scoring_inputs(
+                        db,
+                        chunk,
+                        lease.worker_id,
+                        &mut allocations[range.clone()],
+                    ),
+                )
+                .await?;
+        }
+        let ordered_outcomes = drain_allocated_cases(count, parallelism, control, |index| {
+            let index = offset + index;
             let case = &cases[index];
             let evaluation_plan = &evaluation_plans_by_case[index];
             let allocation = &allocations[index];
-            pending.push(async move {
+            let http_policies = &http_policies;
+            async move {
                 if allocation.case_id != case.case_id {
                     anyhow::bail!(
                         "attempt allocation returned case '{}' while processing case '{}'",
@@ -1429,7 +1590,7 @@ pub(crate) async fn process_case_batch_execution(
                     );
                 }
 
-                let outcome = if allocation.retry_not_due || allocation.already_terminal {
+                let mut outcome = if allocation.retry_not_due || allocation.already_terminal {
                     CaseExecutionOutcome {
                         processed: None,
                         persistence: None,
@@ -1453,13 +1614,54 @@ pub(crate) async fn process_case_batch_execution(
                         )),
                         persistence: None,
                     }
+                } else if allocation.should_process
+                    && !run_profile.harness.is_inline()
+                    && allocation.deferred_output.is_none()
+                {
+                    let attempt_id = allocation
+                        .attempt_id
+                        .ok_or_else(|| anyhow::anyhow!("missing deferred attempt id"))?;
+                    let result = crate::deferred_runtime::start_case(
+                        context,
+                        db,
+                        database_alias,
+                        chunk,
+                        run_profile,
+                        attempt_id,
+                        make_test_case(case)?,
+                    )
+                    .await;
+                    let processed = match result {
+                        Ok(()) => None,
+                        Err(error) => {
+                            match error.downcast::<crate::agent_client::failure::Failure>() {
+                                Ok(failure) => {
+                                    let mut processed = processed_terminal_failure(
+                                        allocation.execution_id,
+                                        attempt_id,
+                                        allocation.attempt_no,
+                                        failure.to_string(),
+                                    );
+                                    processed.terminal_transition.agent_failure = Some(failure);
+                                    Some(processed)
+                                }
+                                Err(error) => return Err(error),
+                            }
+                        }
+                    };
+                    CaseExecutionOutcome {
+                        processed,
+                        persistence: None,
+                    }
                 } else if allocation.should_process {
                     evaluate_case_execution(
                         context,
+                        http_policies,
                         run_id,
                         run_shard,
                         run_profile,
                         evaluator_catalog,
+                        response_identity,
                         case,
                         &evaluation_plan.evaluator_bindings,
                         &evaluation_plan.aggregation,
@@ -1473,26 +1675,36 @@ pub(crate) async fn process_case_batch_execution(
                     }
                 };
 
-                Ok::<_, anyhow::Error>((index, outcome))
-            });
+                if allocation.should_process
+                    && let Some(processed) = &mut outcome.processed
+                {
+                    processed.terminal_transition.http_policy_revisions = evaluation_plan
+                        .evaluator_bindings
+                        .iter()
+                        .filter_map(|binding| evaluator_catalog.get(&binding.evaluator_ref))
+                        .filter_map(|entry| {
+                            http_policies
+                                .get(&entry.evaluator_id)
+                                .map(|p| (entry.evaluator_id, p.revision().to_owned()))
+                        })
+                        .collect();
+                }
+                Ok::<_, anyhow::Error>(outcome)
+            }
+        })
+        .await?;
+
+        for (_, outcome) in ordered_outcomes {
+            if let Some(persistence) = outcome.persistence {
+                completed.push(persistence);
+            }
+            if let Some(outcome) = outcome.processed {
+                processed.push(outcome);
+            }
         }
 
-        let Some(result) = pending.next().await else {
-            continue;
-        };
-        ordered_outcomes.push(result?);
-    }
-
-    ordered_outcomes.sort_by_key(|(index, _)| *index);
-
-    let mut processed = Vec::with_capacity(cases.len());
-    let mut completed = Vec::new();
-    for (_, outcome) in ordered_outcomes {
-        if let Some(persistence) = outcome.persistence {
-            completed.push(persistence);
-        }
-        if let Some(outcome) = outcome.processed {
-            processed.push(outcome);
+        for allocation in &mut allocations[range] {
+            allocation.deferred_output = None;
         }
     }
 
@@ -1519,6 +1731,180 @@ pub(crate) async fn process_case_batch_execution(
     Ok(processed)
 }
 
+/// Drains already allocated work even after pause, with bounded concurrency and
+/// stable result order. Admission of another batch still requires enabled control.
+/// Completed work wins a simultaneous revocation so safe evidence is retained;
+/// pending calls are dropped on revocation. The caller fences persistence by lease.
+async fn drain_allocated_cases<T, F, Fut>(
+    count: usize,
+    parallelism: usize,
+    control: &crate::operations::control::Observation,
+    mut execute: F,
+) -> anyhow::Result<Vec<(usize, T)>>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let mut next_index = 0;
+    let mut pending = FuturesUnordered::new();
+    let mut outcomes = Vec::with_capacity(count);
+    while (next_index < count && !control.revoked.is_cancelled()) || !pending.is_empty() {
+        while next_index < count && pending.len() < parallelism && !control.revoked.is_cancelled() {
+            let index = next_index;
+            next_index += 1;
+            let work = execute(index);
+            pending.push(async move {
+                // A queued future may first be polled after another case observes
+                // revocation. Do not start its HTTP call in that situation.
+                if control.revoked.is_cancelled() {
+                    return Ok(None);
+                }
+                tokio::select! {
+                    biased;
+                    result = work => result.map(|value| Some((index, value))),
+                    _ = control.revoked.cancelled() => Ok(None),
+                }
+            });
+        }
+        if let Some(result) = pending.next().await
+            && let Some(outcome) = result?
+        {
+            outcomes.push(outcome);
+        }
+    }
+    outcomes.sort_by_key(|(index, _)| *index);
+    Ok(outcomes)
+}
+
+#[cfg(test)]
+mod batch_control_tests {
+    use super::drain_allocated_cases;
+    use crate::operations::{
+        ExecutionControl,
+        control::Observation,
+    };
+
+    #[tokio::test]
+    async fn pause_drains_every_allocated_case_without_readmitting_a_batch() {
+        let control = Observation::new(ExecutionControl::Enabled);
+        let result = drain_allocated_cases(25, 8, &control, |index| {
+            let control = &control;
+            async move {
+                if index == 0 {
+                    control.update(ExecutionControl::Paused);
+                }
+                tokio::task::yield_now().await;
+                Ok(index)
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, (0..25).map(|i| (i, i)).collect::<Vec<_>>());
+        assert!(!control.enabled(), "the next batch must remain blocked");
+    }
+
+    #[tokio::test]
+    async fn pause_observed_after_allocation_still_drains_with_bounded_parallelism() {
+        use std::sync::atomic::{
+            AtomicUsize,
+            Ordering,
+        };
+        let control = Observation::new(ExecutionControl::Paused);
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let active_ref = &active;
+        let peak_ref = &peak;
+        let result = drain_allocated_cases(25, 8, &control, |index| async move {
+            let active = active_ref;
+            let peak = peak_ref;
+            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(count, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            Ok(index)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.len(), 25);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), 8);
+        assert!(!control.enabled());
+    }
+
+    #[tokio::test]
+    async fn revoked_batch_never_starts_work_even_after_resume_observation() {
+        let control = Observation::new(ExecutionControl::Revoked);
+        control.update(ExecutionControl::Enabled);
+        let result = drain_allocated_cases(25, 8, &control, |_| async {
+            panic!("revoked batch must not start work");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn revocation_drops_active_calls_and_never_starts_queued_calls() {
+        use std::sync::atomic::{
+            AtomicUsize,
+            Ordering,
+        };
+        let control = Observation::new(ExecutionControl::Enabled);
+        let started = AtomicUsize::new(0);
+        let trigger = tokio::sync::Notify::new();
+        let execution = drain_allocated_cases(25, 2, &control, |_| async {
+            if started.fetch_add(1, Ordering::SeqCst) == 1 {
+                trigger.notify_one();
+            }
+            std::future::pending::<anyhow::Result<usize>>().await
+        });
+        let revoke = async {
+            trigger.notified().await;
+            control.update(ExecutionControl::Paused);
+            control.update(ExecutionControl::Revoked);
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(execution, revoke)
+        })
+        .await
+        .expect("active calls must be cancelled");
+        assert!(result.unwrap().is_empty());
+        assert_eq!(started.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn revocation_interrupts_a_paused_drain_and_preserves_completed_results() {
+        let control = Observation::new(ExecutionControl::Enabled);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            drain_allocated_cases(25, 8, &control, |index| {
+                let control = &control;
+                async move {
+                    match index {
+                        0 => {
+                            control.update(ExecutionControl::Paused);
+                            Ok(index)
+                        }
+                        1 => {
+                            control.update(ExecutionControl::Revoked);
+                            Ok(index)
+                        }
+                        _ => std::future::pending().await,
+                    }
+                }
+            }),
+        )
+        .await
+        .expect("revocation must drop pending calls")
+        .unwrap();
+        assert_eq!(result, vec![(0, 0), (1, 1)]);
+        control.update(ExecutionControl::Enabled);
+        assert!(!control.enabled());
+    }
+}
+
 #[cfg(test)]
 #[path = "execution_processing/postgres_tests.rs"]
 mod postgres_tests;
@@ -1526,6 +1912,7 @@ mod postgres_tests;
 mod tests {
     use serde_json::json;
     use uuid::Uuid;
+    use vigilo::invocation::profile::HttpEndpoint;
 
     use super::{
         RunEvaluatorCatalogEntry,
@@ -1559,7 +1946,6 @@ mod tests {
                 Severity,
             },
             run::{
-                AgentHttpConfig,
                 AgentProfile,
                 AggregationMethod,
                 AggregationSettings,
@@ -1600,6 +1986,7 @@ mod tests {
 
     fn evaluator_catalog_entry() -> RunEvaluatorCatalogEntry {
         RunEvaluatorCatalogEntry {
+            http_policy: vigilo::evaluator_http::Snapshot::new(Uuid::nil(), vec![]).unwrap(),
             evaluator_id: Uuid::nil(),
             evaluator_version: "1.0.0".to_string(),
             content_hash: "artifact-hash".to_string(),
@@ -1737,13 +2124,18 @@ mod tests {
             },
             scorecard: Default::default(),
             agent: AgentProfile {
+                response: None,
                 provider: "example".to_string(),
                 name: "agent".to_string(),
-                version: None,
+                version: Some("1.0.0".into()),
                 model: None,
                 prompt_config_id: None,
                 prompt_config_version: None,
-                http: AgentHttpConfig {
+                config: json!({}),
+            },
+            harness: crate::invocation::profile::Harness::DirectProbe {
+                http: HttpEndpoint {
+                    credential: None,
                     url: "http://127.0.0.1:8787/v1/agent/invoke".to_string(),
                     method: "POST".to_string(),
                     headers: Default::default(),
@@ -1752,7 +2144,11 @@ mod tests {
                     max_response_bytes: None,
                     max_retry_after_secs: None,
                 },
-                config: json!({}),
+                completion: crate::invocation::profile::Completion::Inline {},
+                capabilities: None,
+                require_executed_agent: false,
+                executed_agent_pointer: None,
+                forward_case_context: false,
             },
             case_groups: groups,
         }

@@ -15,10 +15,10 @@ flowchart TD
     Found{Run exists?}
     Summary[Batch summaries by database; merge progress and scorecard in shard order]
     Format{Export format?}
-    JsonBatches[Load all export batches]
+    JsonBatches[Group bounded logical windows by database; collect record pages]
     JsonPayload[Build JSON with authority labels]
     JsonlHeader[Write run and summary lines]
-    JsonlBatches[Stream batches with authority labels]
+    JsonlBatches[Merge at most four bounded readers; stream records in shard and execution order]
 
     Success([Success response])
 

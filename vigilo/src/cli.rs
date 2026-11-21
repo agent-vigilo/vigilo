@@ -15,7 +15,7 @@ use clap::{
 };
 
 mod args;
-mod commands;
+pub(crate) mod commands;
 use commands::Command;
 #[cfg(test)]
 pub(crate) use commands::worker::claim_hinted_chunk_with_route_refresh;
@@ -40,6 +40,12 @@ pub(super) trait Executable {
     after_help = "Agent tip: use `-q -f toon` for compact structured output in AI agent and LLM tool-call workflows. Use `-f json` when exact JSON parsing is required."
 )]
 pub(crate) struct App {
+    /// Operator evaluator HTTP ceilings and credential bindings (JSON).
+    #[arg(long, env = "VIGILO_EVALUATOR_HTTP_CONFIG")]
+    pub evaluator_http_config: Option<std::path::PathBuf>,
+    /// Maximum age of evaluator HTTP permission snapshots in the worker cache.
+    #[arg(long, env = "VIGILO_EVALUATOR_HTTP_POLICY_MAX_AGE_SECONDS", default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub evaluator_http_policy_max_age_seconds: u64,
     /// Database URL (connection string)
     #[arg(long, env = "DATABASE_URL")]
     pub database_url: Option<String>,
@@ -165,6 +171,7 @@ mod tests {
                         | "messaging-circuit-failure-threshold"
                         | "wasm-timeout-ms"
                         | "database-circuit-failure-threshold"
+                        | "agent-credentials"
                 )
             )
         }));
@@ -182,6 +189,8 @@ mod tests {
         assert!(has_long(worker, "wasm-timeout-ms"));
         assert!(has_long(worker, "agent-max-request-bytes"));
         assert!(has_long(worker, "agent-max-response-bytes"));
+        assert!(has_long(worker, "agent-credentials"));
+        assert!(has_long(coordinator, "agent-credentials"));
         assert!(!has_long(coordinator, "agent-max-request-bytes"));
         assert!(has_long(worker, "database-circuit-failure-threshold"));
         assert!(has_long(worker, "database-operation-timeout-seconds"));
@@ -243,6 +252,48 @@ mod tests {
     }
 
     #[test]
+    fn credential_configuration_is_operator_owned_and_scoped_to_delivery_commands() {
+        for role in ["worker", "coordinator"] {
+            let runtime = App::try_parse_from([
+                "vigilo",
+                "--database-url",
+                "postgres://control",
+                role,
+                "--messaging-url",
+                "amqp://broker",
+                "--agent-credentials",
+                "operator.json",
+                "once",
+            ])
+            .unwrap();
+            assert_eq!(
+                runtime
+                    .command
+                    .context_config("primary")
+                    .unwrap()
+                    .agent_credentials,
+                Some(std::path::PathBuf::from("operator.json"))
+            );
+        }
+        let database = App::try_parse_from([
+            "vigilo",
+            "--database-url",
+            "postgres://control",
+            "database",
+            "list",
+        ])
+        .unwrap();
+        assert!(
+            database
+                .command
+                .context_config("primary")
+                .unwrap()
+                .agent_credentials
+                .is_none()
+        );
+    }
+
+    #[test]
     fn messaging_circuit_configuration_rejects_an_invalid_open_range() {
         let app = App::try_parse_from([
             "vigilo",
@@ -273,4 +324,14 @@ mod tests {
             .get_arguments()
             .any(|arg| arg.get_long() == Some(name))
     }
+}
+
+mod entry;
+
+/// Runs the command-line adapter in the caller’s Tokio runtime.
+///
+/// Reads process arguments, configures CLI logging and writes command output.
+/// Embedding applications should call [`crate::operations`] instead.
+pub async fn run() -> std::process::ExitCode {
+    entry::run().await
 }

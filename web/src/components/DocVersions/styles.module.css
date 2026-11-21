@@ -1,0 +1,91 @@
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2rem;
+  padding-inline: 0.625rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ifm-font-color-base);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.trigger[aria-expanded="true"] svg {transform: rotate(180deg);}
+
+.panel {
+  z-index: 110;
+  width: min(18rem, calc(100vw - 1.5rem));
+  max-height: var(--radix-popover-content-available-height);
+  overflow: auto;
+  padding: 0.375rem;
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: 0.75rem;
+  background: var(--ifm-background-surface-color);
+  box-shadow: var(--ifm-global-shadow-lw);
+}
+
+.heading,
+.feedback,
+.betaNotice {
+  margin: 0;
+  padding: 0.5rem 0.625rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.heading {font-weight: 650;}
+.feedback {color: var(--ifm-color-emphasis-700);}
+
+.betaNotice {
+  margin: 0.25rem 0.25rem 0.5rem;
+  border-radius: 6px;
+  background: var(--ifm-color-emphasis-100);
+}
+
+.heading:focus {outline: none;}
+
+.item, .history {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2.5rem;
+  padding-inline: 0.625rem;
+  font-size: 0.875rem;
+  border-radius: 0.4rem;
+  color: var(--ifm-font-color-base);
+}
+
+.trigger:hover, .item:hover, .history:hover, .item[aria-current] {
+  background: var(--ifm-menu-color-background-hover);
+  color: var(--ifm-color-primary);
+  text-decoration: none;
+}
+
+.trigger:focus-visible, .item:focus-visible, .history:focus-visible {
+  outline: 2px solid var(--ifm-color-primary);
+  outline-offset: -2px;
+}
+
+.line {font-weight: 600;}
+.version, .status {color: var(--ifm-color-emphasis-700); font-size: 0.8rem;}
+.check {margin-inline-start: 0.5rem; color: var(--ifm-color-primary);}
+
+.history {
+  margin-top: 0.125rem;
+  color: var(--ifm-color-primary);
+}
+
+.releases {list-style: none; padding-inline: 0;}
+.releases li {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding-block: 0.55rem;
+  border-bottom: 1px solid var(--ifm-toc-border-color);
+}

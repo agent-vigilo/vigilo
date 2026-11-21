@@ -13,7 +13,7 @@ import ingestionData from './ingestion-data.mmd';
 # Dataset Ingestion
 
 Dataset ingestion turns submitted cases into verified immutable files and a
-finalized catalog reference. The CLI owns preparation and upload work; PostgreSQL
+finalized catalog reference. Library dataset operations own preparation and upload work; the CLI supplies files, cancellation signals and output formatting. PostgreSQL
 stores compact ownership, file references, and progress. Blob storage holds case
 bytes, source fields, indexes, and the dataset manifest.
 
@@ -66,6 +66,50 @@ hash, owner binding and admitted limits match. A finalized ID returns its existi
 reference. Concurrent independent upload IDs may produce separate immutable
 copies; publication requires no global dataset lock.
 
+## Library Operations
+
+`operations::Client::datasets(storage_toml)` binds operator-owned storage and
+returns a dataset client. `PreparedDataset::prepare(reader, format, batching,
+cancel)` validates an asynchronous reader and returns sealed input;
+`upload` publishes it, and `resume` reads the original source under the upload’s
+recorded batching limits. Both return a typed publication containing an immutable
+reference and an explicit reuse flag. The operations install no signal handlers,
+logging subscribers or interface formatting. Callers own request deadlines and
+cancel the supplied token when input or remote work should stop.
+
+`Client::dataset_status` returns compact progress and an optional published
+reference; `abort_dataset_upload` revokes staging work. `DatasetClient::cleanup`
+reconciles a bounded page of exact owned objects. Expiry remains an authorized
+operator maintenance operation. Status values expose neither physical object keys,
+lease-owner tokens nor signing material. The CLI retains its detailed operator
+JSON representation.
+
+A trusted embedding host uses `UserClient::datasets(storage_toml, resolver)` or
+`HostedRuntime::datasets(storage_toml)` to create a reusable storage-bound service.
+Its `user(UserContext)` method derives a caller-bound dataset client while sharing
+fixed-role pools. The same caller identity applies to each short database
+transaction; deployment row policies enforce access. There is no transaction
+across input receipt or remote object I/O. Caller-bound transactions install one
+context statement before ledger SQL and clear it on completion; admission is per
+metadata operation or file group, never per case. A missing or inaccessible upload cannot
+provide storage credentials through this path.
+
+Hosted signing uses `Resolver::dataset_storage_credentials`. Its read-only request
+contains the verified caller, upload ID, pinned binding hash and upload/cleanup
+purpose. The resolver authorizes that request and returns matching, unexpired
+signing material. `validate_storage_binding` compares the host’s expected nonsecret
+configuration with the pinned namespace. Dataset signing does not fabricate a run
+identity. Callbacks share bounded admission, a ten-second deadline and redacted
+errors. Hosted configurations reject credential-variable and alternate-read
+bindings; injected resolution never falls back to files or environment credentials.
+
+Reader preparation admits one stream per process before receiving bytes. It spools
+at most 8 MiB for JSON/YAML or 8 GiB for JSONL, then uses the same bounded parser
+and canonical-record spool as file preparation. Raw input scratch and the 8 GiB
+canonical spool are separate disk budgets; allow space for both and bounded sorting
+scratch. Prepared input retains admission through upload until dropped. The CLI
+reads its regular input file directly and needs no additional raw-input copy.
+
 ## Input Formats
 
 `--input-format json` and `yaml` accept the [dataset document](/docs/configuration/dataset-format)
@@ -90,7 +134,7 @@ limit; each case record must fit the admitted batch budget including its stored
 envelope and header. Preparation spools canonical records and detects duplicate
 UUIDs with 1 MiB sort runs and merges of at most 32 readers. One preparation/upload
 holds the process's 8 GiB validation-spool reservation. Remote transfer uses the
-separate shared [object I/O budgets](./formats/#resource-budgets). Batch case and
+separate shared [object I/O budgets](./formats.mdx#resource-budgets). Batch case and
 byte caps both apply; they do not change execution chunk size.
 
 Checkpoint preparation retains small headers, references, and offsets into the

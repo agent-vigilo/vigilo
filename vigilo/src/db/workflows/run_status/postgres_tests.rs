@@ -1,29 +1,20 @@
 // PostgreSQL-backed workflow scenarios and fixtures.
 
-use tokio::sync::OnceCell;
-
 use super::*;
 use crate::context::database::{
     CircuitBreakerConfig,
-    DatabaseCircuitBreakers,
     DatabaseRouter,
     PlacementConfig,
-    new_shard_placement_cache,
 };
 
 fn database_router_with_control_pool(pool: sqlx::PgPool) -> DatabaseRouter {
-    let database_router = DatabaseRouter {
-        uri: "postgres://injected-control-pool".to_string(),
-        max_connections_per_pool: 5,
-        acquire_timeout: std::time::Duration::from_secs(10),
-        placement_config: PlacementConfig::default_single_database(),
-        circuit_breakers: DatabaseCircuitBreakers::new(CircuitBreakerConfig::default()),
-        operation_timeout_config: None,
-        control_pool: OnceCell::new(),
-        placement_pools: OnceCell::new(),
-        dynamic_placement_pools: moka::future::Cache::builder().max_capacity(1_000).build(),
-        shard_placement_cache: new_shard_placement_cache(),
-    };
+    let database_router = DatabaseRouter::new(crate::context::database::Config::new(
+        "postgres://injected-control-pool".to_string(),
+        5,
+        std::time::Duration::from_secs(10),
+        CircuitBreakerConfig::default(),
+        PlacementConfig::default_single_database(),
+    ));
     assert!(database_router.control_pool.set(pool).is_ok());
     database_router
 }
@@ -93,6 +84,16 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
         .unwrap()
         .unwrap();
 
+    let typed = crate::operations::status::read(&database_router, run_id)
+        .await
+        .unwrap();
+    assert_eq!(typed, crate::operations::RunStatus::from(&status));
+    assert!(typed.terminal);
+    assert!(!typed.gate_passed);
+    assert!(matches!(
+        crate::operations::status::read(&database_router, Uuid::now_v7()).await,
+        Err(crate::operations::Error::NotFound(_))
+    ));
     assert_eq!(status.execution_route_count, 0);
     assert_eq!(
         status
@@ -101,6 +102,12 @@ async fn creation_failure_status_does_not_resolve_unseeded_routes(pool: sqlx::Pg
             .map(|progress| progress.failed_placement_count),
         Some(0)
     );
+    database_router.control().await.unwrap().close().await;
+    let error = crate::operations::status::read(&database_router, run_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::operations::Error::Dependency(_)));
+    assert_eq!(error.to_string(), "operation dependency failed");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -124,6 +131,17 @@ async fn status_batches_same_database_shards_and_preserves_partial_progress(pool
 
     let (result, queries) = record_queries(select_run_status(&router, run)).await;
     let projection = result.unwrap().unwrap();
+    let (typed, typed_queries) =
+        record_queries(crate::operations::status::read(&router, run)).await;
+    assert_eq!(
+        typed.unwrap(),
+        crate::operations::RunStatus::from(&projection)
+    );
+    // Compare initialized routing paths: cold pool metadata is intentionally outside
+    // this preservation assertion, while all per-read SQL stays accounted for.
+    let (_, warm_queries) = record_queries(select_run_status(&router, run)).await;
+    assert_eq!(typed_queries, warm_queries);
+
     assert_eq!(projection.execution_route_count, 127);
     assert_eq!(projection.shard_summary_count, 126);
     assert!(!projection.live_progress_complete());

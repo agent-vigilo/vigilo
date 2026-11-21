@@ -15,6 +15,8 @@ flowchart TD
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
 
+    LibraryHost["Rust Application<br/>Embeds the core library; owns its runtime and interface"]:::external
+
     %% components
     Vigilo["fa:fa-terminal <br/> <b>Vigilo</b> <br/> <small>[Container: Rust]</small> <br/> <small>Provides evaluator and run management functionality via CLI.</small>"]:::component
     Coordinator["fa:fa-compass <br/> <b>Coordinator</b> <br/> <small>[Container: Rust]</small> <br/> <small>Recovers durable work, dispatches chunk windows, finalizes runs, and publishes outbox records.</small>"]:::component
@@ -37,6 +39,7 @@ flowchart TD
 
     %% external target
     TargetAgent["fa:fa-brain <br/> <b>Agent / AI Provider</b> <br/> <small>[External System]</small> <br/> <small>The model, agent wrapper, or API endpoint being evaluated</small>"]:::external
+    Trial["<b>Delegated Trial Harness</b><br/><small>[External System]</small>"]:::external
 
     %% edges
     User & AgentClient -->|"Manages evaluators, runs and runtime services using"| Vigilo
@@ -48,11 +51,18 @@ flowchart TD
     Coordinator -->|"Publishes routed chunk-ready broker messages to <br> <small>[JSON/AMQP]</small>"| Queue
     Queue -->|"Delivers routed chunk-ready broker messages to <br> <small>[JSON/AMQP]</small>"| Worker
     Worker -->|"Reads from <br/> and writes to <br> <small>[SQL/TCP]</small>"| Database
-    Worker -->|"Sends case prompts to and receives agent responses from <br> <small>[TEXT/HTTP]</small>"| TargetAgent
+    Worker -->|"Direct Probe <br> <small>[HTTP]</small>"| TargetAgent
+    Worker -->|"Submits case input and receives the outcome <br> <small>[HTTP]</small>"| Trial
+    Trial -->|Drives the session with| TargetAgent
 
     Vigilo -->|Publishes verified datasets and run plans through adapters| Objects
     Coordinator -->|Reads verified plans for admission recovery| Objects
     Worker -->|Verifies configuration and assigned case files| Objects
+
+    LibraryHost -->|"Calls coordinator cycles in process"| Coordinator
+    LibraryHost -->|"Calls worker services in process"| Worker
+    LibraryHost -->|"Uses shared typed operation workflows"| Database
+    LibraryHost -->|"Uses admitted storage operations"| Objects
 
     %% links
     click Vigilo "/docs/architecture/structure/components/vigilo/"

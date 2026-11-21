@@ -29,8 +29,13 @@ flowchart TD
     Query -- Yes --> FilteredSearch
     Query -- No --> NamespaceSearch
 
-    FilteredSearch --> Payload
-    NamespaceSearch --> Payload
+    FilteredSearch --> Budget{Descriptor fits an empty page?}
+    NamespaceSearch --> Budget
+    Budget -- No --> SearchFail
+    Budget -- Yes --> More{More pages needed for CLI limit?}
+    More -- Yes --> Continue[Continue logical position under current access]
+    Continue --> Query
+    More -- No --> Payload
 
     Payload --> Success
     FilteredSearch -. Query fails .-> SearchFail

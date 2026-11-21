@@ -21,7 +21,7 @@ use super::aggregation::AggregationConfig;
 
 /// Sealed and caught-up pages count as progress without another readiness probe.
 #[derive(Clone, Copy, Debug)]
-pub(super) enum PageOutcome {
+pub(crate) enum PageOutcome {
     Advanced,
     Sealed,
     CaughtUp,

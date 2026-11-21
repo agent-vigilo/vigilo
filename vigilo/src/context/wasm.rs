@@ -79,7 +79,17 @@ use crate::{
     },
 };
 
+#[path = "wasm/resources.rs"]
+mod resources;
+
 pub(crate) struct EvaluatorHost {
+    pub(crate) http_deadline: Option<std::time::Instant>,
+    pub(crate) http_invocation:
+        Option<std::sync::Arc<dyn vigilo::evaluator_http::transport::BlockingTransport>>,
+    pub(crate) http_policy: Option<std::sync::Arc<vigilo::evaluator_http::Snapshot>>,
+    resources: Option<resources::Resources>,
+    resource_max_bytes: u64,
+    resource_timeout: Option<Duration>,
     table: ResourceTable,
     ctx: WasiCtx,
     limits: StoreLimits,
@@ -98,6 +108,55 @@ impl WasiView for EvaluatorHost {
 }
 
 impl EvaluatorHost {
+    /// Install immutable bytes in this store only. No handle survives store drop.
+    pub(crate) fn install_response_body(
+        &mut self,
+        body: vigilo::response::CapturedBody,
+    ) -> anyhow::Result<vigilo::response::BodyMetadata> {
+        let byte_length = body.bytes().len() as u64;
+        let content_type = body.content_type().map(str::to_owned);
+        let mut table = resources::Resources::new(self.resource_max_bytes, self.resource_timeout)
+            .map_err(|error| {
+            anyhow::anyhow!("response resource budget unavailable: {error:?}")
+        })?;
+        let resource = table
+            .insert(body)
+            .map_err(|error| anyhow::anyhow!("response resource budget exceeded: {error:?}"))?;
+        self.resources = Some(table);
+        Ok(vigilo::response::BodyMetadata {
+            resource,
+            byte_length,
+            content_type,
+        })
+    }
+
+    /// Register decoded mapped bytes in the same invocation-local table.
+    pub(crate) fn install_decoded_body(
+        &mut self,
+        body: vigilo::response::CapturedBody,
+    ) -> anyhow::Result<u64> {
+        let table = self
+            .resources
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("original response resource is unavailable"))?;
+        Ok(table
+            .insert(body)
+            .map_err(|error| anyhow::anyhow!("response resource budget exceeded: {error:?}"))?
+            .0)
+    }
+
+    pub(crate) fn read_response_resource(
+        &mut self,
+        handle: u64,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<Vec<u8>, vigilo::response::ResourceReadError> {
+        self.resources
+            .as_mut()
+            .ok_or(vigilo::response::ResourceReadError::Unavailable)?
+            .read(vigilo::response::ResourceHandle(handle), offset, max_bytes)
+    }
+
     pub(crate) fn capped_log_message(&mut self, msg: String) -> Option<String> {
         if self.max_log_messages == 0 || self.log_messages >= self.max_log_messages {
             return None;
@@ -622,6 +681,26 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Validate the standalone command's bounds before hosted engine creation.
+    /// Zero log messages disables logging; execution deadlines remain required.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (65_536..=1_073_741_824).contains(&self.max_memory_bytes)
+                && (1..=10_000_000).contains(&self.max_table_elements)
+                && (1..=1024).contains(&self.max_instances)
+                && (1..=64).contains(&self.max_memories)
+                && (1..=256).contains(&self.max_tables)
+                && (1..=10_000_000_000).contains(&self.fuel_per_evaluation)
+                && (1..=600_000).contains(&self.timeout_ms)
+                && (1..=1_000).contains(&self.epoch_tick_interval_ms)
+                && (1..=1024).contains(&self.max_concurrent_evaluations)
+                && (1..=1_048_576).contains(&self.max_log_message_bytes)
+                && self.max_log_messages <= 100_000,
+            "invalid Wasm limits"
+        );
+        self.store_limits()?;
+        Ok(())
+    }
     fn store_limits(&self) -> anyhow::Result<StoreLimits> {
         Ok(StoreLimitsBuilder::new()
             .memory_size(to_usize("wasm max memory bytes", self.max_memory_bytes)?)
@@ -719,33 +798,7 @@ impl Wasm {
         profile: String,
     ) -> anyhow::Result<Component> {
         if let Some(package) = crate::evaluator_package::load(&package_path)? {
-            let embedded = read_embedded_package_metadata(&package.wasm)?.ok_or_else(|| {
-                anyhow::anyhow!("portable artifact must contain vigilo.package metadata")
-            })?;
-            anyhow::ensure!(
-                embedded.name == package.name && embedded.version == package.version,
-                "embedded vigilo.package identity mismatch"
-            );
-            let prepared = self.compile_evaluator(&package.wasm, &package.abi)?;
-            let serialized = prepared.serialize()?;
-            return Ok(Component {
-                name: package.name,
-                version: package.version,
-                description: package.description,
-                tags: package.tags,
-                metadata: package.metadata,
-                interface_name: format!("{}/{}", package.abi.package, package.abi.interface),
-                interface_version: package.abi.version.clone(),
-                wit_world: package.abi.world.clone(),
-                abi: package.abi,
-                runtime: WASM_RUNTIME_NAME.into(),
-                runtime_version: WASM_RUNTIME_VERSION.into(),
-                runtime_fingerprint: self.fingerprint.clone(),
-                wasm_hash: blake3::hash(&package.wasm).to_hex().to_string(),
-                wasm_bytes: package.wasm,
-                component: prepared,
-                serialized,
-            });
+            return self.prepare_portable(package);
         }
         let manifest = read_manifest(&package_path)?;
         let manifest_profile = manifest.get_profile(&profile)?;
@@ -829,6 +882,41 @@ impl Wasm {
         })
     }
 
+    /// Compile already verified portable input using the same embedded identity
+    /// checks as the CLI path. Published Wasm bytes remain unchanged.
+    pub(crate) fn prepare_portable(
+        &self,
+        package: crate::evaluator_package::PackageInput,
+    ) -> anyhow::Result<Component> {
+        let embedded = read_embedded_package_metadata(&package.wasm)?.ok_or_else(|| {
+            anyhow::anyhow!("portable artifact must contain vigilo.package metadata")
+        })?;
+        anyhow::ensure!(
+            embedded.name == package.name && embedded.version == package.version,
+            "embedded vigilo.package identity mismatch"
+        );
+        let prepared = self.compile_evaluator(&package.wasm, &package.abi)?;
+        let serialized = prepared.serialize()?;
+        Ok(Component {
+            name: package.name,
+            version: package.version,
+            description: package.description,
+            tags: package.tags,
+            metadata: package.metadata,
+            interface_name: format!("{}/{}", package.abi.package, package.abi.interface),
+            interface_version: package.abi.version.clone(),
+            wit_world: package.abi.world.clone(),
+            abi: package.abi,
+            runtime: WASM_RUNTIME_NAME.into(),
+            runtime_version: WASM_RUNTIME_VERSION.into(),
+            runtime_fingerprint: self.fingerprint.clone(),
+            wasm_hash: blake3::hash(&package.wasm).to_hex().to_string(),
+            wasm_bytes: package.wasm,
+            component: prepared,
+            serialized,
+        })
+    }
+
     /// Compile evaluator wasm bytes into a component for registry caching.
     pub fn compile_evaluator(
         &self,
@@ -836,17 +924,6 @@ impl Wasm {
         identity: &EvaluatorAbiIdentity,
     ) -> anyhow::Result<PreparedEvaluator> {
         PreparedEvaluator::compile(self, wasm_bytes, identity)
-    }
-
-    /// Run evaluator in test mode.
-    pub fn test_evaluator(
-        &self,
-        wasm_bytes: &[u8],
-        abi: &EvaluatorAbiIdentity,
-        input: EvaluatorInput,
-    ) -> anyhow::Result<EvaluatorOutput> {
-        let evaluator = self.compile_evaluator(wasm_bytes, abi)?;
-        self.test_evaluator_component(&evaluator, input)
     }
 
     /// Run evaluator in test mode using a prepared component and adapter.
@@ -866,6 +943,15 @@ impl Wasm {
         let mut store = Store::new(
             &self.engine,
             EvaluatorHost {
+                http_deadline: (self.config.timeout_ms > 0).then(|| {
+                    std::time::Instant::now() + Duration::from_millis(self.config.timeout_ms)
+                }),
+                http_policy: None,
+                http_invocation: None,
+                resources: None,
+                resource_max_bytes: self.config.max_memory_bytes,
+                resource_timeout: (self.config.timeout_ms > 0)
+                    .then(|| Duration::from_millis(self.config.timeout_ms)),
                 table: ResourceTable::new(),
                 ctx: WasiCtxBuilder::new().build(),
                 limits: self.config.store_limits()?,
@@ -935,6 +1021,12 @@ mod tests {
 
     fn test_host(max_log_message_bytes: usize, max_log_messages: u32) -> EvaluatorHost {
         EvaluatorHost {
+            http_deadline: None,
+            http_policy: None,
+            http_invocation: None,
+            resources: None,
+            resource_max_bytes: Config::default().max_memory_bytes,
+            resource_timeout: None,
             table: ResourceTable::new(),
             ctx: WasiCtxBuilder::new().build(),
             limits: Config::default().store_limits().unwrap(),
@@ -1081,6 +1173,18 @@ mod tests {
         assert_eq!(component.wasm_bytes, bytes);
         assert_eq!(component.wasm_hash, blake3::hash(&bytes).to_hex().as_str());
         assert_eq!(component.abi, abi);
+        let from_reader = runtime
+            .prepare_portable(
+                crate::evaluator_package::load_archive(
+                    fs::File::open(dir.path().join("good.tar.gz")).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(from_reader.wasm_bytes, component.wasm_bytes);
+        assert_eq!(from_reader.wasm_hash, component.wasm_hash);
+        assert_eq!(from_reader.abi, component.abi);
+
         for (label, wasm, name) in [
             ("missing", raw, "sentiment-basic-en"),
             ("identity", bytes, "different-name"),

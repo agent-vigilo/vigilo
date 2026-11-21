@@ -14,17 +14,65 @@ import coordinatorDiagram from './diagram.mmd';
 
 # Coordinator Components
 
+The trusted library host obtains `operations::Coordinator` from a validated
+`HostedRuntime`. Its bounded `once()` and cancellable `run()` share the CLI cycle
+implementation. Cancellation stops new cycles and drains the active cycle; the
+host owns task joining and dependency shutdown.
+
+The library handle also accepts a specific run or shard. An admission call
+advances one accepted run and returns its ready shard routes. Separate calls
+dispatch one window, consume one settlement page, or attempt finalization for
+one run. Each call checks its current database authority. A caller can retry a
+deferred operation independently and publish bounded outbox batches per database.
+
 Describes the major internal responsibilities of the coordinator runtime.
 
 <Mermaid value={coordinatorDiagram} />
 
 ## Notes
 
-- Run-creation recovery runs first. It claims ready `creating` runs with execution
-  requested and an available lease, replays compact metadata, and enables
+- Execution controls run first: a restricted database function claims at most 32
+  eligible deliveries with fresh tokens and 60-second leases. Bounded direct
+  database deliveries apply revisions,
+  observe worker quiescence, and retry cancellation cleanup. Unavailable placements
+  remain pending; acknowledgments are fenced by revision and delivery claim.
+  Application, quiescence reads, acknowledgments and retry updates each bind the
+  claimed work identity in a transaction. No control connection is held across
+  remote delivery; rollback and cancelled calls clear transaction-local context.
+  A separate restricted function claims at most 16 quiescent revoked runs for
+  cleanup, with 60-second leases and fresh settlement tokens. Its returned identity
+  scopes control-state changes, route reads, execution cleanup, finalization and
+  acknowledgement. Control transactions end before remote cleanup begins.
+- Run-creation recovery uses restricted database discovery and lease-claim
+  functions. Claiming rechecks exact acceptance and advances the fencing generation
+  atomically; discovery alone grants no ownership.
+- Run-creation recovery then claims accepted `creating` runs with execution
+  enabled and an available lease, replays compact metadata, and enables
   dispatch only after verifying exact local chunk coverage.
-- Chunk lease recovery then runs before dispatch and finalization: expired worker chunk leases are either requeued with recovery-scoped chunk-ready outbox event records or marked failed after the recovery limit.
+- Chunk lease recovery discovers bounded candidates through a restricted database
+  function that retains shared movement locks in the recovery transaction. The
+  exact claimed work set scopes the batch; writes recheck local ownership in
+  subsequent statements. Receipts carry snapshot ownership explicitly, and a
+  failed write rolls back the whole batch. Empty discovery ends the pass.
+- Standalone recovery discovers due deferred invocations in the same read.
+  The coordinator claims requests on the owning execution placement, checks
+  deadlines independently, and accepts results into the existing chunk outbox.
+  Remote cancellation uses a separate bounded delivery budget after local work.
+- Chunk lease recovery runs before dispatch and finalization. It requeues
+  recoverable expired leases with a recovery-scoped chunk-ready outbox record
+  or settles exhausted chunks as failed. Recovery can release expired leases
+  while a shard drains. New worker claims require open admission.
 - Dispatch claims an open `run_id + run_shard` cursor, selects one bounded chunk window from that shard, and inserts one `run.chunk.ready` outbox event record per selected chunk.
+- A coordinator cycle discovers cursors through a restricted function. A
+  targeted dispatch locks the specified cursor under the run's scope and
+  checks the route generation. The lock remains held through the routed write
+  and is released on commit or rollback.
+- Dispatch takes the shared movement fence and validates local admission under
+  the claimed work identity. A placement that shares the control database uses
+  the claimed cursor transaction for the snapshot, chunk, summary and outbox
+  writes. On a separate execution database those writes use their own transaction,
+  which commits before the control cursor advances. Missing admission is repaired
+  using the held control transaction.
 - Already-running run dispatch is cursor-owned and takes only a compatible shared `runs` lock, allowing multiple coordinators to dispatch different shard cursors for the same run while cancellation and finalization retain exclusive lifecycle guards.
 - Finalization is coordinator-owned and lease guarded. Each cycle inspects a
   bounded candidate set, rotates blocked runs behind unchecked work, and can
@@ -60,7 +108,7 @@ unavailable shards do not prevent unrelated shards from advancing.
 
 Finalization reads summaries in one batch per execution database, then requires
 validated seals and frozen planned membership before claiming control ownership.
-Receipt aggregation advances only in its dedicated cycle stage.
+Receipt aggregation advances in its dedicated cycle stage or a targeted call.
 See [settlement and partial results](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
 ## Receipt Aggregation Controls
@@ -88,12 +136,71 @@ canonical fold in the same cycle when ready work and budgets allow. Scheduling
 bounds describe work admission, not guaranteed throughput or a completion deadline;
 database capacity, contention, payload size, and other cycle work still matter.
 
-Creation recovery claims ready plans with execution requested before reading
-immutable roots and gate counts through the storage adapter. It resumes compact
+Creation recovery claims accepted ready plans with execution enabled before reading
+protected plan details, immutable roots and gate counts through the storage adapter.
+The claimed work identity scopes each admission transaction on the control and
+execution databases without changing connection roles. It resumes compact
 execution metadata admission and activates only after exact placement verification.
 Preparation-only runs remain held; interrupted dataset ingestion and unpublished
 plan preparation are resumed by their callers. See
 [Run Preparation](/docs/architecture/case-storage/run-preparation).
+
+Placement activation locks each target catalog row through a restricted database
+function. The lock lasts through activation, while the caller retains no catalog
+update privilege. Role/status validation and route writes remain in Rust.
+
+Finalization candidate discovery and lease claiming use restricted database
+functions. Discovery preserves drained-cursor eligibility, heartbeat ordering and
+per-cycle exclusions. After routed summaries are checked, claiming rechecks run
+state, execution control and lease expiry, skipping locked runs. Each operation
+uses one database call; score calculation and fenced final result writes remain
+separate.
+
+Outbox publication claims use a restricted database function that returns a
+bounded batch of event payloads with fresh lease tokens. Competing publishers
+skip locked delivery rows. Publication acknowledgments and retries must present
+the current token; expired claims can be reclaimed without changing the durable
+event. Claiming uses one database call.
+
+Aggregation discovery uses a restricted database function to return bounded
+run/shard identities, ownership and current write epochs. It excludes sealed and idle shards
+and admissions outside open or draining state. Unconsumed receipts and shards
+ready for final verification remain eligible. Discovery uses one database call;
+page processing rechecks ownership and retains its existing transaction boundary.
+
+Dispatch, finalization and outbox backlog gauges use restricted read-only
+database functions. Routed execution-alias discovery and startup route validation
+also use restricted functions, returning aliases or aggregate counts rather than
+work rows. Each read uses one database call. Exact backlog counts retain their
+existing scan cost and filters.
+
+Dispatch binds transaction-local work identity from the restricted cursor claim's
+result in the same SQL statement. It clears caller identity and keeps the original
+cursor lock through snapshot preparation and cursor advancement. Follow-up SQL
+remains in Rust workflows; scoped table grants and row policies support these
+writes on the fixed scheduler connection. Commit, rollback and cancellation end
+the transaction-local scope. Database policy semantics belong to the trusted host;
+context values alone do not establish permission to select arbitrary work.
+
+Aggregation discovery carries the authoritative run identity into each page
+transaction. Context is installed with the page claim before protected receipt
+reads or checkpoint writes. Deferred and invalid candidates rotate under that
+same identity in a separate short transaction after the page releases its locks.
+Consumption flags and summary checkpoints still commit together; failed pages
+roll back without discarding previously committed progress.
+
+Finalization discovery supplies ownership for scoped route reads and one summary
+read per execution database. Control read transactions end before remote I/O.
+Unready candidates receive a scoped scheduling-heartbeat update. A successful
+lease claim supplies identity for the terminal transaction, which rechecks the
+lease and exact shard membership before committing the run, scorecard and
+completion event together. A failed terminal write leaves those changes uncommitted.
+
+Claims return authoritative ledger ownership with each event. After broker I/O,
+mark-published and retry bookkeeping each use a short transaction scoped to that
+identity, with unrelated caller context cleared. The claim token fences stale
+publishers; ledger and delivery-row changes commit together. No database transaction
+is held during broker publication, and mixed-owner batches retain bounded concurrency.
 
 ## Related
 
@@ -106,3 +213,9 @@ plan preparation are resumed by their callers. See
 - [Vigilo components](../vigilo)
 - [Worker components](../worker)
 - [Glossary](/docs/glossary)
+
+Resource selection uses the claimed accepted run and plan identity before object
+reads. Injected storage bindings must match the exact request and physical binding;
+denial, expiry or resolution failure defers admission without using standalone
+configuration. Provider calls run outside database transactions and add no
+ownership lookup. See [host resource resolution](/docs/configuration/agent-credentials#host-resource-resolution).

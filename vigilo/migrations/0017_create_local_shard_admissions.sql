@@ -1,4 +1,7 @@
+-- Admission is installed before copying run prerequisites to a move target.
+-- Its ownership is fenced by the move lifecycle, not a destination run FK.
 CREATE TABLE local_shard_admissions (
+    tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('vigilo.tenant_id', true), '')::uuid,
     run_id UUID NOT NULL,
     run_shard SMALLINT NOT NULL CHECK (run_shard >= 0 AND run_shard < 128),
     database_alias TEXT NOT NULL,

@@ -15,9 +15,13 @@ sequenceDiagram
     activate Vigilo
 
     Vigilo->>Vigilo: Resolve namespace, query, and bounded limit
-    Vigilo->>DB: Search evaluator summaries
+    Vigilo->>DB: Read bounded metadata page under current caller context
     DB-->>Vigilo: Matching summaries, possibly empty
 
+    loop More byte-bounded pages needed to fill CLI limit
+        Vigilo->>DB: Continue by filter-bound logical position
+        DB-->>Vigilo: Next metadata page
+    end
     Vigilo->>Vigilo: Build data/meta payload
     Vigilo-->>User: Success response
     deactivate Vigilo

@@ -52,9 +52,53 @@ pub(crate) enum OwnerConfig {
         #[serde(default)]
         path_style: bool,
         credential_variables: Option<CredentialVariables>,
+        #[serde(skip)]
+        read_endpoint_override: Option<String>,
+        #[serde(skip)]
+        credentials_provider: Option<aws_sdk_s3::config::SharedCredentialsProvider>,
     },
 }
 impl OwnerConfig {
+    /// Injected bindings cannot consult process files, variables or SDK defaults.
+    pub(crate) fn validate_injected(&self) -> Result<()> {
+        let Self::S3 {
+            credential_variables,
+            read_endpoint_variable,
+            ..
+        } = self;
+        ensure!(
+            credential_variables.is_none() && read_endpoint_variable.is_none(),
+            "injected storage cannot use environment bindings"
+        );
+        Ok(())
+    }
+    pub(crate) fn with_credentials(
+        mut self,
+        provider: aws_sdk_s3::config::SharedCredentialsProvider,
+    ) -> Result<Self> {
+        self.validate_injected()?;
+        let Self::S3 {
+            credentials_provider,
+            ..
+        } = &mut self;
+        *credentials_provider = Some(provider);
+        Ok(self)
+    }
+    /// Select an explicit read route without changing the pinned namespace.
+    pub(crate) fn with_read_endpoint(mut self, endpoint: String) -> Result<Self> {
+        ensure!(
+            endpoint.len() <= 64 * 1024,
+            "storage read endpoint exceeds 64 KiB"
+        );
+        let Self::S3 {
+            allow_http,
+            read_endpoint_override,
+            ..
+        } = &mut self;
+        validate_endpoint(&endpoint, *allow_http)?;
+        *read_endpoint_override = Some(endpoint);
+        Ok(self)
+    }
     /// Reads a bounded owner configuration. Secrets remain environment references.
     pub fn load(path: &std::path::Path) -> Result<Self> {
         use std::io::Read;
@@ -155,16 +199,7 @@ impl OwnerConfig {
                     );
                 }
                 if let Some(endpoint) = endpoint {
-                    let url = reqwest::Url::parse(endpoint)?;
-                    ensure!(
-                        url.username().is_empty()
-                            && url.password().is_none()
-                            && url.query().is_none()
-                            && url.fragment().is_none()
-                            && url.host_str().is_some()
-                            && (url.scheme() == "https" || (*allow_http && url.scheme() == "http")),
-                        "invalid storage endpoint"
-                    );
+                    validate_endpoint(endpoint, *allow_http)?;
                 }
             }
         }
@@ -188,18 +223,24 @@ impl OwnerConfig {
             allow_http,
             path_style,
             credential_variables,
+            credentials_provider,
+            read_endpoint_override,
         } = self;
-        let read_endpoint = read_endpoint_variable
-            .as_ref()
-            .map(|name| match std::env::var(name) {
-                Ok(value) => Ok(Some(value)),
-                Err(std::env::VarError::NotPresent) => Ok(None),
-                Err(error) => Err(anyhow::anyhow!(
-                    "invalid read endpoint variable {name}: {error}"
-                )),
-            })
-            .transpose()?
-            .flatten();
+        let read_endpoint = if let Some(endpoint) = read_endpoint_override {
+            Some(endpoint.clone())
+        } else {
+            read_endpoint_variable
+                .as_ref()
+                .map(|name| match std::env::var(name) {
+                    Ok(value) => Ok(Some(value)),
+                    Err(std::env::VarError::NotPresent) => Ok(None),
+                    Err(error) => Err(anyhow::anyhow!(
+                        "invalid read endpoint variable {name}: {error}"
+                    )),
+                })
+                .transpose()?
+                .flatten()
+        };
         Ok(Box::new(
             S3Storage::reader(
                 S3Config {
@@ -211,6 +252,7 @@ impl OwnerConfig {
                     endpoint: read_endpoint.or_else(|| endpoint.clone()),
                     allow_http: *allow_http,
                     path_style: *path_style,
+                    credentials_provider: credentials_provider.clone(),
                     credential_variables: credential_variables.as_ref().map(|v| {
                         (
                             v.access_key.clone(),
@@ -246,6 +288,8 @@ impl OwnerConfig {
                 allow_http,
                 path_style,
                 credential_variables,
+                credentials_provider,
+                read_endpoint_override: _,
             } => Ok(Box::new(
                 S3Storage::open(
                     S3Config {
@@ -257,6 +301,7 @@ impl OwnerConfig {
                         endpoint: endpoint.clone(),
                         allow_http: *allow_http,
                         path_style: *path_style,
+                        credentials_provider: credentials_provider.clone(),
                         credential_variables: credential_variables.as_ref().map(|v| {
                             (
                                 v.access_key.clone(),
@@ -274,6 +319,20 @@ impl OwnerConfig {
             )),
         }
     }
+}
+
+fn validate_endpoint(endpoint: &str, allow_http: bool) -> Result<()> {
+    let url = reqwest::Url::parse(endpoint)?;
+    ensure!(
+        url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.host_str().is_some()
+            && (url.scheme() == "https" || (allow_http && url.scheme() == "http")),
+        "invalid storage endpoint"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

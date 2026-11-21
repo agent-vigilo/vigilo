@@ -13,10 +13,13 @@ use super::run_shard_summary::{
 };
 use crate::context::database;
 
-pub(crate) async fn select_run_scorecard(
-    db: &sqlx::PgPool,
+pub(crate) async fn select_run_scorecard<'e, E>(
+    db: E,
     run_id: Uuid,
-) -> anyhow::Result<Option<serde_json::Value>> {
+) -> anyhow::Result<Option<serde_json::Value>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     Ok(
         sqlx::query_scalar("SELECT scorecard FROM run_scorecards WHERE run_id = $1::uuid")
             .bind(run_id)
@@ -46,18 +49,58 @@ pub(crate) struct RunResultsSummary {
     pub(crate) unresolved_execution_count: i64,
 }
 
+/// Bounded summary projection preserves route coverage alongside scalar counts.
+pub(crate) struct RunResultsProjection {
+    pub(crate) summary: RunResultsSummary,
+    pub(crate) execution_route_count: usize,
+    pub(crate) shard_summary_count: usize,
+}
+
+/// Stable shard order makes floating-point arithmetic independent of placement.
+pub(crate) fn project_results(
+    route_count: usize,
+    mut summaries: Vec<RunShardSummary>,
+) -> RunResultsProjection {
+    summaries.sort_unstable_by_key(|summary| summary.run_shard);
+    RunResultsProjection {
+        summary: combine_run_shard_summaries(&summaries),
+        execution_route_count: route_count,
+        shard_summary_count: summaries.len(),
+    }
+}
+
 /// Reads and combines shard-local result summaries for a run.
+#[cfg(test)]
 pub(crate) async fn select_run_results_summary(
     database_router: &database::DatabaseRouter,
     run_id: Uuid,
 ) -> anyhow::Result<RunResultsSummary> {
+    Ok(select_run_results_projection(database_router, run_id)
+        .await?
+        .summary)
+}
+
+/// Reads each physical execution database once, retaining missing-summary coverage.
+pub(crate) async fn select_run_results_projection(
+    database_router: &database::DatabaseRouter,
+    run_id: Uuid,
+) -> anyhow::Result<RunResultsProjection> {
     let routes = database_router
         .execution_read_routes_for_run(run_id)
         .await?;
+    select_results_from_routes(run_id, &routes).await
+}
+
+/// Reuses the export header's already validated routes. No route or authority
+/// snapshot is cached across independent operations or public page requests.
+pub(crate) async fn select_results_from_routes(
+    run_id: Uuid,
+    routes: &[(i16, String, sqlx::PgPool)],
+) -> anyhow::Result<RunResultsProjection> {
     let mut summaries = Vec::with_capacity(routes.len());
 
     let mut by_database = BTreeMap::new();
-    for (run_shard, alias, db) in &routes {
+    for (run_shard, alias, db) in routes {
         by_database
             .entry(alias)
             .or_insert_with(|| (db, Vec::new()))
@@ -67,11 +110,7 @@ pub(crate) async fn select_run_results_summary(
     for (db, shards) in by_database.into_values() {
         summaries.extend(select_run_shard_summaries(db, run_id, &shards).await?);
     }
-    // Floating point addition follows ascending shard order independently of
-    // alias grouping so routing does not change the reported average.
-    summaries.sort_unstable_by_key(|summary| summary.run_shard);
-
-    Ok(combine_run_shard_summaries(&summaries))
+    Ok(project_results(routes.len(), summaries))
 }
 
 pub(crate) fn combine_run_shard_summaries(summaries: &[RunShardSummary]) -> RunResultsSummary {

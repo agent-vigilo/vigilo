@@ -9,11 +9,17 @@ from pathlib import Path
 import tomllib
 
 
-def validate_tag(package, tag):
-    """Return the exact crate version, rejecting other packages or release families."""
+def crate_version(package):
+    """Return the explicit version of the Vigilo package."""
     version = package.get("version")
     if package.get("name") != "vigilo" or not isinstance(version, str) or not version:
         raise ValueError("expected the vigilo crate with an explicit version")
+    return version
+
+
+def validate_tag(package, tag):
+    """Return the exact crate version, rejecting other release families."""
+    version = crate_version(package)
     expected = f"vigilo/v{version}"
     if tag != expected:
         raise ValueError(f"release tag {tag!r} does not match crate tag {expected!r}")
@@ -22,12 +28,12 @@ def validate_tag(package, tag):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tag", required=True)
+    parser.add_argument("--tag", help="validate this tag against the crate version")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     with (root / "vigilo/Cargo.toml").open("rb") as manifest:
         package = tomllib.load(manifest)["package"]
-    print(validate_tag(package, args.tag))
+    print(crate_version(package) if args.tag is None else validate_tag(package, args.tag))
 
 
 if __name__ == "__main__":

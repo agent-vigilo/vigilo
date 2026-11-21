@@ -4,10 +4,10 @@
 
 > **Warning: pre-v1 release — API subject to change**
 >
-> Vigilo is under active development. Public APIs, CLI commands, configuration
-> formats, and storage schemas may change before 1.0, including breaking changes.
-> Pin the version you deploy and review release notes before updating. Do not
-> assume backward compatibility between pre-v1 releases.
+> Expect instability and breaking changes between pre-v1 releases. Public APIs,
+> CLI commands, configuration formats, and storage schemas can change. Only
+> the latest beta release receives fixes. Pin the version you deploy and review
+> release notes before updating.
 
 Test your agents against your own cases and criteria. Inspect failures, compare
 results, and use pass/fail gates to decide what ships.
@@ -35,7 +35,7 @@ vigilo --help
 ```
 
 This crate installs the `vigilo` command, including coordinator and worker modes.
-It is an application, not a Rust library dependency.
+It also exposes typed operations for Rust hosts.
 
 ## Run Your First Evaluation
 
@@ -48,8 +48,18 @@ installs the latest compatible core evaluators. Use
 `--evaluators YYYY.MM.DD.N` to pin a published collection, or
 `--skip-evaluators` for database-only setup.
 
+## Rust Integration
+
+`vigilo::operations::Client` provides typed standalone run operations, status and
+results summaries using shared lazy database pools. `HostedRuntime` creates caller,
+coordinator and worker handles with explicit host resource and database bindings.
+The caller owns its runtime and presentation. See
+[release compatibility](https://docs.rs/vigilo/latest/vigilo/operations/#release-compatibility)
+and the [library boundary and example](https://agentvigilo.com/docs/architecture/structure/components/vigilo/).
+
 ## Explore
 
+- [Harnesses and evaluators](https://agentvigilo.com/docs/glossary#harnesses-and-evaluators)
 - [CLI reference](https://agentvigilo.com/docs/guides/cli-reference)
 - [Create evaluators](https://agentvigilo.com/docs/guides/creating-evaluators)
 - [Publish evaluators](https://agentvigilo.com/docs/guides/publishing)

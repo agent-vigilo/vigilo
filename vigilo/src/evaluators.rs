@@ -81,9 +81,27 @@ async fn publish_evaluator_draft(
     // Evaluator registry rows are control-database metadata. Keep this lookup
     // choice inside the evaluator publishing workflow.
     let db = context.dbr().await?.control().await?;
+    let mut connection = db.acquire().await?;
+    publish_draft_on(&mut connection, draft).await
+}
 
+/// Shared immutable publication, scoped by the caller's existing connection.
+/// Conflict reconciliation runs only after a raced insert; no bytes are replaced.
+pub(crate) async fn publish_draft_on(
+    db: &mut sqlx::PgConnection,
+    draft: EvaluatorDraft,
+) -> anyhow::Result<PublishEvaluatorOutcome> {
+    anyhow::ensure!(
+        draft.namespace.len() + draft.name.len() + draft.version.len() + 2 <= 4096,
+        "evaluator identifier exceeds 4096 bytes"
+    );
+    crate::contracts::evaluator_ref::parse_fully_qualified_evaluator(&format!(
+        "{}/{}:{}",
+        draft.namespace, draft.name, draft.version
+    ))?;
     if let Some(existing) =
-        evaluator_table::select_evaluator(db, &draft.namespace, &draft.name, &draft.version).await?
+        evaluator_table::select_evaluator(&mut *db, &draft.namespace, &draft.name, &draft.version)
+            .await?
     {
         if existing.content_hash == draft.content_hash {
             info!(
@@ -101,9 +119,12 @@ async fn publish_evaluator_draft(
         );
     }
 
-    if let Some(existing) =
-        evaluator_table::select_evaluator_by_content_hash(db, &draft.namespace, &draft.content_hash)
-            .await?
+    if let Some(existing) = evaluator_table::select_evaluator_by_content_hash(
+        &mut *db,
+        &draft.namespace,
+        &draft.content_hash,
+    )
+    .await?
     {
         anyhow::bail!(
             "evaluator content hash already exists as {}/{}:{}, refusing to publish duplicate content as {}/{}:{}",
@@ -116,7 +137,22 @@ async fn publish_evaluator_draft(
         );
     }
 
-    let evaluator = evaluator_table::insert_evaluator(db, &draft).await?;
+    let Some(evaluator) = evaluator_table::insert_evaluator(&mut *db, &draft).await? else {
+        if let Some(existing) = evaluator_table::select_evaluator(
+            &mut *db,
+            &draft.namespace,
+            &draft.name,
+            &draft.version,
+        )
+        .await?
+            && existing.content_hash == draft.content_hash
+        {
+            return Ok(PublishEvaluatorOutcome::Skipped(existing));
+        }
+        anyhow::bail!(
+            "evaluator publication conflicts with an immutable version or content identity"
+        );
+    };
     info!(
         "successfully published evaluator: {}/{}:{}",
         evaluator.namespace, evaluator.name, evaluator.version,

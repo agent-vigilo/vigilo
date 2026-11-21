@@ -76,6 +76,13 @@ async fn initialized_aggregation_has_bounded_query_cost(pool: PgPool) {
         );
     }
     eprintln!("progress/final/sealed aggregation SQL submissions: {query_counts:?}");
+
+    // An exact retry after an uncertain handoff observes the committed seal.
+    let result =
+        aggregation::advance_shard_summary_page(&pool, Uuid::nil(), run, 4, 1, Some("primary"))
+            .await
+            .unwrap();
+    assert!(matches!(result, PageOutcome::Sealed));
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -535,7 +542,7 @@ async fn slow_discovery_does_not_exhaust_the_page_scheduling_window(pool: PgPool
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
                  WHERE datname=current_database() AND pid<>pg_backend_pid()
                  AND wait_event_type='Lock'
-                 AND query LIKE '%SELECT s.run_id,s.run_shard,a.write_epoch%')",
+                 AND query LIKE '%FROM vigilo_pending_aggregation(%')",
             )
             .fetch_one(&pool)
             .await
@@ -650,4 +657,297 @@ async fn aggregation_drains_receipts_across_byte_limited_pages(pool: PgPool) {
             .unwrap(),
         0
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn restricted_aggregation_discovery_requires_grants_without_mutation(pool: PgPool) {
+    let (run, _) = initialized_chunk(&pool, "failed").await;
+    let role = format!("aggregation_caller_{}", Uuid::new_v4().simple());
+    let owner = format!("aggregation_owner_{}", Uuid::new_v4().simple());
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE {role} NOLOGIN; GRANT USAGE ON SCHEMA public TO {role}; SET LOCAL ROLE {role};"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql("DO $$ BEGIN BEGIN PERFORM * FROM public.vigilo_pending_aggregation(1); RAISE EXCEPTION 'unexpected access'; EXCEPTION WHEN insufficient_privilege THEN NULL; END; END $$;")
+        .execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(&format!("RESET ROLE; CREATE ROLE {owner} NOLOGIN;
+        GRANT USAGE ON SCHEMA public TO {owner};
+        GRANT SELECT ON public.run_shard_summaries,public.local_shard_admissions,public.run_chunk_settlement_consumptions TO {owner};
+        ALTER FUNCTION public.vigilo_pending_aggregation(bigint) OWNER TO {owner};
+        GRANT EXECUTE ON FUNCTION public.vigilo_pending_aggregation(bigint) TO {role};
+        SET LOCAL ROLE {role};")).execute(&mut *tx).await.unwrap();
+    let access: bool = sqlx::query_scalar("SELECT has_table_privilege(current_user,'public.run_shard_summaries','SELECT') OR has_table_privilege(current_user,'public.local_shard_admissions','SELECT') OR has_table_privilege(current_user,'public.run_chunk_settlement_consumptions','SELECT')")
+        .fetch_one(&mut *tx).await.unwrap();
+    assert!(!access);
+    let (rows, calls) = record_queries(
+        sqlx::query_as::<_, (Uuid, i16, i64)>("SELECT * FROM public.vigilo_pending_aggregation(1)")
+            .fetch_all(&mut *tx),
+    )
+    .await;
+    assert_eq!(rows.unwrap(), vec![(run, 4, 1)]);
+    assert_eq!(calls.len(), 1);
+    tx.rollback().await.unwrap();
+    // Discovery does not consume receipts, rotate candidates or acquire ownership.
+    let before: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM run_shard_summaries s WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    for _ in 0..2 {
+        let rows: Vec<(Uuid, i16, i64)> =
+            sqlx::query_as("SELECT * FROM vigilo_pending_aggregation(1)")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(run, 4, 1)]);
+    }
+    let after: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(s) FROM run_shard_summaries s WHERE run_id=$1")
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, after);
+    assert_eq!(
+        advance_pending_summaries(&pool, &scheduling(2))
+            .await
+            .unwrap(),
+        2
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn aggregation_discovery_preserves_eligibility_order_and_epochs(pool: PgPool) {
+    let (idle, _) = initialized_chunk(&pool, "pending").await;
+    let (first, _) = initialized_chunk(&pool, "failed").await;
+    let (second, _) = initialized_chunk(&pool, "failed").await;
+    sqlx::query("UPDATE run_shard_summaries SET updated_at=CASE run_id WHEN $1 THEN '2000-01-01'::timestamptz WHEN $2 THEN '2000-01-02'::timestamptz ELSE '2000-01-03'::timestamptz END")
+        .bind(idle).bind(first).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE local_shard_admissions SET state='draining',write_epoch=7 WHERE run_id=$1")
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let rows: Vec<(Uuid, i16, i64)> = sqlx::query_as("SELECT * FROM vigilo_pending_aggregation(1)")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![(first, 4, 1)]);
+    let rows: Vec<(Uuid, i16, i64)> =
+        sqlx::query_as("SELECT * FROM vigilo_pending_aggregation(10)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![(first, 4, 1), (second, 4, 7)]);
+    sqlx::query("UPDATE local_shard_admissions SET state='closed' WHERE run_id=$1")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE local_shard_admissions SET state='prepared',move_id=gen_random_uuid(),move_claim_generation=1,move_claim_token=gen_random_uuid() WHERE run_id=$1")
+        .bind(second).execute(&pool).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM vigilo_pending_aggregation(10)")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("UPDATE local_shard_admissions SET state='open',write_epoch=8 WHERE run_id=$1")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(advance_shard_summary(&pool, first, 4, 8).await.unwrap());
+    // Receipt consumption does not hide a shard that still needs final sealing.
+    let rows: Vec<(Uuid, i16, i64)> =
+        sqlx::query_as("SELECT * FROM vigilo_pending_aggregation(10)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![(first, 4, 8)]);
+    assert!(advance_shard_summary(&pool, first, 4, 8).await.unwrap());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM vigilo_pending_aggregation(10)")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    for limit in [None, Some(0_i64), Some(-1), Some(100001)] {
+        let error = sqlx::query("SELECT * FROM vigilo_pending_aggregation($1::bigint)")
+            .bind(limit)
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().code().as_deref(),
+            Some("22023")
+        );
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn aggregation_uses_discovered_ownership_and_scopes_rotation(pool: PgPool) {
+    use futures_util::FutureExt;
+    let mut runs = Vec::new();
+    let tenant = Uuid::now_v7();
+    for owner in [tenant, tenant, Uuid::now_v7()] {
+        let owned = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |c, _| {
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('vigilo.tenant_id',$1,false)")
+                        .bind(owner.to_string())
+                        .execute(c)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(pool.connect_options().as_ref().clone())
+            .await
+            .unwrap();
+        let (run, _) = initialized_chunk(&owned, "failed").await;
+        runs.push(run);
+        owned.close().await;
+    }
+    let role = format!("aggregation_scope_{}", Uuid::now_v7().simple());
+    sqlx::raw_sql(&format!("CREATE ROLE {role} LOGIN PASSWORD 'fixture'; GRANT USAGE ON SCHEMA public TO {role}; GRANT EXECUTE ON FUNCTION vigilo_pending_aggregation(bigint) TO {role};")).execute(&pool).await.unwrap();
+    for table in [
+        "runs",
+        "run_chunks",
+        "run_snapshots",
+        "local_shard_admissions",
+        "run_shard_summaries",
+        "run_chunk_settlements",
+        "run_chunk_settlement_consumptions",
+        "shard_move_captures",
+    ] {
+        let key = if table == "runs" { "id" } else { "run_id" };
+        sqlx::raw_sql(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY; CREATE POLICY work_scope ON {table} TO {role} USING(tenant_id=NULLIF(current_setting('vigilo.tenant_id',true),'')::uuid AND {key}=NULLIF(current_setting('vigilo.run_id',true),'')::uuid AND current_setting('vigilo.actor_id',true)='' AND COALESCE(current_setting('vigilo.run_batch',true),'')=''); GRANT SELECT,INSERT,UPDATE ON {table} TO {role};")).execute(&pool).await.unwrap();
+    }
+    sqlx::raw_sql(&format!("GRANT SELECT,INSERT,UPDATE ON shard_move_dirty_keys TO {role}; ALTER TABLE shard_move_dirty_keys ENABLE ROW LEVEL SECURITY; CREATE POLICY work_scope ON shard_move_dirty_keys TO {role} USING(EXISTS(SELECT 1 FROM shard_move_captures c WHERE c.move_id=shard_move_dirty_keys.move_id AND c.tenant_id=shard_move_dirty_keys.tenant_id));")).execute(&pool).await.unwrap();
+    let restricted = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .username(&role)
+                .password("fixture"),
+        )
+        .await
+        .unwrap();
+    let work = async {
+        assert!(
+            aggregation::advance_shard_summary_page(
+                &restricted,
+                Uuid::now_v7(),
+                runs[0],
+                4,
+                1,
+                None
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            aggregation::advance_shard_summary_page(&restricted, tenant, runs[0], 4, 2, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            aggregation::advance_shard_summary_page(
+                &restricted,
+                tenant,
+                runs[0],
+                4,
+                1,
+                Some("wrong")
+            )
+            .await
+            .is_err()
+        );
+        sqlx::raw_sql(&format!(
+            "REVOKE UPDATE ON run_chunk_settlement_consumptions FROM {role}"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            advance_pending_summaries(&restricted, &scheduling(6))
+                .await
+                .unwrap(),
+            0
+        );
+        let intact:bool=sqlx::query_scalar("SELECT bool_and(settled_chunk_count=0 AND aggregation_state IS NULL) FROM run_shard_summaries WHERE run_id=ANY($1)").bind(&runs).fetch_one(&pool).await.unwrap();
+        assert!(
+            intact,
+            "failed consumption must roll back the checkpoint and counters"
+        );
+        let consumed:i64=sqlx::query_scalar("SELECT count(*) FROM run_chunk_settlement_consumptions WHERE run_id=ANY($1) AND consumed").bind(&runs).fetch_one(&pool).await.unwrap();
+        assert_eq!(consumed, 0);
+        sqlx::raw_sql(&format!(
+            "GRANT UPDATE ON run_chunk_settlement_consumptions TO {role}"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE run_shard_summaries SET updated_at='2000-01-01' WHERE run_id=$1")
+            .bind(runs[0])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut busy = pool.begin().await.unwrap();
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':summary',4))",
+        )
+        .bind(runs[0])
+        .execute(&mut *busy)
+        .await
+        .unwrap();
+        let (result, queries) =
+            record_queries(advance_pending_summaries(&restricted, &scheduling(6))).await;
+        assert_eq!(result.unwrap(), 4);
+        assert_eq!(queries.len(), 27, "{queries:?}");
+        let rotated:bool=sqlx::query_scalar("SELECT updated_at>'2000-01-01'::timestamptz AND settled_chunk_count=0 FROM run_shard_summaries WHERE run_id=$1").bind(runs[0]).fetch_one(&pool).await.unwrap();
+        assert!(
+            rotated,
+            "busy candidate must rotate without consuming receipts"
+        );
+        busy.rollback().await.unwrap();
+        let (result, queries) =
+            record_queries(advance_pending_summaries(&restricted, &scheduling(6))).await;
+        assert_eq!(result.unwrap(), 2);
+        assert_eq!(queries.len(), 13, "{queries:?}");
+        let (result, queries) =
+            record_queries(advance_pending_summaries(&restricted, &scheduling(6))).await;
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(queries.len(), 1);
+        let sealed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM run_shard_summaries WHERE sealed AND run_id=ANY($1)",
+        )
+        .bind(&runs)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(sealed, 3);
+        let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM run_shard_summaries")
+            .fetch_one(&restricted)
+            .await
+            .unwrap();
+        assert_eq!(visible, 0);
+    };
+    let result = std::panic::AssertUnwindSafe(work).catch_unwind().await;
+    restricted.close().await;
+    sqlx::raw_sql(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }

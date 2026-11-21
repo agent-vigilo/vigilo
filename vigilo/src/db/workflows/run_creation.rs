@@ -3,7 +3,7 @@
 //! Immutable plan publication and execution admission own creation writes.
 //! Progress reads inspect at most 128 shard metadata entries; case payloads and
 //! per-case membership are never needed to report resumable creation state.
-use sqlx::PgPool;
+
 use uuid::Uuid;
 
 pub(crate) const RUN_STATUS_CREATING: &str = "creating";
@@ -11,9 +11,9 @@ pub(crate) const DEFAULT_CASE_BATCH_SIZE: usize = 1_000;
 pub(crate) const DEFAULT_CASE_PAGE_BUDGET: usize = 64;
 /// Bounded creation work policy retained by the command configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Config {
-    pub(crate) case_batch_size: usize,
-    pub(crate) case_page_budget: usize,
+pub struct Config {
+    pub case_batch_size: usize,
+    pub case_page_budget: usize,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -63,10 +63,13 @@ struct CreationRow {
 
 /// Returns current status and bounded placement progress from the same snapshot.
 /// Missing runs return None; runs without a blob plan retain empty progress.
-pub(crate) async fn select_creation_state(
-    db: &PgPool,
+pub(crate) async fn select_creation_state<'e, E>(
+    db: E,
     run_id: Uuid,
-) -> anyhow::Result<Option<RunCreationState>> {
+) -> anyhow::Result<Option<RunCreationState>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let row: Option<CreationRow> = sqlx::query_as(
         "SELECT r.status::text AS status, r.error_message AS error,
                 p.status AS plan_status, p.chunk_cursor AS total,
@@ -98,10 +101,13 @@ pub(crate) async fn select_creation_state(
     }))
 }
 
-pub(crate) async fn select_creation_progress(
-    db: &PgPool,
+pub(crate) async fn select_creation_progress<'e, E>(
+    db: E,
     run_id: Uuid,
-) -> anyhow::Result<RunCreationProgress> {
+) -> anyhow::Result<RunCreationProgress>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     Ok(select_creation_state(db, run_id)
         .await?
         .map(|state| state.progress)

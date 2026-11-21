@@ -25,8 +25,8 @@ sequenceDiagram
     Vigilo->>Vigilo: Merge routed summaries in shard order
 
     alt JSON export
-        loop Routed shard batches
-            Vigilo->>ExecutionDB: Load executions and related records
+        loop Bounded logical windows, grouped by database
+            Vigilo->>ExecutionDB: Admit bounded keys and sizes, then load fitting records
             ExecutionDB-->>Vigilo: Batch data
             Vigilo->>Vigilo: Accumulate export data
         end
@@ -35,9 +35,10 @@ sequenceDiagram
     else JSONL export
         Vigilo-->>User: Run line
         Vigilo-->>User: Summary line
-        loop Routed shard batches
-            Vigilo->>ExecutionDB: Load executions and related records
-            ExecutionDB-->>Vigilo: Batch data
+        loop Bounded logical windows, grouped by database
+            Vigilo->>ExecutionDB: Read bounded execution and child buffers per database
+            ExecutionDB-->>Vigilo: Bounded records in execution/attempt order
+            Vigilo->>Vigilo: Merge at most four readers in shard/execution order
             Vigilo-->>User: Execution, aggregate, attempt, result, and diagnostic lines with authority labels
         end
         Vigilo-->>User: Success response
