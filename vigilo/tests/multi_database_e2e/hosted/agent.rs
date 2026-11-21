@@ -14,6 +14,7 @@ use tokio::{
         AsyncWriteExt,
     },
     net::TcpListener,
+    sync::watch,
     task::{
         JoinHandle,
         JoinSet,
@@ -29,6 +30,7 @@ pub(super) struct Agent {
     pub cancellations: Arc<AtomicUsize>,
     pub delay: Arc<AtomicUsize>,
     pub entered: Arc<tokio::sync::Notify>,
+    pub hold_response: watch::Sender<bool>,
     pub drop_receipt: Arc<std::sync::atomic::AtomicBool>,
     pub receipt_gate: Arc<tokio::sync::Semaphore>,
     pub hold_receipt: Arc<std::sync::atomic::AtomicBool>,
@@ -43,6 +45,7 @@ impl Agent {
         let cancellations = Arc::new(AtomicUsize::new(0));
         let delay = Arc::new(AtomicUsize::new(0));
         let entered = Arc::new(tokio::sync::Notify::new());
+        let (hold_response, response_held) = watch::channel(false);
         let drop_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let receipt_gate = Arc::new(tokio::sync::Semaphore::new(0));
         let hold_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -69,14 +72,28 @@ impl Agent {
                         let stops = stops.clone();
                         let drop_response = drop_response.clone();
                         let (gate, hold) = (gate.clone(), hold.clone());
+                        let mut response_held = response_held.clone();
                         connections.spawn(async move {
                             tokio::time::timeout(Duration::from_secs(15),async move {
                                 let mut raw=Vec::new();let mut buf=[0u8;2048];
-                                let split=loop {let n=socket.read(&mut buf).await?;anyhow::ensure!(n>0,"truncated request");raw.extend_from_slice(&buf[..n]);anyhow::ensure!(raw.len()<65536,"request too large");if let Some(p)=raw.windows(4).position(|x|x==b"\r\n\r\n"){break p+4;}};
+                                let split = loop {
+                                    let n = socket.read(&mut buf).await?;
+                                    // A stopped worker can close the socket mid-request.
+                                    if n == 0 { return Ok(()); }
+                                    raw.extend_from_slice(&buf[..n]);
+                                    anyhow::ensure!(raw.len() < 65536, "request too large");
+                                    if let Some(p) = raw.windows(4).position(|x| x == b"\r\n\r\n") {
+                                        break p + 4;
+                                    }
+                                };
                                 let header=String::from_utf8(raw[..split].to_vec())?;
                                 let length=header.lines().find_map(|l|l.to_ascii_lowercase().strip_prefix("content-length:").map(str::trim).and_then(|n|n.parse::<usize>().ok())).context("body length")?;
                                 anyhow::ensure!(length<32768,"body too large");
-                                while raw.len()<split+length {let n=socket.read(&mut buf).await?;anyhow::ensure!(n>0,"truncated body");raw.extend_from_slice(&buf[..n]);}
+                                while raw.len() < split + length {
+                                    let n = socket.read(&mut buf).await?;
+                                    if n == 0 { return Ok(()); }
+                                    raw.extend_from_slice(&buf[..n]);
+                                }
                                 let body:Value=serde_json::from_slice(&raw[split..split+length])?;
                                 if header.starts_with("POST /cancel ") {
                                     anyhow::ensure!(body["invocation_id"].as_str().and_then(|s| Uuid::parse_str(s).ok()).is_some(), "cancellation identity");
@@ -90,6 +107,7 @@ impl Agent {
                                 let expected=format!("authorization: bearer {}",input["owner"].as_str().context("owner input")?);
                                 let authorized=header.lines().any(|h|h.to_ascii_lowercase()==expected);
                                 count.fetch_add(1,Ordering::SeqCst);signal.notify_one();
+                                response_held.wait_for(|held| !held).await?;
                                 tokio::time::sleep(Duration::from_millis(latency.load(Ordering::SeqCst) as u64)).await;
                                 if native && authorized {
                                     if hold.load(Ordering::SeqCst) {
@@ -118,6 +136,7 @@ impl Agent {
             cancellations,
             delay,
             entered,
+            hold_response,
             drop_receipt,
             receipt_gate,
             hold_receipt,
@@ -140,4 +159,45 @@ impl Drop for Agent {
             task.abort();
         }
     }
+}
+
+#[tokio::test]
+async fn agent_accepts_work_after_a_partial_request_disconnects() -> anyhow::Result<()> {
+    let mut agent = Agent::new().await?;
+    let address = agent
+        .url
+        .strip_prefix("http://")
+        .unwrap()
+        .split('/')
+        .next()
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let owner = Uuid::nil();
+    for partial in [
+        "POST /invoke HTTP/1.1\r\ncontent-len",
+        "POST /invoke HTTP/1.1\r\ncontent-length: 20\r\n\r\n{",
+    ] {
+        let mut connection = tokio::net::TcpStream::connect(address).await?;
+        connection.write_all(partial.as_bytes()).await?;
+        connection.shutdown().await?;
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            connection.read_to_end(&mut response),
+        )
+        .await??;
+        assert!(response.is_empty());
+
+        let response = client
+            .post(&agent.url)
+            .bearer_auth(owner)
+            .json(&json!({"input": {"owner": owner}}))
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+    assert_eq!(agent.calls.load(Ordering::SeqCst), 2);
+    agent.close().await
 }

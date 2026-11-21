@@ -182,6 +182,10 @@ The end-to-end tier runs `multi_database_routing` and `multi_database_e2e`
 separately because they require the complete distributed dependency set. The
 workflow builds the evaluator Wasm and supplies the required database,
 messaging, storage-owner configuration (`VIGILO_STORAGE_CONFIG`), and opt-in environment variables.
+CI runs worker storage cases in their own job, distributes the remaining
+`multi_database_e2e` cases across three runners, and runs routing, HTTP transport,
+and evaluator registry checks in separate jobs. Each group contributes a
+required report to aggregate coverage.
 It exercises the public hosted library with restricted database roles, injected
 resources, two owners, concurrent coordinators and workers, forged queue hints,
 pause/resume, revocation, and lease recovery. Synthetic row policies belong to the
