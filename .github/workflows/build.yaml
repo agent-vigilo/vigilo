@@ -303,8 +303,9 @@ jobs:
           --health-retries 5
           --health-start-period 20s
     env:
-      DATABASE_URL: postgresql://postgres:password@localhost:5432/agent_vigilo?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
-      VIGILO_TEST_SHARD_001_DATABASE_URL: postgresql://postgres:password@localhost:5433/agent_vigilo?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
+      # The PostgreSQL protocol probe accepts only numeric IPv4 loopback.
+      DATABASE_URL: postgresql://postgres:password@127.0.0.1:5432/agent_vigilo?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
+      VIGILO_TEST_SHARD_001_DATABASE_URL: postgresql://postgres:password@127.0.0.1:5433/agent_vigilo?options=-c%20vigilo.tenant_id%3D00000000-0000-0000-0000-000000000000
       MESSAGING_URL: amqp://guest:guest@localhost:5672
       DEV_S3_ACCESS_KEY_ID: vigilo-ci-runtime
       DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-runtime-secret
