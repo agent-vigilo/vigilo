@@ -68,7 +68,11 @@ impl EvaluatorAbiAdapter for V1Adapter {
         component: &component::Component,
     ) -> anyhow::Result<component::InstancePre<EvaluatorHost>> {
         let mut linker = component::Linker::new(runtime.engine());
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        let mut wasi = wasmtime_wasi::p2::bindings::sync::LinkOptions::default();
+        // Rust's WASIp2 standard library can import exit-with-code. Wasmtime
+        // reports a guest exit to the host as an error for that invocation.
+        wasi.cli_exit_with_code(true);
+        wasmtime_wasi::p2::add_to_linker_with_options_sync(&mut linker, &wasi)?;
         bindings::vigilo::evaluator::executor::add_to_linker::<
             _,
             wasmtime::component::HasSelf<EvaluatorHost>,

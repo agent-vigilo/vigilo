@@ -24,6 +24,9 @@ impl Guest for Evaluator {
     }
 
     fn evaluate(input: Input) -> Result<Output, EvaluatorError> {
+        if input.evaluator_config_json == r#"{"exit":true}"# {
+            std::process::exit(23);
+        }
         let evidence = input.response_evidence.expect("required evidence");
         let body = evidence.body;
         let mapped = input.evaluator_config_json.contains("mapped");

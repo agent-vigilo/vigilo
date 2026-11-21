@@ -401,6 +401,8 @@ mod tests {
             json!({}),
             json!({"error":true}),
             json!({}),
+            json!({"exit":true}),
+            json!({}),
         ] {
             let mut input = evaluator_input();
             input.actual.captured_body = Some(vigilo::response::CapturedBody::new(
@@ -413,7 +415,10 @@ mod tests {
                 config.clone()
             };
             let result = evaluator.execute(&runtime, input);
-            if config.get("trap").is_some() || config.get("error").is_some() {
+            if ["trap", "error", "exit"]
+                .iter()
+                .any(|key| config.get(key).is_some())
+            {
                 assert!(result.is_err());
             } else {
                 let output = result.unwrap();

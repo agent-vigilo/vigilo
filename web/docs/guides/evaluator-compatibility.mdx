@@ -87,8 +87,9 @@ cargo test -p vigilo --locked --features evaluator-abi-fixtures --lib evaluator_
 ```
 
 The resource fixture exercises reads through actual Wasm imports, including invalid
-ranges, expired handles from earlier invocations, and execution after errors or traps.
-
+ranges and expired handles from earlier invocations. Evaluator errors, traps,
+and guest-requested WASI exits fail an individual invocation and leave the worker
+available for subsequent evaluations.
 
 The registry is static and auditable. CI invariants reject duplicate
 declarations, adapter ids, and fixture artifacts; runtime resolution rejects
