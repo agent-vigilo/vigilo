@@ -124,7 +124,7 @@ impl Fixture {
         .await?;
         assert_eq!(running, 0, "settled revocation retained live attempts");
 
-        self.agent.delay.store(2000, Ordering::SeqCst);
+        self.agent.hold_response.send(true)?;
         let before = self.agent.calls.load(Ordering::SeqCst);
         let run = self.submitted(owner, upload, true).await?;
         self.calls_after(before, 1).await?;
@@ -133,6 +133,7 @@ impl Fixture {
             task.abort();
             assert!(task.await.unwrap_err().is_cancelled());
         }
+        self.agent.hold_response.send(false)?;
         let leases:Vec<(Uuid,chrono::DateTime<chrono::Utc>)>=sqlx::query_as("SELECT id,leased_until FROM run_chunks WHERE run_id=$1 AND status='leased' ORDER BY id").bind(run).fetch_all(&self.db.admin[1]).await?;
         assert!(!leases.is_empty());
         tokio::time::sleep(Duration::from_secs(16)).await;
@@ -143,7 +144,6 @@ impl Fixture {
         );
         sqlx::query("UPDATE run_chunks SET leased_until=clock_timestamp()-interval '1 second' WHERE run_id=$1 AND status='leased'").bind(run).execute(&self.db.admin[1]).await?;
         sqlx::query("UPDATE execution_attempts SET leased_until=clock_timestamp()-interval '1 second' WHERE run_id=$1 AND status='running'").bind(run).execute(&self.db.admin[1]).await?;
-        self.agent.delay.store(0, Ordering::SeqCst);
         self.start_worker();
         self.start_worker();
         assert!(

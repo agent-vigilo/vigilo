@@ -259,12 +259,16 @@ jobs:
           RUSTFLAGS: -Awarnings
 
   end-to-end-tests:
-    name: End-to-End Tests
+    name: End-to-End Tests (${{ matrix.group }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [routing, http, registry, distributed-1, distributed-2, distributed-3, distributed-storage]
     services:
       postgres-primary:
-        image: postgres:16-alpine
+        image: ${{ matrix.group != 'http' && 'postgres:16-alpine' || '' }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: password
@@ -277,7 +281,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       postgres-shard:
-        image: postgres:16-alpine
+        image: ${{ (matrix.group == 'routing' || startsWith(matrix.group, 'distributed-')) && 'postgres:16-alpine' || '' }}
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: password
@@ -290,7 +294,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
       rabbitmq:
-        image: rabbitmq:3-management
+        image: ${{ (matrix.group == 'routing' || startsWith(matrix.group, 'distributed-')) && 'rabbitmq:3-management' || '' }}
         env:
           RABBITMQ_DEFAULT_USER: guest
           RABBITMQ_DEFAULT_PASS: guest
@@ -311,7 +315,7 @@ jobs:
       DEV_S3_SECRET_ACCESS_KEY: vigilo-ci-runtime-secret
       DEV_S3_BUCKET: vigilo-ci-runtime
       DEV_S3_PORT: 13900
-      COMPOSE_PROJECT_NAME: vigilo-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPOSE_PROJECT_NAME: vigilo-runtime-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.group }}
       VIGILO_STORAGE_CONFIG: ${{ github.workspace }}/target/runtime-storage.toml
     steps:
       - uses: actions/checkout@v6
@@ -322,6 +326,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Start isolated runtime object storage
+        if: matrix.group == 'routing' || startsWith(matrix.group, 'distributed-')
         run: |
           docker compose -p "$COMPOSE_PROJECT_NAME" -f infra/dev/docker-compose.single.yml up -d --build --wait --wait-timeout 240 ceph
           mkdir -p target
@@ -340,27 +345,54 @@ jobs:
           EOF
       - name: Reset coverage data
         run: cargo llvm-cov clean --workspace
-      - name: Build the end-to-end evaluator
+      - name: Build HTTP request evaluator fixture
+        if: matrix.group == 'http'
+        run: cargo build -p http-request-fixture --target wasm32-wasip2 --release --locked
+      - name: Build registry evaluator fixtures
+        if: matrix.group == 'registry'
         run: cargo build -p sentiment-basic-en -p http-request-fixture --target wasm32-wasip2 --release --locked
+      - name: Build the distributed evaluator fixture
+        if: startsWith(matrix.group, 'distributed-')
+        run: cargo build -p sentiment-basic-en --target wasm32-wasip2 --release --locked
       - name: Run routing integration tests with coverage
+        if: matrix.group == 'routing'
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
           --test multi_database_routing -- --nocapture
       - name: Run distributed runtime tests with coverage
-        run: >-
-          cargo llvm-cov --no-report -p vigilo --locked
-          --test multi_database_e2e -- --nocapture
+        if: startsWith(matrix.group, 'distributed-')
+        shell: bash
+        run: |
+          test_command=(cargo llvm-cov --no-report -p vigilo --locked --test multi_database_e2e --)
+          inventory=$("${test_command[@]}" --list --format terse)
+          mapfile -t tests < <(printf '%s\n' "$inventory" | sed -n 's/: test$//p' | LC_ALL=C sort)
+          shard_tests=()
+          if [[ "$DISTRIBUTED_GROUP" == distributed-storage ]]; then
+            mapfile -t shard_tests < <(printf '%s\n' "${tests[@]}" | grep '^worker_storage')
+          else
+            mapfile -t runtime_tests < <(printf '%s\n' "${tests[@]}" | grep -v '^worker_storage')
+            for ((index=${DISTRIBUTED_GROUP##*-}-1; index<${#runtime_tests[@]}; index+=3)); do
+              shard_tests+=("${runtime_tests[index]}")
+            done
+          fi
+          test "${#shard_tests[@]}" -gt 0
+          printf 'selected %s\n' "${shard_tests[@]}"
+          "${test_command[@]}" --exact --nocapture "${shard_tests[@]}"
         env:
           VIGILO_E2E_MULTI_DATABASE: "1"
+          DISTRIBUTED_GROUP: ${{ matrix.group }}
       - name: Run agent HTTP transport tests with coverage
+        if: matrix.group == 'http'
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
           --features agent-http-services --test agent_http_services
       - name: Run evaluator HTTP transport tests with coverage
+        if: matrix.group == 'http'
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
           --features evaluator-http-services --test evaluator_http_services
       - name: Verify public evaluator registry and test authority with coverage
+        if: matrix.group == 'registry'
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked
           --features evaluator-http-services --test evaluator_operations_services
@@ -369,16 +401,16 @@ jobs:
         run: >-
           cargo llvm-cov report
           --ignore-filename-regex '[/\\]postgres_tests(\.rs|[/\\])'
-          --lcov --output-path lcov-e2e.info
+          --lcov --output-path lcov-e2e-${{ matrix.group }}.info
       - name: Store end-to-end coverage
         uses: actions/upload-artifact@v6
         with:
-          name: coverage-e2e
-          path: lcov-e2e.info
+          name: coverage-e2e-${{ matrix.group }}
+          path: lcov-e2e-${{ matrix.group }}.info
           if-no-files-found: error
           retention-days: 1
       - name: Remove isolated runtime object storage
-        if: always()
+        if: always() && (matrix.group == 'routing' || startsWith(matrix.group, 'distributed-'))
         run: >-
           docker compose -p "$COMPOSE_PROJECT_NAME"
           -f infra/dev/docker-compose.single.yml
@@ -491,7 +523,13 @@ jobs:
           --add-tracefile coverage/lcov-unit.info
           --add-tracefile coverage/lcov-performance-services.info
           --add-tracefile coverage/lcov-sqlx.info
-          --add-tracefile coverage/lcov-e2e.info
+          --add-tracefile coverage/lcov-e2e-routing.info
+          --add-tracefile coverage/lcov-e2e-http.info
+          --add-tracefile coverage/lcov-e2e-registry.info
+          --add-tracefile coverage/lcov-e2e-distributed-1.info
+          --add-tracefile coverage/lcov-e2e-distributed-2.info
+          --add-tracefile coverage/lcov-e2e-distributed-3.info
+          --add-tracefile coverage/lcov-e2e-distributed-storage.info
           --add-tracefile coverage/lcov-storage.info
           --output-file coverage/lcov-rust-all.info
       - name: Enforce aggregate Rust coverage
