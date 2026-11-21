@@ -7,7 +7,7 @@ import {test} from 'node:test';
 import {identity, mergeManifest, verifyDeployment, writeRoutes} from './docs-release.mjs';
 import {archiveBase, destination, docsPath, releaseLine, releaseStatus} from '../src/components/DocVersions/releases.mjs';
 
-const release = (version, digit = 'a') => identity(version, `vigilo/v${version}`, digit.repeat(40));
+const release = (version, digit = 'a') => identity(version, `v${version}`, digit.repeat(40));
 const empty = {schemaVersion: 1, releases: [], archivedLines: []};
 
 test('an older-line patch is retained without replacing the latest docs', () => {
@@ -43,8 +43,10 @@ test('only the latest beta is selectable and stable archive policy stays indepen
 
 test('release metadata rejects malformed identities, moved tags and invalid manifests', () => {
   const current = mergeManifest(empty, release('0.1.0'), []).manifest;
-  assert.throws(() => identity('0.1.0', 'evaluators/v0.1.0', 'a'.repeat(40)), /identity/);
-  assert.throws(() => identity('0.1.0/..', 'vigilo/v0.1.0/..', 'a'.repeat(40)), /identity/);
+  assert.equal(current.releases[0].tag, 'v0.1.0');
+  assert.throws(() => identity('0.1.0', 'evaluators/2026.10.29.1', 'a'.repeat(40)), /identity/);
+  assert.throws(() => identity('0.1.0', 'vigilo/v0.1.0', 'a'.repeat(40)), /identity/);
+  assert.throws(() => identity('0.1.0/..', 'v0.1.0/..', 'a'.repeat(40)), /identity/);
   assert.throws(() => mergeManifest(current, release('0.1.0', 'b'), []), /tag moved/);
   assert.throws(() => mergeManifest({...current, schemaVersion: 2}, undefined, []), /manifest/);
   assert.throws(() => mergeManifest(current, undefined, ['../archive']), /policy/);

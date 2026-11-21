@@ -85,7 +85,9 @@ files upload and updates `docs-versions.json` last. The default docs move
 forward in release order. An older-line patch updates its line in the picker
 and leaves the default docs on the newer release.
 
-The workflow uses the configured AWS role through GitHub OIDC. It needs
+The workflow uses the configured AWS role through GitHub OIDC. The role trust
+policy must allow this repository's release tags under `ref:refs/tags/v*`.
+The workflow needs
 `s3:GetObject` for the release manifest and snapshot markers, the existing
 site upload permissions, and CloudFront invalidation access, including
 `cloudfront:GetInvalidation`. The workflow waits for invalidation and checks the
@@ -95,7 +97,7 @@ site routes directory URLs to their `index.html` under both `/docs/` and
 
 ### Manual deployment
 
-- To retry a release, run **Deploy Web** with its published `vigilo/vX.Y.Z`
+- To retry a release, run **Deploy Web** with its published `vX.Y.Z`
   tag. A completed snapshot is reused after its identity is verified.
 - To correct the latest docs or update the marketing pages, supply
   `docs_correction_sha`. The commit must descend from the latest release

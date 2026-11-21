@@ -20,7 +20,7 @@ def crate_version(package):
 def validate_tag(package, tag):
     """Return the exact crate version, rejecting other release families."""
     version = crate_version(package)
-    expected = f"vigilo/v{version}"
+    expected = f"v{version}"
     if tag != expected:
         raise ValueError(f"release tag {tag!r} does not match crate tag {expected!r}")
     return version

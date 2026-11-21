@@ -39,7 +39,7 @@ the placeholder with a published collection identifier. `--skip-evaluators`
 performs database-only setup and cannot be combined with a collection pin.
 
 Collections use `evaluators/YYYY.MM.DD.N` tags: a UTC date and a sequence starting
-at 1. CLI releases use `vigilo/vX.Y.Z`. Each evaluator retains its own semantic
+at 1. CLI releases use `vX.Y.Z`. Each evaluator retains its own semantic
 version; a collection groups exact versions without coupling them to CLI releases.
 Setup searches published, non-prerelease collection tags, orders them by date and
 sequence, and selects the newest collection whose complete ABI set is supported.

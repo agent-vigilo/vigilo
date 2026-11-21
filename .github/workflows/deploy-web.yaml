@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Published Vigilo release tag (blank selects the deployed latest release)
+        description: Published tag such as v0.1.0 (blank selects the deployed latest release)
         type: string
       docs_correction_sha:
         description: Optional exact SHA of a web-only correction for the latest release

@@ -10,7 +10,7 @@ const linePattern = /^(?:0\.(0|[1-9]\d*)|[1-9]\d*)\.x$/;
 const shaPattern = /^[0-9a-f]{40}$/;
 
 export function identity(version, tag, commit) {
-  if (!versionPattern.test(version) || tag !== `vigilo/v${version}` || !shaPattern.test(commit)) {
+  if (!versionPattern.test(version) || tag !== `v${version}` || !shaPattern.test(commit)) {
     throw new Error('Invalid Vigilo release identity');
   }
   return {version, tag, commit};
