@@ -1912,6 +1912,7 @@ mod postgres_tests;
 mod tests {
     use serde_json::json;
     use uuid::Uuid;
+    use vigilo::invocation::profile::HttpEndpoint;
 
     use super::{
         RunEvaluatorCatalogEntry,
@@ -1945,7 +1946,6 @@ mod tests {
                 Severity,
             },
             run::{
-                AgentHttpConfig,
                 AgentProfile,
                 AggregationMethod,
                 AggregationSettings,
@@ -2134,7 +2134,7 @@ mod tests {
                 config: json!({}),
             },
             harness: crate::invocation::profile::Harness::DirectProbe {
-                http: AgentHttpConfig {
+                http: HttpEndpoint {
                     credential: None,
                     url: "http://127.0.0.1:8787/v1/agent/invoke".to_string(),
                     method: "POST".to_string(),

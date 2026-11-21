@@ -686,10 +686,10 @@ fn is_runnable_state(state: &EvaluatorState) -> bool {
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
+    use vigilo::invocation::profile::HttpEndpoint;
 
     use crate::{
         contracts::run::{
-            AgentHttpConfig,
             AgentProfile,
             AggregationMethod,
             AggregationSettings,
@@ -777,7 +777,7 @@ mod tests {
                 config: serde_json::json!({}),
             },
             harness: crate::invocation::profile::Harness::DirectProbe {
-                http: AgentHttpConfig {
+                http: HttpEndpoint {
                     credential: None,
                     url: "http://127.0.0.1:8787/v1/agent/invoke".to_string(),
                     method: "POST".to_string(),

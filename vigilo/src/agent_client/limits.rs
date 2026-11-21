@@ -4,7 +4,7 @@
 
 use std::io::Write;
 
-use crate::contracts::run::AgentHttpConfig;
+use vigilo::invocation::profile::HttpEndpoint;
 
 pub(crate) const DEFAULT_BODY_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -26,7 +26,7 @@ impl Default for Limits {
 
 impl Limits {
     /// Reject invalid or excessive overrides before doing network I/O.
-    pub(crate) fn resolve(self, profile: &AgentHttpConfig) -> anyhow::Result<Self> {
+    pub(crate) fn resolve(self, profile: &HttpEndpoint) -> anyhow::Result<Self> {
         fn resolve(name: &str, requested: Option<u64>, ceiling: u64) -> anyhow::Result<u64> {
             let value = requested.unwrap_or(ceiling);
             anyhow::ensure!(
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn profile_limits_default_lower_and_reject_excess_or_zero() {
-        let mut profile: AgentHttpConfig =
+        let mut profile: HttpEndpoint =
             serde_json::from_value(serde_json::json!({"url":"http://localhost"})).unwrap();
         let ceilings = Limits {
             max_request_bytes: 10,

@@ -146,8 +146,6 @@ pub(crate) struct AgentProfile {
     pub(crate) config: Value,
 }
 
-pub(crate) use vigilo::invocation::profile::HttpEndpoint as AgentHttpConfig;
-
 /// Default execution policy for run processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RunDefaults {
