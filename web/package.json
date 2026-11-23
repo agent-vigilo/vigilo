@@ -5,7 +5,7 @@
   "license": "FSL-1.1-ALv2",
   "scripts": {
     "docusaurus": "docusaurus",
-    "start": "docusaurus start",
+    "start": "docusaurus start --port 6586",
     "build": "docusaurus build && node scripts/validate-sitemap.mjs && node scripts/docs-release.mjs routes",
     "brand:generate": "node scripts/generate-brand-assets.mjs",
     "validate:sitemap": "node scripts/validate-sitemap.mjs",
