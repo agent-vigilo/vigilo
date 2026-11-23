@@ -150,19 +150,19 @@ async fn finalize_claimed_run_from_summaries_combines_terminal_shards(pool: PgPo
     .unwrap();
     assert_eq!(cursor_status, "drained");
 
-    let event_count = sqlx::query_scalar::<_, i64>(
-        r#"
-            SELECT COUNT(*)
-            FROM outbox_events
-            WHERE aggregate_id = $1::uuid
-              AND event_type = 'run.completed'
-            "#,
+    let events = sqlx::query_scalar::<_, Value>(
+        "SELECT payload FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.completed'",
     )
     .bind(run_id)
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(event_count, 1);
+    let [payload] = events.as_slice() else {
+        panic!("expected one completion event, got {events:?}");
+    };
+    assert_eq!(payload["schema_version"], 1);
+    assert_eq!(payload["tenant_id"], Uuid::nil().to_string());
+    assert_eq!(payload["run_id"], run_id.to_string());
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -303,6 +303,9 @@ mod tests {
     }
 }
 
+mod run_events;
+pub use run_events::RunCompletedEventV1;
+
 mod user;
 pub use user::{
     ListRunsRequest,

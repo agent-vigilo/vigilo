@@ -226,6 +226,8 @@ pub(super) async fn finalize_claimed_run(
                 f.id,
                 format('run:%s:completed', f.id),
                 jsonb_build_object(
+                    'schema_version', 1,
+                    'tenant_id', f.tenant_id,
                     'run_id', f.id,
                     'run_key', f.run_key,
                     'gate_status', f.gate_status,

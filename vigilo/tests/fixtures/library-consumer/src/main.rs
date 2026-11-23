@@ -1,5 +1,7 @@
 //! Independent package proving the supported library boundary without CLI or SQL.
 mod surface;
+use std::io::Read as _;
+
 use vigilo::operations::{
     Client,
     Config,
@@ -23,7 +25,49 @@ async fn results(client: &Client) -> Result<RunResults, Error> {
         .await
 }
 
+/// Consumes one broker body passed on stdin. Fixture environment supplies the
+/// trusted user context and database bindings independently of the message.
+async fn completion() -> Result<(), Box<dyn std::error::Error>> {
+    use vigilo::operations::RunCompletedEventV1;
+
+    let setting = std::env::var;
+    let context = UserContext::new(
+        setting("VIGILO_CONSUMER_TENANT")?.parse()?,
+        setting("VIGILO_CONSUMER_ACTOR")?.parse()?,
+    )?;
+    let client = UserClient::new(UserConfig {
+        control: Config::new(setting("VIGILO_CONSUMER_DATABASE_URL")?),
+        database_role: setting("VIGILO_CONSUMER_DATABASE_ROLE")?,
+        execution_databases: [(
+            setting("VIGILO_CONSUMER_EXECUTION_ALIAS")?,
+            setting("VIGILO_CONSUMER_EXECUTION_URL")?,
+        )]
+        .into(),
+    })?;
+    let mut body = Vec::new();
+    std::io::stdin().take(4097).read_to_end(&mut body)?;
+    if body.len() > 4096 {
+        return Err("completion fixture payload exceeds 4096 bytes".into());
+    }
+    let event: RunCompletedEventV1 = serde_json::from_slice(&body)?;
+    if event.tenant_id != context.tenant_id() {
+        return Err("completion tenant is outside the caller's scope".into());
+    }
+    println!(
+        "{}",
+        serde_json::to_string(&client.run_results(context, event.run_id).await?)?
+    );
+    Ok(())
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("completion") {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(completion())
+            .unwrap();
+        return;
+    }
     // Construction and future creation must work without Tokio, environment, or I/O.
     let client = Client::new(Config::new("postgresql://localhost:1/vigilo".into())).unwrap();
     drop(status(&client));

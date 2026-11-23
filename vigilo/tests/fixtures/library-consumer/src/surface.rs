@@ -143,6 +143,7 @@ pub fn check(client: &Client, restricted: &UserClient, caller: UserContext) {
     drop(sensitive.close());
     let _ = hosted;
     let _ = construction;
+    let _ = |event: operations::RunCompletedEventV1| (event.tenant_id, event.run_id);
     let _ = role_construction;
     shared::<Client>();
     shared::<UserClient>();

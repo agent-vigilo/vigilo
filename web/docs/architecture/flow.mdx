@@ -341,6 +341,28 @@ delivery row claimed -> confirmed publish -> delete delivery row
 
 The ledger row is retained for idempotency, audit, and replay. The delivery queue only contains unfinished publish work.
 
+#### Run completion message
+
+The control transaction commits the completed run, scorecard, and event together.
+The coordinator publishes UTF-8 JSON with content type `application/json`,
+routing key `run.completed`, and AMQP message ID `run:<run_id>:completed` on
+the configured event exchange. The message is persistent. Rust consumers can
+deserialize its body as `vigilo::operations::RunCompletedEventV1`.
+
+The payload contains integer `schema_version` (1), UUID strings `tenant_id` and
+`run_id`, strings `run_key` and `gate_status`, and integer counts
+`terminal_execution_count`, `passed_execution_count`, `failed_execution_count`,
+and `errored_execution_count`. Evaluator input and output stay out of the event.
+Provision the durable topic exchange and bind a durable queue to the
+routing key before publication. Acknowledge deliveries after processing.
+Redelivery and publish retries can repeat the same message ID, and concurrent
+delivery can arrive out of order.
+
+The event identifies committed work for a trusted subscriber. The host supplies
+independently authorized caller context to `UserClient::run_results`. The read
+uses current policy and depends on the execution stores that hold its summaries.
+Handle dependency failures before acknowledging a delivery that needs those results.
+
 ## State Machines
 
 ### Run Lifecycle

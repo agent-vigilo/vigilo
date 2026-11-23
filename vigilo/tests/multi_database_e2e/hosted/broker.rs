@@ -109,6 +109,7 @@ impl Fixture {
         let mut queues = vec![
             format!("{prefix}.worker"),
             format!("{prefix}.events.domain"),
+            format!("{prefix}.completion-test"),
             format!("{prefix}.worker.quarantine"),
         ];
         for delay in ["5s", "10s", "20s", "40s", "80s", "160s", "320s", "640s"] {

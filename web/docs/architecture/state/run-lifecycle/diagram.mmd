@@ -26,7 +26,7 @@ flowchart TD
     Gate{Gate outcome}
     CompletedPass[Run completed + gate pass]
     CompletedFail[Run completed + gate fail]
-    CompletedEvent[Insert run.completed event]
+    CompletedEvent[Insert run.completed v1 with tenant and run identity]
 
     CancelGuard{Cancelable status?}
     CancelCascade[Cancel open chunks, executions, and attempts]

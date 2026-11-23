@@ -29,6 +29,8 @@ mod agent;
 mod broker;
 #[path = "hosted/callbacks.rs"]
 mod callbacks;
+#[path = "hosted/completion.rs"]
+mod completion;
 #[path = "hosted/database.rs"]
 mod database;
 #[path = "hosted/failures.rs"]
