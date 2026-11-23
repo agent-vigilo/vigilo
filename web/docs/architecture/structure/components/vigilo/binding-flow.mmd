@@ -1,9 +1,13 @@
 flowchart TD
     Host[Trusted host: explicit placement credentials] --> Config{Configuration valid?}
     Config -->|No| Reject[Reject binding]
-    Config -->|Yes| Pools[Shared lazy pools: scheduler, execution, user]
+    Config -->|Yes| Mode{Runtime configuration}
+    Mode -->|Composite| Pools[Shared lazy pools: scheduler, execution, user]
     Pools --> Startup[HostedRuntime validates every binding before returning]
     Startup --> Services[Separate caller, coordinator and worker handles]
+    Mode -->|Single role| Scoped[One lazy pool per supplied placement]
+    Scoped --> ScopedStartup["Validate control for run client and coordinator<br/>Check worker configuration"]
+    ScopedStartup --> Services
     Services --> Routing[Internal routers retain one fixed authority]
     Routing --> Bound{Alias supplied and purpose compatible?}
     Bound -->|No| Reject
@@ -18,5 +22,7 @@ flowchart TD
     Host --> Revalidate[Explicit deployment revalidation]
     Revalidate --> Guard
     Startup --> Guard
+    ScopedStartup -->|Control connection| Guard
     Services --> Cancel[Host cancellation, service drain and join]
-    Cancel --> Shutdown[Close shared pools]
+    Cancel -->|Composite runtime| Shutdown[Close shared pools]
+    Cancel -->|Separate roles| Release[Drop role handles]

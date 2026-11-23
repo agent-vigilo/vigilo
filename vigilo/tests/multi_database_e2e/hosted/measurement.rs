@@ -193,7 +193,7 @@ impl Fixture {
         }
         Ok(run)
     }
-    async fn sample_oracle(&mut self, run: Uuid, cases: usize) -> anyhow::Result<()> {
+    pub(super) async fn sample_oracle(&mut self, run: Uuid, cases: usize) -> anyhow::Result<()> {
         tokio::time::timeout(Duration::from_secs(180),async {
             loop {
                 for child in &mut self.children {anyhow::ensure!(child.try_wait()?.is_none(),"resident child exited before completing work");}

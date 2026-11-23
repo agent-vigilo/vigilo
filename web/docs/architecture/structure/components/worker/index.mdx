@@ -15,7 +15,8 @@ import workerDiagram from './diagram.mmd';
 # Worker Components
 
 The trusted library host obtains `operations::Worker` from a validated
-`HostedRuntime`. Its `once()` and cancellable `run()` share the CLI processing
+`HostedRuntime` or calls `Worker::new` with fixed execution bindings.
+Its `once()` and cancellable `run()` share the CLI processing
 path and service caches. The host owns cancellation and task joining; shutdown
 drains admitted chunks, and dropped work stops its lease heartbeat.
 

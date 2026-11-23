@@ -82,8 +82,7 @@ fn authority_function_allowlists_follow_placement_purpose() {
         binding.purpose = purpose;
         for authority in [Authority::Scheduler, Authority::Execution, Authority::User] {
             let guard = validation::Guard::new(
-                &binding,
-                &binding.scheduler,
+                &binding.for_role(authority),
                 authority,
                 Duration::from_secs(30),
             );

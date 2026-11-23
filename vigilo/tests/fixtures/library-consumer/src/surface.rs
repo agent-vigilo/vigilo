@@ -139,6 +139,7 @@ pub fn check(client: &Client, restricted: &UserClient, caller: UserContext) {
     drop(sensitive.close());
     let _ = hosted;
     let _ = construction;
+    let _ = role_construction;
     shared::<Client>();
     shared::<UserClient>();
     shared::<HostedRuntime>();
@@ -231,4 +232,34 @@ fn construction(config: operations::HostedConfig, pools: &operations::DatabasePo
     operation::<HostedRuntime>(HostedRuntime::new(config));
     operation::<()>(pools.validate());
     drop(pools.close());
+}
+
+fn role_construction(
+    binding: operations::RoleDatabaseBinding,
+    broker: operations::BrokerConfig,
+    caller: operations::UserContext,
+    client: &operations::RunClient,
+) {
+    let config = operations::RoleDatabaseBindings::new(
+        "primary".into(),
+        "primary".into(),
+        "single-default".into(),
+        [("primary".into(), binding)].into(),
+    );
+    let resources: Arc<dyn resources::Resolver> = Arc::new(Host);
+    let worker = operations::WorkerConfig::new(config.clone(), resources.clone(), broker.clone());
+    operation::<operations::RunClient>(operations::RunClient::new_for_user(
+        config.clone(),
+        resources.clone(),
+        caller,
+        None,
+    ));
+    operation::<operations::Coordinator>(operations::Coordinator::new(
+        config,
+        resources,
+        broker,
+        Default::default(),
+    ));
+    operation::<operations::Worker>(operations::Worker::new(worker));
+    let _: Result<operations::RunClient, Error> = client.for_caller(caller);
 }

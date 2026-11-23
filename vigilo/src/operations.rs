@@ -317,6 +317,8 @@ pub use database_bindings::{
     DatabaseCredential,
     DatabasePools,
     DatabasePurpose,
+    RoleDatabaseBinding,
+    RoleDatabaseBindings,
 };
 
 mod hosted;
@@ -337,4 +339,5 @@ pub use hosted::{
     ShardTarget,
     WasmOptions,
     Worker,
+    WorkerConfig,
 };

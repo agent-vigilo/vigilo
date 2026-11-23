@@ -38,6 +38,8 @@ mod measurement;
 use super::postgres_probe;
 #[path = "hosted/resources.rs"]
 mod resources;
+#[path = "hosted/roles.rs"]
+mod roles;
 
 struct Fixture {
     db: database::Databases,
@@ -81,6 +83,13 @@ impl Fixture {
         })
     }
     async fn setup(&mut self) -> anyhow::Result<()> {
+        self.setup_resources().await?;
+        if !self.standalone {
+            self.construct_runtime().await?;
+        }
+        Ok(())
+    }
+    async fn setup_resources(&mut self) -> anyhow::Result<()> {
         self.db.setup(!self.standalone).await?;
         let original: toml::Value = toml::from_str(
             &tokio::fs::read_to_string(std::env::var("VIGILO_STORAGE_CONFIG")?).await?,
@@ -107,9 +116,6 @@ impl Fixture {
             host.owners.insert(tenant, toml::to_string(&owner)?);
         }
         self.host = Arc::new(host);
-        if !self.standalone {
-            self.construct_runtime().await?;
-        }
         Ok(())
     }
     async fn construct_runtime(&mut self) -> anyhow::Result<()> {

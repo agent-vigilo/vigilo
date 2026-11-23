@@ -1,6 +1,7 @@
 //! Validated hosting construction with fixed database authority and shared services.
 //!
-//! Startup checks every supplied database binding before returning a runtime.
+//! Composite startup validates all fixed bindings. Narrow construction opens
+//! only its role’s pools and defers execution-placement connections to use.
 //! Caller handles expose only scoped operations; scheduler and worker handles are
 //! obtained separately by the trusted host. No CLI parsing, process signals,
 //! tracing subscriber, credential environment lookup or policy installation occurs.
@@ -17,6 +18,7 @@ use super::{
     DatabasePools,
     Error,
     ExecutionControl,
+    RoleDatabaseBindings,
     RunClient,
     RunStatus,
     UserClient,
@@ -184,24 +186,13 @@ impl HostedRuntime {
     /// usable runtime and does not close independently held pool clones.
     pub async fn new(config: HostedConfig) -> Result<Self, Error> {
         config.coordinator.validate()?;
-        let bounded = |v: u64| (1..=64 * 1024 * 1024).contains(&v);
-        if !(1..=1024).contains(&config.worker_max_inflight_chunks)
-            || !(1..=3600).contains(&config.policy_max_age_seconds)
-            || !bounded(config.agent_http.max_request_bytes)
-            || !bounded(config.agent_http.max_response_bytes)
-            || config
-                .worker_host
-                .as_ref()
-                .is_some_and(|s| s.is_empty() || s.len() > 255 || s.chars().any(char::is_control))
-        {
-            return Err(Error::InvalidConfiguration(
-                "invalid runtime limits or worker identity",
-            ));
-        }
-        config
-            .wasm
-            .validate()
-            .map_err(|_| Error::InvalidConfiguration("invalid Wasm runtime limits"))?;
+        validate_worker_options(
+            config.worker_max_inflight_chunks,
+            config.policy_max_age_seconds,
+            config.agent_http,
+            config.worker_host.as_deref(),
+            &config.wasm,
+        )?;
         let messaging = config.broker.config()?;
         let http = crate::evaluator_requests::Service::with_limits(
             config.evaluator_http,
@@ -259,23 +250,15 @@ impl HostedRuntime {
         }
     }
     pub fn coordinator(&self) -> Coordinator {
-        Coordinator {
-            context: self.0.scheduler.clone(),
-            id: Uuid::now_v7(),
-            options: self.0.coordinator.clone(),
-            active: Arc::new(tokio::sync::Mutex::new(())),
-        }
+        Coordinator::from_context(self.0.scheduler.clone(), self.0.coordinator.clone())
     }
+
     pub fn worker(&self) -> Worker {
-        Worker {
-            service: Arc::new(worker::Service::new(
-                self.0.execution.clone(),
-                Uuid::now_v7(),
-                self.0.worker_host.clone(),
-            )),
-            max_inflight: self.0.max_inflight,
-            active: Arc::new(tokio::sync::Mutex::new(())),
-        }
+        Worker::from_context(
+            self.0.execution.clone(),
+            self.0.max_inflight,
+            self.0.worker_host.clone(),
+        )
     }
     /// Returns the invocation service for the trusted host's authenticated ingress
     /// and scheduling code. Issuing a completion credential grants no other operation.
@@ -360,6 +343,38 @@ pub struct Coordinator {
     active: Arc<tokio::sync::Mutex<()>>,
 }
 impl Coordinator {
+    /// Constructs the scheduler with only scheduler credentials. Validates the
+    /// owning control binding. Each execution placement validates its own
+    /// connection when used, so a remote outage does not prevent startup.
+    pub async fn new(
+        databases: RoleDatabaseBindings,
+        resources: Arc<dyn super::resources::Resolver>,
+        broker: BrokerConfig,
+        options: CoordinatorOptions,
+    ) -> Result<Self, Error> {
+        options.validate()?;
+        let messaging = broker.config()?;
+        let router = databases.router(Authority::Scheduler)?;
+        let control = router.control().await.map_err(Error::Dependency)?;
+        control
+            .acquire()
+            .await
+            .map_err(|error| Error::Dependency(error.into()))?;
+        let context = Context::for_operations(router)
+            .with_resource_resolver(resources)
+            .with_runtime_dependencies(messaging, Default::default());
+        Ok(Self::from_context(context, options))
+    }
+
+    fn from_context(context: Context, options: CoordinatorOptions) -> Self {
+        Self {
+            context,
+            id: Uuid::now_v7(),
+            options,
+            active: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
     /// Publishes one configured outbox batch from a known execution placement.
     /// Call once per wakeup batch and reconcile periodically after missed wakeups.
     /// This operation does not scan control-plane placement or run metadata.
@@ -440,6 +455,70 @@ impl Coordinator {
         }
     }
 }
+/// Trusted configuration for one execution runtime. Database and broker
+/// connections are lazy. Each database connection verifies its assigned role.
+pub struct WorkerConfig {
+    pub databases: RoleDatabaseBindings,
+    pub resources: Arc<dyn super::resources::Resolver>,
+    pub broker: BrokerConfig,
+    pub wasm: WasmOptions,
+    pub agent_http: AgentHttpLimits,
+    /// Supplies callback addresses and per-invocation completion credentials.
+    pub callback_issuer: Option<Arc<dyn super::invocations::CallbackIssuer>>,
+    /// Allows HTTP credentials only on literal loopback origins for local use.
+    pub agent_credentials_allow_http_loopback: bool,
+    pub evaluator_http: crate::evaluator_http::transport::Limits,
+    pub evaluator_http_concurrency: usize,
+    pub policy_max_age_seconds: u64,
+    pub max_inflight_chunks: u16,
+    pub host: Option<String>,
+}
+impl WorkerConfig {
+    /// Uses the same execution defaults as the composite runtime.
+    pub fn new(
+        databases: RoleDatabaseBindings,
+        resources: Arc<dyn super::resources::Resolver>,
+        broker: BrokerConfig,
+    ) -> Self {
+        Self {
+            databases,
+            resources,
+            broker,
+            wasm: Default::default(),
+            agent_http: Default::default(),
+            callback_issuer: None,
+            agent_credentials_allow_http_loopback: false,
+            evaluator_http: Default::default(),
+            evaluator_http_concurrency: 64,
+            policy_max_age_seconds: 30,
+            max_inflight_chunks: 1,
+            host: None,
+        }
+    }
+}
+
+fn validate_worker_options(
+    max_inflight: u16,
+    policy_age: u64,
+    agent: AgentHttpLimits,
+    host: Option<&str>,
+    wasm: &WasmOptions,
+) -> Result<(), Error> {
+    let bounded = |v: u64| (1..=64 * 1024 * 1024).contains(&v);
+    if !(1..=1024).contains(&max_inflight)
+        || !(1..=3600).contains(&policy_age)
+        || !bounded(agent.max_request_bytes)
+        || !bounded(agent.max_response_bytes)
+        || host.is_some_and(|s| s.is_empty() || s.len() > 255 || s.chars().any(char::is_control))
+    {
+        return Err(Error::InvalidConfiguration(
+            "invalid runtime limits or worker identity",
+        ));
+    }
+    wasm.validate()
+        .map_err(|_| Error::InvalidConfiguration("invalid Wasm runtime limits"))
+}
+
 /// Execution authority with persistent per-service caches and worker identity.
 /// Clones share one service; concurrent invocations return a conflict.
 #[derive(Clone)]
@@ -449,6 +528,50 @@ pub struct Worker {
     active: Arc<tokio::sync::Mutex<()>>,
 }
 impl Worker {
+    /// Constructs a worker with only execution credentials. Configuration is
+    /// checked before returning. Database validation occurs on each connection,
+    /// including before the worker claims work on that placement.
+    pub async fn new(config: WorkerConfig) -> Result<Self, Error> {
+        validate_worker_options(
+            config.max_inflight_chunks,
+            config.policy_max_age_seconds,
+            config.agent_http,
+            config.host.as_deref(),
+            &config.wasm,
+        )?;
+        let http = crate::evaluator_requests::Service::with_limits(
+            config.evaluator_http,
+            config.evaluator_http_concurrency,
+        )
+        .map_err(|_| Error::InvalidConfiguration("invalid evaluator HTTP limits"))?;
+        let messaging = config.broker.config()?;
+        let context = Context::for_operations(config.databases.router(Authority::Execution)?)
+            .with_agent_credentials(
+                crate::agent_client::credentials::Provider::default()
+                    .with_http_loopback(config.agent_credentials_allow_http_loopback),
+            )
+            .with_resource_resolver(config.resources)
+            .with_runtime_dependencies(messaging, config.wasm)
+            .with_callback_issuer(config.callback_issuer)
+            .with_agent_http_limits(config.agent_http)
+            .with_evaluator_http(http)
+            .with_http_policy_max_age(config.policy_max_age_seconds)
+            .map_err(|_| Error::InvalidConfiguration("invalid policy freshness"))?;
+        Ok(Self::from_context(
+            context,
+            config.max_inflight_chunks,
+            config.host,
+        ))
+    }
+
+    fn from_context(context: Context, max_inflight: u16, host: Option<String>) -> Self {
+        Self {
+            service: Arc::new(worker::Service::new(context, Uuid::now_v7(), host)),
+            max_inflight,
+            active: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
     /// Process at most one available broker delivery, including retry/quarantine
     /// settlement. Zero means no delivery was available. Dropping stops lease renewal.
     pub async fn once(&self) -> Result<usize, Error> {

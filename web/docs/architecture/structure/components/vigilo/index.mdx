@@ -78,7 +78,7 @@ The public `operations` module returns typed values for interface adapters:
 | Bounded ordinary and sensitive exports | `export::ExportClient` and `export::SensitiveExportClient` |
 | Dataset upload, resume and cleanup | `datasets::DatasetClient` |
 | Evaluator discovery, publication, state and tests | `evaluators::EvaluatorClient` |
-| Coordinator and worker execution | `Coordinator` and `Worker` handles from `HostedRuntime` |
+| Coordinator and worker execution | `Coordinator` and `Worker`, constructed directly or through `HostedRuntime` |
 | Authenticated callback acceptance and due invocation work | `HostedRuntime::invocations` when a callback issuer is configured |
 
 Prepared runs, datasets and evaluator packages are sealed verification results;
@@ -132,6 +132,24 @@ shared database pools, including externally retained clones. Coordinator shutdow
 drains its active cycle; worker shutdown drains admitted chunks. Dropping worker
 work stops its lease heartbeat; uncompleted work follows lease recovery rather
 than being reported as completed. Dropping a request cannot undo committed work.
+
+### Separate role construction
+
+Trusted hosts can construct `RunClient::new_for_user`, `Coordinator::new`, and
+`Worker::new` with separate `RoleDatabaseBindings`. Each database binding carries
+one role's login and the peer role names used by connection validation. The host
+supplies the resource resolver explicitly. Keep a run client for its configured
+control store and use `for_caller` to share its pools across authenticated callers.
+Prepared values remain bound to the client that created them. Run preparation
+reads placement metadata on control, and acceptance commits the plan for later
+scheduler advancement.
+
+Run client and coordinator construction validate the owning control connection.
+Worker construction validates configuration, then validates the fixed login and
+installation as each connection opens. Execution placement connections open on
+demand. The coordinator contains placement failures through its existing bounded
+cycles, and workers use the bound placement's local write fence for normal claims.
+Join running tasks before dropping the role handles that own the pools.
 
 ## Fixed database bindings
 

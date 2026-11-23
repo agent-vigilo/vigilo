@@ -12,9 +12,8 @@ use sqlx::PgConnection;
 
 use super::{
     Authority,
-    DatabaseBinding,
-    DatabaseCredential,
     DatabasePurpose,
+    RoleDatabaseBinding,
     contracts::{
         CONTRACTS,
         normalize,
@@ -25,7 +24,7 @@ pub(super) struct Guard {
     role: String,
     schema: String,
     owner: String,
-    peers: Vec<String>,
+    peers: [String; 2],
     purpose: DatabasePurpose,
     authority: Authority,
     statement_ms: u128,
@@ -54,23 +53,14 @@ fn invalid() -> sqlx::Error {
 }
 
 impl Guard {
-    pub fn new(
-        binding: &DatabaseBinding,
-        credential: &DatabaseCredential,
-        authority: Authority,
-        timeout: Duration,
-    ) -> Self {
+    pub fn new(binding: &RoleDatabaseBinding, authority: Authority, timeout: Duration) -> Self {
         let policy = crate::context::database::DatabaseOperationTimeoutConfig::new(timeout)
             .expect("validated timeout");
         Self {
-            role: credential.database_role.clone(),
+            role: binding.credential.database_role.clone(),
             schema: binding.schema.clone(),
             owner: binding.function_owner.clone(),
-            peers: [&binding.scheduler, &binding.execution, &binding.user]
-                .into_iter()
-                .map(|c| c.database_role.clone())
-                .filter(|r| r != &credential.database_role)
-                .collect(),
+            peers: binding.other_roles.clone(),
             purpose: binding.purpose,
             authority,
             statement_ms: policy.statement_timeout().as_millis().max(1),

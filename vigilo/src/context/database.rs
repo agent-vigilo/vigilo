@@ -374,6 +374,23 @@ impl DatabaseRouter {
         config: Config,
         pools: BTreeMap<String, FixedPlacementPool>,
     ) -> anyhow::Result<Self> {
+        Self::build_fixed_router(config, pools, true)
+    }
+
+    /// Caller-side planning reads the placement catalog on control. It does not
+    /// need a connection to the default execution placement.
+    pub(crate) fn from_fixed_user_pools(
+        config: Config,
+        pools: BTreeMap<String, FixedPlacementPool>,
+    ) -> anyhow::Result<Self> {
+        Self::build_fixed_router(config, pools, false)
+    }
+
+    fn build_fixed_router(
+        config: Config,
+        pools: BTreeMap<String, FixedPlacementPool>,
+        require_execution: bool,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(
             config.uri.is_empty(),
             "fixed database bindings cannot use an operator URI"
@@ -404,18 +421,20 @@ impl DatabaseRouter {
             ),
             "fixed control database binding has incompatible purpose"
         );
-        let execution = pools
-            .get(&config.placement_config.default_shard_database_alias)
-            .ok_or_else(|| {
-                anyhow::anyhow!("missing fixed database binding for default execution")
-            })?;
-        anyhow::ensure!(
-            matches!(
-                execution.role,
-                DATABASE_PLACEMENT_ROLE_SHARD | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
-            ),
-            "fixed execution database binding has incompatible purpose"
-        );
+        if require_execution {
+            let execution = pools
+                .get(&config.placement_config.default_shard_database_alias)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("missing fixed database binding for default execution")
+                })?;
+            anyhow::ensure!(
+                matches!(
+                    execution.role,
+                    DATABASE_PLACEMENT_ROLE_SHARD | DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
+                ),
+                "fixed execution database binding has incompatible purpose"
+            );
+        }
         let mut router = Self::new(config);
         router.fixed_pools = Some(pools);
         Ok(router)

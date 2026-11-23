@@ -5,6 +5,8 @@
 //! credentials. Prepared values are private-construction proofs tied to that
 //! client; output projections carry no authority. Cancellation of a future does
 //! not undo committed preparation or durable acceptance.
+use std::sync::Arc;
+
 use anyhow::Context as _;
 use serde::Serialize;
 use serde_json::Value;
@@ -13,7 +15,12 @@ use uuid::Uuid;
 
 use super::{
     Error,
+    RoleDatabaseBindings,
+    UserContext,
     creation,
+    database_bindings::Authority,
+    invocations::CallbackIssuer,
+    resources::Resolver,
 };
 use crate::{
     blob_storage::config::OwnerConfig,
@@ -126,6 +133,42 @@ pub struct RunClient {
     caller: Option<crate::db::scope::UserContext>,
 }
 impl RunClient {
+    /// Constructs a caller-bound client with only user database credentials.
+    /// Validates the control connection. Preparation reads placement metadata
+    /// there, and durable acceptance hands advancement to the scheduler.
+    pub async fn new_for_user(
+        databases: RoleDatabaseBindings,
+        resources: Arc<dyn Resolver>,
+        caller: UserContext,
+        callback_issuer: Option<Arc<dyn CallbackIssuer>>,
+    ) -> Result<Self, Error> {
+        let router = databases.router(Authority::User)?;
+        let control = router.control().await.map_err(Error::Dependency)?;
+        control
+            .acquire()
+            .await
+            .map_err(|error| Error::Dependency(error.into()))?;
+        let context = Context::for_operations(router)
+            .with_resource_resolver(resources)
+            .with_callback_issuer(callback_issuer);
+        Ok(Self::from_hosted(context, Default::default(), caller))
+    }
+
+    /// Binds a newly authenticated caller to the same resources and pools. Keep
+    /// prepared values with their original client or a clone of that client.
+    pub fn for_caller(&self, caller: UserContext) -> Result<Self, Error> {
+        if self.caller.is_none() {
+            return Err(Error::InvalidConfiguration(
+                "run client has no fixed user authority",
+            ));
+        }
+        Ok(Self::from_hosted(
+            self.context.clone(),
+            self.options,
+            caller,
+        ))
+    }
+
     /// Trusted construction binds the fixed credential domain. A supplied caller
     /// requires a user-role router; standalone construction supplies no caller.
     pub(crate) fn from_context(

@@ -10,7 +10,10 @@ mod contracts;
 mod validation;
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     sync::Arc,
     time::Duration,
 };
@@ -56,6 +59,95 @@ pub struct DatabaseBinding {
     pub user: DatabaseCredential,
 }
 
+/// One runtime credential and the installation identity it must match.
+/// The other two runtime role names are used only to reject role membership.
+#[derive(Clone)]
+pub struct RoleDatabaseBinding {
+    pub purpose: DatabasePurpose,
+    pub schema: String,
+    pub function_owner: String,
+    pub credential: DatabaseCredential,
+    pub other_roles: [String; 2],
+}
+
+/// Fixed database bindings and routing for one runtime role. Pool limits apply
+/// independently to each bound database.
+#[derive(Clone)]
+pub struct RoleDatabaseBindings {
+    pub control_alias: String,
+    pub default_execution_alias: String,
+    pub shard_assignment_policy: String,
+    pub databases: BTreeMap<String, RoleDatabaseBinding>,
+    pub max_connections: u32,
+    pub acquire_timeout: Duration,
+    pub operation_timeout: Duration,
+}
+impl RoleDatabaseBindings {
+    /// Uses five connections, a ten-second acquisition timeout and a thirty-second
+    /// operation budget per database. Construction here performs no I/O.
+    pub fn new(
+        control_alias: String,
+        default_execution_alias: String,
+        shard_assignment_policy: String,
+        databases: BTreeMap<String, RoleDatabaseBinding>,
+    ) -> Self {
+        Self {
+            control_alias,
+            default_execution_alias,
+            shard_assignment_policy,
+            databases,
+            max_connections: 5,
+            acquire_timeout: Duration::from_secs(10),
+            operation_timeout: Duration::from_secs(30),
+        }
+    }
+
+    pub(super) fn router(
+        self,
+        authority: Authority,
+    ) -> Result<Arc<crate::context::database::DatabaseRouter>, Error> {
+        let limits = PoolLimits {
+            max_connections: self.max_connections,
+            acquire_timeout: self.acquire_timeout,
+            operation_timeout: self.operation_timeout,
+        };
+        validate_limits(&self.control_alias, self.databases.len(), limits)?;
+        let pools = self
+            .databases
+            .into_iter()
+            .map(|(alias, binding)| {
+                let pool = build_pool(&alias, &self.control_alias, &binding, authority, limits)?;
+                Ok((alias, fixed_pool(binding.purpose, pool.pool)))
+            })
+            .collect::<Result<_, Error>>()?;
+        fixed_router(
+            self.control_alias,
+            self.default_execution_alias,
+            self.shard_assignment_policy,
+            limits,
+            pools,
+            authority,
+        )
+    }
+}
+
+impl DatabaseBinding {
+    fn for_role(&self, authority: Authority) -> RoleDatabaseBinding {
+        let (credential, peers) = match authority {
+            Authority::Scheduler => (&self.scheduler, [&self.execution, &self.user]),
+            Authority::Execution => (&self.execution, [&self.scheduler, &self.user]),
+            Authority::User => (&self.user, [&self.scheduler, &self.execution]),
+        };
+        RoleDatabaseBinding {
+            purpose: self.purpose,
+            schema: self.schema.clone(),
+            function_owner: self.function_owner.clone(),
+            credential: credential.clone(),
+            other_roles: peers.map(|peer| peer.database_role.clone()),
+        }
+    }
+}
+
 /// Trusted, fixed placement bindings. Pool limits apply per authority per database.
 #[derive(Clone)]
 pub struct DatabaseBindings {
@@ -88,6 +180,13 @@ pub(super) enum Authority {
     User,
 }
 
+#[derive(Clone, Copy)]
+struct PoolLimits {
+    max_connections: u32,
+    acquire_timeout: Duration,
+    operation_timeout: Duration,
+}
+
 struct BoundPool {
     pool: PgPool,
     guard: Arc<validation::Guard>,
@@ -99,9 +198,7 @@ struct PlacementPools {
     user: BoundPool,
 }
 struct Inner {
-    max_connections: u32,
-    acquire_timeout: Duration,
-    operation_timeout: Duration,
+    limits: PoolLimits,
     control_alias: String,
     placements: BTreeMap<String, PlacementPools>,
 }
@@ -115,100 +212,40 @@ impl DatabasePools {
     /// Validates configuration and builds lazy pools. Connections fail closed on
     /// wrong roles, unsafe installation or missing protection/grants.
     pub fn new(config: DatabaseBindings) -> Result<Self, Error> {
-        let valid_name = |name: &str| {
-            !name.is_empty() && name.trim() == name && name.len() <= 63 && !name.contains('\0')
+        let limits = PoolLimits {
+            max_connections: config.max_connections,
+            acquire_timeout: config.acquire_timeout,
+            operation_timeout: config.operation_timeout,
         };
-        if !valid_name(&config.control_alias)
-            || config.databases.is_empty()
-            || config.databases.len() > 129
-            || !(1..=256).contains(&config.max_connections)
-            || !(Duration::from_secs(1)..=Duration::from_secs(300))
-                .contains(&config.acquire_timeout)
-            || !(Duration::from_secs(1)..=Duration::from_secs(3600))
-                .contains(&config.operation_timeout)
-        {
+        validate_limits(&config.control_alias, config.databases.len(), limits)?;
+        if !config.databases.contains_key(&config.control_alias) {
             return Err(Error::InvalidConfiguration(
-                "invalid fixed database bindings or pool limits",
-            ));
-        }
-        let control =
-            config
-                .databases
-                .get(&config.control_alias)
-                .ok_or(Error::InvalidConfiguration(
-                    "missing control database binding",
-                ))?;
-        if !matches!(
-            control.purpose,
-            DatabasePurpose::Control | DatabasePurpose::ControlAndExecution
-        ) {
-            return Err(Error::InvalidConfiguration(
-                "control binding does not support control work",
+                "missing control database binding",
             ));
         }
         let mut placements = BTreeMap::new();
         for (alias, binding) in &config.databases {
-            if !valid_name(alias)
-                || !valid_name(&binding.schema)
-                || !valid_name(&binding.function_owner)
-                || binding.schema.starts_with("pg_")
-                || binding.schema == "information_schema"
-                || (alias != &config.control_alias && binding.purpose != DatabasePurpose::Execution)
-            {
-                return Err(Error::InvalidConfiguration(
-                    "invalid fixed database placement",
-                ));
-            }
-            let roles = [
-                &binding.scheduler.database_role,
-                &binding.execution.database_role,
-                &binding.user.database_role,
-                &binding.function_owner,
-            ];
-            if roles.iter().any(|role| !valid_name(role))
-                || roles
-                    .iter()
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len()
-                    != roles.len()
-            {
-                return Err(Error::InvalidConfiguration(
-                    "database authority roles must be distinct explicit names",
-                ));
-            }
-            let build = |credential: &DatabaseCredential, authority| -> Result<BoundPool, Error> {
-                let options = connection_options(credential)?;
-                let guard = Arc::new(validation::Guard::new(
-                    binding,
-                    credential,
+            let build = |authority| {
+                build_pool(
+                    alias,
+                    &config.control_alias,
+                    &binding.for_role(authority),
                     authority,
-                    config.operation_timeout,
-                ));
-                let after = guard.clone();
-                let pool = PgPoolOptions::new()
-                    .max_connections(config.max_connections)
-                    .acquire_timeout(config.acquire_timeout)
-                    .after_connect(move |connection, _| {
-                        let guard = after.clone();
-                        Box::pin(async move { guard.initialize(connection).await })
-                    })
-                    .connect_lazy_with(options);
-                Ok(BoundPool { pool, guard })
+                    limits,
+                )
             };
             placements.insert(
                 alias.clone(),
                 PlacementPools {
                     purpose: binding.purpose,
-                    scheduler: build(&binding.scheduler, Authority::Scheduler)?,
-                    execution: build(&binding.execution, Authority::Execution)?,
-                    user: build(&binding.user, Authority::User)?,
+                    scheduler: build(Authority::Scheduler)?,
+                    execution: build(Authority::Execution)?,
+                    user: build(Authority::User)?,
                 },
             );
         }
         Ok(Self(Arc::new(Inner {
-            max_connections: config.max_connections,
-            acquire_timeout: config.acquire_timeout,
-            operation_timeout: config.operation_timeout,
+            limits,
             control_alias: config.control_alias,
             placements,
         })))
@@ -222,68 +259,28 @@ impl DatabasePools {
         default_execution_alias: String,
         shard_assignment_policy: String,
     ) -> Result<Arc<crate::context::database::DatabaseRouter>, Error> {
-        use crate::{
-            context::database::{
-                Config,
-                DatabaseOperationTimeoutConfig,
-                DatabaseRouter,
-                FixedPlacementPool,
-                PlacementConfig,
-            },
-            models::database_placement::{
-                DATABASE_PLACEMENT_ROLE_CONTROL,
-                DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
-                DATABASE_PLACEMENT_ROLE_SHARD,
-            },
-        };
-        let placement = PlacementConfig::new(
-            self.0.control_alias.clone(),
-            default_execution_alias,
-            shard_assignment_policy,
-        )
-        .map_err(|_| {
-            Error::InvalidConfiguration("invalid fixed runtime placement configuration")
-        })?;
-        let config = Config::new(
-            String::new(),
-            self.0.max_connections,
-            self.0.acquire_timeout,
-            Default::default(),
-            placement,
-        )
-        .with_operation_timeout(Some(
-            DatabaseOperationTimeoutConfig::new(self.0.operation_timeout)
-                .map_err(Error::Dependency)?,
-        ));
         let pools = self
             .0
             .placements
             .iter()
-            .map(|(alias, bindings)| {
+            .map(|(alias, binding)| {
                 let pool = match authority {
-                    Authority::Scheduler => &bindings.scheduler.pool,
-                    Authority::Execution => &bindings.execution.pool,
-                    Authority::User => &bindings.user.pool,
+                    Authority::Scheduler => &binding.scheduler.pool,
+                    Authority::Execution => &binding.execution.pool,
+                    Authority::User => &binding.user.pool,
                 };
-                let role = match bindings.purpose {
-                    DatabasePurpose::Control => DATABASE_PLACEMENT_ROLE_CONTROL,
-                    DatabasePurpose::Execution => DATABASE_PLACEMENT_ROLE_SHARD,
-                    DatabasePurpose::ControlAndExecution => {
-                        DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD
-                    }
-                };
-                (
-                    alias.clone(),
-                    FixedPlacementPool {
-                        pool: pool.clone(),
-                        role,
-                    },
-                )
+                (alias.clone(), fixed_pool(binding.purpose, pool.clone()))
             })
             .collect();
-        DatabaseRouter::from_fixed_pools(config, pools)
-            .map(Arc::new)
-            .map_err(Error::Dependency)
+        fixed_router(
+            self.0.control_alias.clone(),
+            default_execution_alias,
+            shard_assignment_policy,
+            self.0.limits,
+            pools,
+            // Retain the composite runtime's configuration validation.
+            Authority::Scheduler,
+        )
     }
 
     /// Opens and explicitly revalidates every configured authority binding before
@@ -330,6 +327,136 @@ impl DatabasePools {
             }
         }
     }
+}
+
+fn valid_name(name: &str) -> bool {
+    !name.is_empty() && name.trim() == name && name.len() <= 63 && !name.contains('\0')
+}
+
+fn validate_limits(control_alias: &str, count: usize, limits: PoolLimits) -> Result<(), Error> {
+    if !valid_name(control_alias)
+        || !(1..=129).contains(&count)
+        || !(1..=256).contains(&limits.max_connections)
+        || !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(&limits.acquire_timeout)
+        || !(Duration::from_secs(1)..=Duration::from_secs(3600)).contains(&limits.operation_timeout)
+    {
+        return Err(Error::InvalidConfiguration(
+            "invalid fixed database bindings or pool limits",
+        ));
+    }
+    Ok(())
+}
+
+fn build_pool(
+    alias: &str,
+    control_alias: &str,
+    binding: &RoleDatabaseBinding,
+    authority: Authority,
+    limits: PoolLimits,
+) -> Result<BoundPool, Error> {
+    let valid_purpose = if alias == control_alias {
+        matches!(
+            binding.purpose,
+            DatabasePurpose::Control | DatabasePurpose::ControlAndExecution
+        )
+    } else {
+        binding.purpose == DatabasePurpose::Execution
+    };
+    if !valid_name(alias)
+        || !valid_name(&binding.schema)
+        || binding.schema.starts_with("pg_")
+        || binding.schema == "information_schema"
+        || !valid_purpose
+    {
+        return Err(Error::InvalidConfiguration(
+            "invalid fixed database placement",
+        ));
+    }
+    let roles = [
+        &binding.credential.database_role,
+        &binding.function_owner,
+        &binding.other_roles[0],
+        &binding.other_roles[1],
+    ];
+    if roles.iter().any(|role| !valid_name(role))
+        || roles.iter().collect::<BTreeSet<_>>().len() != roles.len()
+    {
+        return Err(Error::InvalidConfiguration(
+            "database authority roles must be distinct explicit names",
+        ));
+    }
+    let options = connection_options(&binding.credential)?;
+    let guard = Arc::new(validation::Guard::new(
+        binding,
+        authority,
+        limits.operation_timeout,
+    ));
+    let after = guard.clone();
+    let pool = PgPoolOptions::new()
+        .max_connections(limits.max_connections)
+        .acquire_timeout(limits.acquire_timeout)
+        .after_connect(move |connection, _| {
+            let guard = after.clone();
+            Box::pin(async move { guard.initialize(connection).await })
+        })
+        .connect_lazy_with(options);
+    Ok(BoundPool { pool, guard })
+}
+
+fn fixed_pool(
+    purpose: DatabasePurpose,
+    pool: PgPool,
+) -> crate::context::database::FixedPlacementPool {
+    use crate::models::database_placement::{
+        DATABASE_PLACEMENT_ROLE_CONTROL,
+        DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
+        DATABASE_PLACEMENT_ROLE_SHARD,
+    };
+    let role = match purpose {
+        DatabasePurpose::Control => DATABASE_PLACEMENT_ROLE_CONTROL,
+        DatabasePurpose::Execution => DATABASE_PLACEMENT_ROLE_SHARD,
+        DatabasePurpose::ControlAndExecution => DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
+    };
+    crate::context::database::FixedPlacementPool { pool, role }
+}
+
+fn fixed_router(
+    control_alias: String,
+    default_execution_alias: String,
+    shard_assignment_policy: String,
+    limits: PoolLimits,
+    pools: BTreeMap<String, crate::context::database::FixedPlacementPool>,
+    authority: Authority,
+) -> Result<Arc<crate::context::database::DatabaseRouter>, Error> {
+    use crate::context::database::{
+        Config,
+        DatabaseOperationTimeoutConfig,
+        DatabaseRouter,
+        PlacementConfig,
+    };
+    let placement = PlacementConfig::new(
+        control_alias,
+        default_execution_alias,
+        shard_assignment_policy,
+    )
+    .map_err(|_| Error::InvalidConfiguration("invalid fixed runtime placement configuration"))?;
+    let config = Config::new(
+        String::new(),
+        limits.max_connections,
+        limits.acquire_timeout,
+        Default::default(),
+        placement,
+    )
+    .with_operation_timeout(Some(
+        DatabaseOperationTimeoutConfig::new(limits.operation_timeout).map_err(Error::Dependency)?,
+    ));
+    if authority == Authority::User {
+        DatabaseRouter::from_fixed_user_pools(config, pools)
+    } else {
+        DatabaseRouter::from_fixed_pools(config, pools)
+    }
+    .map(Arc::new)
+    .map_err(Error::Dependency)
 }
 
 /// Require a complete credential URI before SQLx can consult ambient defaults.
