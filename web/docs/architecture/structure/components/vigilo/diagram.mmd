@@ -15,7 +15,7 @@ flowchart TD
     CICD(["fa:fa-gears <br/> <b>CI/CD Runner</b> <br/> <small>[Software System]</small>"]):::actor
 
     LibraryHost["Rust host<br/>Caller-owned runtime and presentation"]:::actor
-    StatusOperations["Typed inspection operations<br/>Status and results; scoped shared pools; no output state"]:::component
+    StatusOperations["Typed inspection operations<br/>Status, results and control-store run listing"]:::component
     HostedRuntime["Hosted runtime<br/>Validated fixed roles and injected resources"]:::component
     LibraryHost --> HostedRuntime
     HostedRuntime --> StatusOperations

@@ -234,6 +234,21 @@ rolling back, or dropping the transaction clears its context. Routing groups
 summary reads by database and never falls back to another credential binding.
 The embedding host supplies trusted identity and installs database access policy.
 
+`UserClient::list_runs(context, request)` returns run IDs, status, gate status,
+and creation time from the bound control database. Use `ListRunsRequest` to
+request 1–100 items per page. The default is 50. The page query seeks newest
+first by `(created_at, id)` and fetches one extra row to detect continuation.
+The transaction sets tenant and actor context and clears the exact-run and
+batch settings. Database row policies determine what the caller can see.
+
+Pass `RunPage::next` back as an opaque cursor for the same caller and control
+alias. Each page reads currently committed rows and rechecks access. New rows
+above the previous page's last key appear on a fresh traversal. Rows committed
+below that key can appear later in the current traversal. The page size caps
+returned items. Policies that filter out many candidates after the index seek
+can increase the number of rows examined. For sparse visibility, verify that
+the deployed row policy can use an index that also provides the page order.
+
 <Mermaid value={statusFlow} />
 
 ## Related

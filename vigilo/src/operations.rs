@@ -305,6 +305,9 @@ mod tests {
 
 mod user;
 pub use user::{
+    ListRunsRequest,
+    RunListItem,
+    RunPage,
     UserClient,
     UserConfig,
     UserContext,

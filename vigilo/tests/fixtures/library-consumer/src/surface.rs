@@ -67,6 +67,10 @@ pub fn check(client: &Client, restricted: &UserClient, caller: UserContext) {
     ));
     operation::<operations::RunStatus>(restricted.run_status(caller, id));
     operation::<operations::RunResults>(restricted.run_results(caller, id));
+    let _ = |page: operations::RunPage| -> Vec<operations::RunListItem> { page.items };
+    operation::<operations::RunPage>(
+        restricted.list_runs(caller, operations::ListRunsRequest::default()),
+    );
 
     let runs = client.runs(STORAGE).unwrap();
     operation::<PreparedRun>(runs.prepare_run(input(), &cancel));

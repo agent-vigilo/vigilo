@@ -16,3 +16,10 @@ flowchart TD
     Result --> Cleanup["Finish read transactions and clear context"]
     Cleanup --> Presentation["Caller formats output"]
     Operation -. dependency failure .-> Failure["Rollback owned transaction<br/>Typed dependency error"]
+    Caller --> Listing["List visible runs through UserClient"]
+    Listing --> Cursor{"Page size and cursor valid?"}
+    Cursor -->|no| Invalid["InvalidInput"]
+    Cursor -->|yes| ListScope["Tenant and actor scope in a read-only control transaction"]
+    ListScope --> Seek["One indexed page query with current row policies"]
+    Seek --> Page["Collect visible run metadata and continuation key"]
+    Page --> Cleanup

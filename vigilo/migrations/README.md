@@ -19,9 +19,11 @@ placement owns.
 | 0030–0035 | Shard move ownership, copy progress, local change tracking, and rebalance operations |
 | 0036 | Shared change-capture function and triggers for shard moves |
 | 0037 | Durable execution-control delivery records |
+| 0038 | Tenant-scoped run listing index |
 
-Each table has one `create_<table>.sql` file containing its complete definition,
-partitions, indexes, comments, and associated integrity functions/triggers.
+Each table has one `create_<table>.sql` file containing its definition,
+partitions, initial indexes, comments, and associated integrity functions/triggers.
+Later migrations can add indexes for new access paths.
 Foreign-key targets precede their dependents. Shared shard-move capture is
 installed after all participating tables exist. The outbox enqueue trigger lives
 with the delivery queue it populates; settled-chunk protection lives with the

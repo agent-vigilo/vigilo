@@ -56,7 +56,7 @@ pub(crate) async fn begin(
     run_id: Uuid,
 ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    set_user(&mut tx, context, run_id).await?;
+    set_user(&mut tx, context, Some(run_id)).await?;
     Ok(tx)
 }
 
@@ -70,17 +70,28 @@ pub(crate) async fn begin_read(
     let mut tx = pool
         .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await?;
-    set_user(&mut tx, context, run_id).await?;
+    set_user(&mut tx, context, Some(run_id)).await?;
+    Ok(tx)
+}
+
+/// Tenant and actor scope for collection reads. Clears exact-run and batch
+/// context so the deployment's list policy controls visibility.
+pub(crate) async fn begin_list(
+    pool: &PgPool,
+    context: UserContext,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut tx = pool.begin_with("BEGIN READ ONLY").await?;
+    set_user(&mut tx, context, None).await?;
     Ok(tx)
 }
 
 async fn set_user(
     tx: &mut Transaction<'_, Postgres>,
     context: UserContext,
-    run_id: Uuid,
+    run_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('vigilo.tenant_id',$1,true), set_config('vigilo.actor_id',$2,true), set_config('vigilo.run_id',$3,true), set_config('vigilo.run_batch','',true)")
-        .bind(context.tenant_id.to_string()).bind(context.actor_id.to_string()).bind(run_id.to_string())
+        .bind(context.tenant_id.to_string()).bind(context.actor_id.to_string()).bind(run_id.map(|id| id.to_string()).unwrap_or_default())
         .execute(&mut **tx).await?;
     Ok(())
 }
