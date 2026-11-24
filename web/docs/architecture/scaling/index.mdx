@@ -518,6 +518,7 @@ stateDiagram-v2
     copying --> draining: backfill complete and catch-up bounded
     draining --> draining: admitted work remains
     draining --> moving: active work reaches zero
+    moving --> moving: bounded final replay
     moving --> active: final replay, activate target, clear target fence
     copying --> active: abort
     draining --> active: abort
@@ -580,6 +581,32 @@ its persisted target. Target reset occurs once, completed pages resume from
 their last key, and dirty replay stays version guarded. Repeating a move after
 fenced activation returns a verified no-op.
 `--force` cannot bypass the active-work or write-admission fence.
+
+### Bounded library moves
+
+Call `PlacementClient::move_run_shard` with the run and shard, the active
+source's route version from `list_run_shards`, the target alias, and a
+caller-generated operation UUID. Keep those fields for retries. Each call
+accepts a budget of 1–64 nonempty batches across target reset, source backfill,
+journal replay, and destination control repair. A batch handles up to 1,000
+rows or keys. Copy and replay pages aim for 4 MiB of row data and can carry a
+single larger row so the cursor advances. The two move endpoints use the
+operator's explicit bindings and shared placement pools.
+
+Use the returned progress to resume with the same UUID. The caller may choose a
+different budget on retry. A stale initial route or a different request using the
+same UUID conflicts. If a call is interrupted, its claim can remain leased for
+up to five minutes. A call has a 30-second deadline. A completed UUID returns a
+read-only receipt even after a subsequent move.
+
+Online backfill seeks the next native primary-key page. The source journal
+indexes the captured action for each key so replay can page updates and deletes
+in dependency order. Library moves defer journal deletes to the exclusive
+source fence, where the target can apply them in child-first order. A budget
+stop during final replay leaves the route `moving`. After the control route
+activates, the target admission stays `prepared` until the move finishes any
+bounded repair of its copied run-control revision. Calls resume that repair
+from its committed cursor before opening the target at the new write epoch.
 
 Dry-run and verify-only output uses `full_fingerprint` verification with
 source/target counts and checksums. Executed moves use

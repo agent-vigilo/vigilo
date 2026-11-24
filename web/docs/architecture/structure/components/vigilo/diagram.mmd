@@ -26,6 +26,7 @@ flowchart TD
     ExportReaders["Bounded export operations<br/>Separate ordinary/content/diagnostic access; fixed read-only pools"]:::component
     LibraryHost --> ExportReaders
     ExportReaders --> RunQueries
+    LibraryHost -->|Bounded operator calls| RunQueries
     LibraryHost --> StatusOperations
     CliRouter -->|status/results| StatusOperations
     StatusOperations --> RunQueries

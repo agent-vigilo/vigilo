@@ -1,4 +1,4 @@
-//! Live recovery ownership through the public CLI.
+//! Live recovery ownership through the public CLI and placement library.
 //! Exercises commit boundaries across databases and RabbitMQ, including
 //! recovery of expired worker leases on draining shards.
 use super::*;
@@ -408,6 +408,17 @@ async fn interrupt_cli_commit(
 
 #[tokio::test]
 async fn shard_move_replays_committed_target_page_and_fences_old_route() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use vigilo::operations::{
+        Client,
+        Config,
+        placement::{
+            MoveRunShardRequest,
+            PlacementClient,
+            RunShardMoveProgress,
+        },
+    };
+
     let Some(fixture) = E2eFixture::setup().await? else {
         return Ok(());
     };
@@ -509,8 +520,42 @@ async fn shard_move_replays_committed_target_page_and_fences_old_route() -> anyh
         .execute(&fixture.primary)
         .await?;
         assert_eq!(expired.rows_affected(), 1);
-        let moved = run_vigilo_json(&fixture.config, PRIMARY_ALIAS, "single-default", move_args)?;
-        assert_eq!(moved["meta"]["moved"], true);
+        let new_claims = if already_scored {
+            let moved =
+                run_vigilo_json(&fixture.config, PRIMARY_ALIAS, "single-default", move_args)?;
+            assert_eq!(moved["meta"]["moved"], true);
+            1
+        } else {
+            let mut control = Config::new(fixture.config.primary_url.clone());
+            control.max_connections = 1;
+            let operator = PlacementClient::new(
+                Client::new(control)?,
+                [(
+                    SHARD_DATABASE_URL_ENV.into(),
+                    fixture.config.shard_url.clone(),
+                )]
+                .into(),
+            )?;
+            let request = MoveRunShardRequest {
+                operation_id: move_id,
+                run_id: run,
+                run_shard: 0,
+                expected_route_version: 1,
+                target_database_alias: SHARD_ALIAS.into(),
+                max_batches: 1,
+            };
+            let mut completed_at = None;
+            for step in 1..=12 {
+                let progress = operator.move_run_shard(&request).await?;
+                assert_eq!(progress.operation_id, move_id);
+                assert!(progress.batches_processed <= 1);
+                if progress.progress == RunShardMoveProgress::Completed {
+                    completed_at = Some(step);
+                    break;
+                }
+            }
+            completed_at.context("bounded library move did not complete")?
+        };
         assert_eq!(checkpoint().await?, Some((1, 1)));
         assert_eq!(copied_rows(&fixture.shard).await?, source);
         let route = || {
@@ -538,7 +583,7 @@ async fn shard_move_replays_committed_target_page_and_fences_old_route() -> anyh
         .await?;
         assert_eq!(
             completed,
-            vec![(move_id, "completed".into(), generation + 1)]
+            vec![(move_id, "completed".into(), generation + new_claims)]
         );
         for (db, alias, state) in [
             (&fixture.primary, PRIMARY_ALIAS, "closed"),

@@ -118,26 +118,12 @@ async fn move_capture_coalesces_repeated_shard_mutations(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let existing = select_dirty_shard_keys_for_table(
-        &pool,
-        move_id,
-        "run_chunks",
-        &["run_id", "run_shard", "id"],
-        true,
-        10,
-    )
-    .await
-    .unwrap();
-    let deleted = select_dirty_shard_keys_for_table(
-        &pool,
-        move_id,
-        "run_chunks",
-        &["run_id", "run_shard", "id"],
-        false,
-        10,
-    )
-    .await
-    .unwrap();
+    let existing = select_dirty_shard_keys_for_table(&pool, move_id, "run_chunks", false, 10)
+        .await
+        .unwrap();
+    let deleted = select_dirty_shard_keys_for_table(&pool, move_id, "run_chunks", true, 10)
+        .await
+        .unwrap();
     assert!(existing.is_empty());
     assert_eq!(deleted.len(), 1);
     sqlx::query("DELETE FROM shard_move_captures WHERE move_id = $1")
@@ -621,7 +607,7 @@ async fn move_reclaim_increments_control_generation(pool: PgPool) {
         .unwrap()
         .unwrap();
     let first_token = Uuid::now_v7();
-    let first = claim_shard_move_operation(&pool, &placement, "target", first_token)
+    let first = claim_shard_move_operation(&pool, &placement, "target", first_token, None)
         .await
         .unwrap();
     sqlx::query(
@@ -632,7 +618,7 @@ async fn move_reclaim_increments_control_generation(pool: PgPool) {
     .await
     .unwrap();
     let second_token = Uuid::now_v7();
-    let second = claim_shard_move_operation(&pool, &placement, "target", second_token)
+    let second = claim_shard_move_operation(&pool, &placement, "target", second_token, None)
         .await
         .unwrap();
 
@@ -649,7 +635,7 @@ async fn target_takeover_waits_for_in_flight_mover_write(pool: PgPool) {
     let move_id = Uuid::now_v7();
     let first = target_fence(run_id, move_id, 1, Uuid::now_v7());
     let second = target_fence(run_id, move_id, 2, Uuid::now_v7());
-    install_target_move_write_fence(&pool, &first)
+    install_target_move_write_fence(&pool, &first, false)
         .await
         .unwrap();
 
@@ -664,14 +650,14 @@ async fn target_takeover_waits_for_in_flight_mover_write(pool: PgPool) {
     let takeover_pool = pool.clone();
     let takeover_fence = second.clone();
     let takeover = tokio::spawn(async move {
-        install_target_move_write_fence(&takeover_pool, &takeover_fence).await
+        install_target_move_write_fence(&takeover_pool, &takeover_fence, false).await
     });
     wait_for_waiting_advisory_lock(&pool, "target move takeover").await;
     first_write.commit().await.unwrap();
     takeover.await.unwrap().unwrap();
 
     assert!(
-        install_target_move_write_fence(&pool, &first)
+        install_target_move_write_fence(&pool, &first, false)
             .await
             .is_err()
     );
@@ -719,7 +705,7 @@ async fn stale_target_fence_cannot_advance_valid_control_checkpoint(pool: PgPool
     .unwrap();
     let current = target_fence(run_id, move_id, 2, control_token);
     let stale = target_fence(run_id, move_id, 1, Uuid::now_v7());
-    install_target_move_write_fence(&pool, &current)
+    install_target_move_write_fence(&pool, &current, false)
         .await
         .unwrap();
     let row = sqlx::query_scalar::<_, Value>("SELECT to_jsonb(runs) FROM runs WHERE id = $1")
@@ -772,7 +758,7 @@ async fn stale_target_fence_cannot_advance_valid_control_checkpoint(pool: PgPool
 async fn target_activation_clears_mover_authority(pool: PgPool) {
     let run_id = Uuid::now_v7();
     let fence = target_fence(run_id, Uuid::now_v7(), 1, Uuid::now_v7());
-    install_target_move_write_fence(&pool, &fence)
+    install_target_move_write_fence(&pool, &fence, false)
         .await
         .unwrap();
     transition_local_admission_with_fence(
@@ -806,6 +792,35 @@ async fn target_activation_clears_mover_authority(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
+async fn target_move_fence_cannot_replace_an_open_source_admission(pool: PgPool) {
+    let run_id = Uuid::now_v7();
+    let old = open_move_destination(run_id, 3, "primary", 1);
+    transition_local_admission_with_fence(&pool, old, &[])
+        .await
+        .unwrap();
+
+    let attempted = target_fence(run_id, Uuid::now_v7(), 1, Uuid::now_v7());
+    assert!(
+        install_target_move_write_fence(&pool, &attempted, false)
+            .await
+            .is_err()
+    );
+
+    let current = select_local_shard_admission(&pool, run_id, 3)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.database_alias, "primary");
+    assert_eq!(current.write_epoch, 1);
+    assert_eq!(
+        current.parsed_state().unwrap(),
+        LocalShardAdmissionState::Open
+    );
+    assert_eq!(current.move_fence(), None);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
 async fn stale_move_claim_cannot_overwrite_newer_target_data(pool: PgPool) {
     sqlx::query("CREATE TABLE stale_move_target (run_id UUID, run_shard SMALLINT, id UUID, value INTEGER, PRIMARY KEY (run_id, run_shard, id))")
         .execute(&pool)
@@ -817,7 +832,7 @@ async fn stale_move_claim_cannot_overwrite_newer_target_data(pool: PgPool) {
     let move_id = Uuid::now_v7();
     let current_fence = target_fence(run_id, move_id, 2, Uuid::now_v7());
     let stale_fence = target_fence(run_id, move_id, 1, Uuid::now_v7());
-    install_target_move_write_fence(&pool, &current_fence)
+    install_target_move_write_fence(&pool, &current_fence, false)
         .await
         .unwrap();
     upsert_target_move_rows(
@@ -859,7 +874,7 @@ async fn wrong_token_for_current_generation_cannot_write_target(pool: PgPool) {
     let move_id = Uuid::now_v7();
     let current = target_fence(run_id, move_id, 4, Uuid::now_v7());
     let wrong_token = target_fence(run_id, move_id, 4, Uuid::now_v7());
-    install_target_move_write_fence(&pool, &current)
+    install_target_move_write_fence(&pool, &current, false)
         .await
         .unwrap();
 

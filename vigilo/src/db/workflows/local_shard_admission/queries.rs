@@ -160,6 +160,8 @@ where
 }
 
 /// Installs monotonically newer target-side mover authority.
+/// An existing admission must be unable to admit workers. Same-epoch retries
+/// must match the prepared alias and move identity.
 pub(crate) async fn install_local_shard_move_fence<'e, E>(
     executor: E,
     draft: LocalShardAdmissionDraft,
@@ -193,10 +195,12 @@ where
             move_claim_generation = EXCLUDED.move_claim_generation,
             move_claim_token = EXCLUDED.move_claim_token,
             updated_at = now()
-        WHERE local_shard_admissions.write_epoch < EXCLUDED.write_epoch
+        WHERE (local_shard_admissions.write_epoch < EXCLUDED.write_epoch
+             AND local_shard_admissions.state IN ('closed', 'prepared'))
            OR (
                 local_shard_admissions.write_epoch = EXCLUDED.write_epoch
                 AND local_shard_admissions.state = 'prepared'
+                AND local_shard_admissions.database_alias = EXCLUDED.database_alias
                 AND local_shard_admissions.move_id = EXCLUDED.move_id
                 AND (
                     local_shard_admissions.move_claim_generation < EXCLUDED.move_claim_generation

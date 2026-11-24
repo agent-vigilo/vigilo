@@ -2,6 +2,20 @@
 
 use super::super::*;
 
+pub(in crate::db::workflows::shard_admin) async fn select_move_by_id(
+    db: &PgPool,
+    id: Uuid,
+) -> anyhow::Result<Option<ShardMoveOperation>> {
+    Ok(sqlx::query_as(
+        "SELECT id, run_id, run_shard, source_database_alias, target_database_alias,
+             starting_route_version, status, phase, target_reset_at, claim_generation, claim_token
+         FROM shard_move_operations WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?)
+}
+
 pub(in crate::db::workflows::shard_admin) async fn select_latest_move_to_target(
     db: &PgPool,
     run_id: Uuid,
@@ -70,8 +84,8 @@ pub(in crate::db::workflows::shard_admin) async fn delete_move_capture(
     Ok(())
 }
 
-pub(in crate::db::workflows::shard_admin) async fn update_claimed_move_phase(
-    db: &PgPool,
+pub(in crate::db::workflows::shard_admin) async fn update_claimed_move_phase<'e>(
+    db: impl Executor<'e, Database = Postgres>,
     move_id: Uuid,
     claim_token: Uuid,
     phase: &str,
@@ -145,14 +159,19 @@ pub(in crate::db::workflows::shard_admin) async fn mark_move_target_reset(
     .rows_affected())
 }
 
-pub(in crate::db::workflows::shard_admin) async fn count_dirty_move_keys(
-    db: &PgPool,
+pub(in crate::db::workflows::shard_admin) async fn count_dirty_move_keys<'e>(
+    db: impl Executor<'e, Database = Postgres>,
     move_id: Uuid,
+    limit: Option<i64>,
+    include_deletes: bool,
 ) -> anyhow::Result<i64> {
-    sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM shard_move_dirty_keys WHERE move_id = $1::uuid",
-    )
+    sqlx::query_scalar(if include_deletes {
+        "SELECT count(*) FROM (SELECT 1 FROM shard_move_dirty_keys WHERE move_id=$1 LIMIT $2) remaining"
+    } else {
+        "SELECT count(*) FROM (SELECT 1 FROM shard_move_dirty_keys WHERE move_id=$1 AND NOT is_deleted LIMIT $2) remaining"
+    })
     .bind(move_id)
+    .bind(limit)
     .fetch_one(db)
     .await
     .map_err(Into::into)
@@ -163,9 +182,15 @@ pub(in crate::db::workflows::shard_admin) async fn claim_shard_move_operation(
     current: &ShardPlacement,
     target_database_alias: &str,
     claim_token: Uuid,
+    identity: Option<ShardMoveIdentity>,
 ) -> anyhow::Result<ShardMoveOperation> {
     let mut tx = control_db.begin().await?;
     validate_new_ownership_target(&mut tx, target_database_alias).await?;
+
+    let route_version = lock_move_route_version(&mut tx, current.run_id, current.run_shard).await?;
+    if route_version != Some(current.route_version) {
+        return Err(PlacementConflict("shard route changed before the move claim").into());
+    }
 
     let existing = sqlx::query_as::<_, ShardMoveOperation>(
         r#"
@@ -186,6 +211,16 @@ pub(in crate::db::workflows::shard_admin) async fn claim_shard_move_operation(
     .await?;
 
     let operation = if let Some(operation) = existing {
+        if identity.is_some_and(|identity| {
+            !operation.matches_request(
+                current.run_id,
+                current.run_shard,
+                target_database_alias,
+                identity,
+            )
+        }) {
+            return Err(PlacementConflict("another operation owns this shard move").into());
+        }
         if operation.source_database_alias != current.database_alias
             || operation.target_database_alias != target_database_alias
         {
@@ -199,13 +234,20 @@ pub(in crate::db::workflows::shard_admin) async fn claim_shard_move_operation(
         }
         operation
     } else {
+        if identity.is_some_and(|identity| {
+            identity.starting_route_version != current.route_version
+                || current.status != SHARD_PLACEMENT_STATUS_ACTIVE
+        }) {
+            return Err(PlacementConflict("the initial shard route is stale").into());
+        }
         sqlx::query_as::<_, ShardMoveOperation>(
             r#"
             INSERT INTO shard_move_operations (
                 run_id, run_shard, source_database_alias,
-                target_database_alias, starting_route_version
+                target_database_alias, starting_route_version, id
             )
-            VALUES ($1::uuid, $2, $3, $4, $5)
+            VALUES ($1::uuid, $2, $3, $4, $5, COALESCE($6, gen_random_uuid()))
+            ON CONFLICT (id) DO NOTHING
             RETURNING id, run_id, run_shard, source_database_alias,
                       target_database_alias, starting_route_version, status, phase,
                       target_reset_at, copied_row_count, copied_byte_count,
@@ -217,11 +259,39 @@ pub(in crate::db::workflows::shard_admin) async fn claim_shard_move_operation(
         .bind(&current.database_alias)
         .bind(target_database_alias)
         .bind(current.route_version)
-        .fetch_one(tx.as_mut())
+        .bind(identity.map(|identity| identity.operation_id))
+        .fetch_optional(tx.as_mut())
         .await?
+        .ok_or(PlacementConflict(
+            "move ID already belongs to another request",
+        ))?
     };
 
-    let claimed = sqlx::query_as::<_, ShardMoveOperation>(
+    let claimed = claim_move_with(&mut tx, operation.id, claim_token).await?;
+    tx.commit().await?;
+    Ok(claimed)
+}
+
+pub(in crate::db::workflows::shard_admin) async fn lock_move_route_version(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    run_shard: i16,
+) -> anyhow::Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT route_version FROM shard_placements WHERE run_id=$1 AND run_shard=$2 FOR UPDATE",
+    )
+    .bind(run_id)
+    .bind(run_shard)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+pub(in crate::db::workflows::shard_admin) async fn claim_move_with(
+    tx: &mut Transaction<'_, Postgres>,
+    operation_id: Uuid,
+    claim_token: Uuid,
+) -> anyhow::Result<ShardMoveOperation> {
+    Ok(sqlx::query_as::<_, ShardMoveOperation>(
         r#"
         UPDATE shard_move_operations
         SET claim_token = $2::uuid,
@@ -241,20 +311,46 @@ pub(in crate::db::workflows::shard_admin) async fn claim_shard_move_operation(
                   claim_generation, claim_token
         "#,
     )
-    .bind(operation.id)
+    .bind(operation_id)
     .bind(claim_token)
     .bind(SHARD_MOVE_CLAIM_SECONDS)
     .fetch_optional(tx.as_mut())
     .await?
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "run {} shard {} move is currently claimed by another worker",
-            current.run_id,
-            current.run_shard
-        )
-    })?;
-    tx.commit().await?;
-    Ok(claimed)
+    .ok_or(PlacementConflict(
+        "shard move is currently claimed or inactive",
+    ))?)
+}
+
+pub(in crate::db::workflows::shard_admin) async fn destination_control_cursor(
+    db: &PgPool,
+    operation_id: Uuid,
+) -> anyhow::Result<Option<(i64, Uuid)>> {
+    sqlx::query_as(
+        "SELECT destination_control_revision,destination_control_after FROM shard_move_operations
+         WHERE id=$1 AND destination_control_revision IS NOT NULL",
+    )
+    .bind(operation_id)
+    .fetch_optional(db)
+    .await
+    .map_err(Into::into)
+}
+
+pub(in crate::db::workflows::shard_admin) async fn save_destination_control_cursor(
+    db: &PgPool,
+    fence: &TargetMoveWriteFence,
+    revision: i64,
+    after: Uuid,
+) -> anyhow::Result<()> {
+    let changed = sqlx::query(
+        "UPDATE shard_move_operations SET destination_control_revision=$3,destination_control_after=$4
+         WHERE id=$1 AND claim_token=$2 AND status='active'",
+    ).bind(fence.move_fence.move_id).bind(fence.move_fence.claim_token).bind(revision).bind(after)
+        .execute(db).await?.rows_affected();
+    anyhow::ensure!(
+        changed == 1,
+        "move lost its claim before destination control acknowledgement"
+    );
+    Ok(())
 }
 
 pub(in crate::db::workflows::shard_admin) async fn renew_shard_move_claim(
@@ -400,7 +496,8 @@ pub(in crate::db::workflows::shard_admin) async fn select_move_source_page(
     run_shard: i16,
     start_after_key: Option<&str>,
 ) -> anyhow::Result<Vec<MoveSourceRow>> {
-    let key_expression = move_key_expression("source_row", move_table_key_columns(table)?);
+    let key_columns = move_table_key_columns(table)?;
+    let key_expression = move_key_expression("source_row", key_columns);
     let filter = match table {
         "dataset_versions" => {
             "EXISTS (
@@ -413,6 +510,22 @@ pub(in crate::db::workflows::shard_admin) async fn select_move_source_page(
         "runs" => "source_row.id = $1::uuid AND $2::smallint = $2",
         _ => "source_row.run_id = $1::uuid AND source_row.run_shard = $2",
     };
+    // The retained JSON checkpoint uses the same fixed prefix and canonical
+    // UUID suffix. Seek on the native primary key rather than sorting the JSON
+    // representation of every row in the shard on each page.
+    let suffix =
+        (!PREREQUISITE_TABLES.contains(&table) && key_columns.len() == 3).then(|| key_columns[2]);
+    let (seek, order) = match suffix {
+        Some(key) if start_after_key.is_some() => (
+            format!("source_row.{key} > ($3::jsonb->>2)::uuid"),
+            format!("ORDER BY source_row.{key}"),
+        ),
+        Some(key) => (
+            "$3::text IS NULL".into(),
+            format!("ORDER BY source_row.{key}"),
+        ),
+        None => ("$3::text IS NULL".into(), String::new()),
+    };
     let sql = format!(
         r#"
         SELECT
@@ -421,8 +534,8 @@ pub(in crate::db::workflows::shard_admin) async fn select_move_source_page(
             octet_length(to_jsonb(source_row)::text)::integer AS row_bytes
         FROM {table} source_row
         WHERE {filter}
-          AND ($3::text IS NULL OR {key_expression} > $3)
-        ORDER BY {key_expression}
+          AND {seek}
+        {order}
         LIMIT $4
         "#
     );
@@ -595,45 +708,34 @@ pub(in crate::db::workflows::shard_admin) async fn record_completed_move_page(
     Ok(())
 }
 
-pub(in crate::db::workflows::shard_admin) async fn select_dirty_shard_keys_for_table(
-    source_db: &PgPool,
+pub(in crate::db::workflows::shard_admin) async fn select_dirty_shard_keys_for_table<'e>(
+    source_db: impl Executor<'e, Database = Postgres>,
     move_id: Uuid,
     table: &str,
-    key_columns: &[&str],
-    current_row_exists: bool,
+    deleted: bool,
     limit: usize,
 ) -> anyhow::Result<Vec<DirtyShardKey>> {
-    let predicate = key_join_predicate("source_row", "journal", key_columns);
-    let existence = if current_row_exists {
-        "EXISTS"
-    } else {
-        "NOT EXISTS"
-    };
-    let sql = format!(
+    Ok(sqlx::query_as::<_, DirtyShardKey>(
         r#"
         SELECT journal.table_name, journal.row_key, journal.change_version
         FROM shard_move_dirty_keys journal
         WHERE journal.move_id = $1::uuid
           AND journal.table_name = $2
-          AND {existence} (
-              SELECT 1
-              FROM {table} source_row
-              WHERE {predicate}
-          )
+          AND journal.is_deleted = $3
         ORDER BY journal.last_changed_at, journal.row_key
-        LIMIT $3
-        "#
-    );
-    Ok(sqlx::query_as::<_, DirtyShardKey>(&sql)
-        .bind(move_id)
-        .bind(table)
-        .bind(limit as i64)
-        .fetch_all(source_db)
-        .await?)
+        LIMIT $4
+        "#,
+    )
+    .bind(move_id)
+    .bind(table)
+    .bind(deleted)
+    .bind(limit as i64)
+    .fetch_all(source_db)
+    .await?)
 }
 
-pub(in crate::db::workflows::shard_admin) async fn select_current_rows_for_dirty_keys(
-    source_db: &PgPool,
+pub(in crate::db::workflows::shard_admin) async fn select_current_rows_for_dirty_keys<'e>(
+    source_db: impl Executor<'e, Database = Postgres>,
     table: &str,
     key_columns: &[&str],
     keys: &[DirtyShardKey],
@@ -645,24 +747,30 @@ pub(in crate::db::workflows::shard_admin) async fn select_current_rows_for_dirty
     let sql = format!(
         r#"
         WITH dirty AS (
-            SELECT value AS row_key
-            FROM jsonb_array_elements($1::jsonb)
+            SELECT value AS row_key, position
+            FROM jsonb_array_elements($1::jsonb) WITH ORDINALITY AS keys(value, position)
         )
         SELECT dirty.row_key, to_jsonb(source_row)
         FROM dirty
         JOIN {table} source_row ON {predicate}
+        ORDER BY dirty.position
         "#
     );
-    let rows = sqlx::query_as::<_, (Value, Value)>(&sql)
+    let mut rows = sqlx::query_as::<_, (Value, Value)>(&sql)
         .bind(Json(Value::Array(
             keys.iter().map(|key| key.row_key.clone()).collect(),
         )))
-        .fetch_all(source_db)
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(key, row)| (key.to_string(), row))
-        .collect())
+        .fetch(source_db);
+    let mut result = BTreeMap::new();
+    let mut bytes = 0usize;
+    while let Some((key, row)) = rows.try_next().await? {
+        bytes = bytes.saturating_add(serde_json::to_vec(&row)?.len());
+        if !result.is_empty() && bytes > SHARD_MOVE_COPY_BATCH_BYTES {
+            break;
+        }
+        result.insert(key.to_string(), row);
+    }
+    Ok(result)
 }
 
 pub(in crate::db::workflows::shard_admin) async fn delete_target_rows_for_dirty_keys(
@@ -693,8 +801,8 @@ pub(in crate::db::workflows::shard_admin) async fn delete_target_rows_for_dirty_
     Ok(())
 }
 
-pub(in crate::db::workflows::shard_admin) async fn settle_replayed_dirty_keys(
-    source_db: &PgPool,
+pub(in crate::db::workflows::shard_admin) async fn settle_replayed_dirty_keys<'e>(
+    source_db: impl Executor<'e, Database = Postgres>,
     move_id: Uuid,
     keys: &[DirtyShardKey],
 ) -> anyhow::Result<()> {
@@ -792,6 +900,31 @@ pub(in crate::db::workflows::shard_admin) async fn reset_target_shard_rows(
             .await?;
     }
     Ok(())
+}
+
+/// Deletes a page from one prepared target table. Callers walk tables in
+/// reverse dependency order so parent deletes cannot cascade through uncapped
+/// target rows.
+pub(in crate::db::workflows::shard_admin) async fn reset_target_shard_page(
+    tx: &mut Transaction<'_, Postgres>,
+    table: ShardTable,
+    run_id: Uuid,
+    run_shard: i16,
+) -> anyhow::Result<u64> {
+    let predicate = table.key_columns.get(2).map(|key| format!(
+        "AND target.ctid=ANY(ARRAY(SELECT ctid FROM {table} WHERE run_id=$1 AND run_shard=$2 ORDER BY {key} LIMIT {SHARD_MOVE_COPY_BATCH_SIZE}))",
+        table=table.name,
+    )).unwrap_or_default();
+    let sql = format!(
+        "DELETE FROM {} target WHERE target.run_id=$1 AND target.run_shard=$2 {predicate}",
+        table.name
+    );
+    Ok(sqlx::query(&sql)
+        .bind(run_id)
+        .bind(run_shard)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected())
 }
 
 pub(in crate::db::workflows::shard_admin) async fn copy_json_rows(

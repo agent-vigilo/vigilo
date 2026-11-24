@@ -21,6 +21,16 @@ use sqlx::{
     postgres::PgPoolOptions,
 };
 use uuid::Uuid;
+use vigilo::operations::{
+    Client,
+    Config,
+    Error,
+    placement::{
+        MoveRunShardRequest,
+        PlacementClient,
+        RunShardMoveProgress,
+    },
+};
 
 const PRIMARY_DATABASE_URL_ENV: &str = "DATABASE_URL";
 const SHARD_DATABASE_URL_ENV: &str = "VIGILO_TEST_SHARD_001_DATABASE_URL";
@@ -477,6 +487,140 @@ async fn shard_move_replays_cross_database_updates_and_deletes() -> anyhow::Resu
         (SHARD_ALIAS.to_string(), 2, "open".to_string(), None)
     );
     assert_eq!(active_move_operation_count(&primary, run_id, 0).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn library_shard_move_budgets_drain_replay_and_destination_repair() -> anyhow::Result<()> {
+    let Some(config) = IntegrationConfig::from_env() else {
+        return Ok(());
+    };
+    let config = config.isolated().await?;
+    let primary = connect(&config.primary_url).await?;
+    let shard = connect(&config.shard_url).await?;
+    migrate(&primary).await?;
+    migrate(&shard).await?;
+    seed_evaluator(&primary).await?;
+    configure_shard_placement(&primary).await?;
+    let run = create_run(&config, PRIMARY_ALIAS, 1).await?;
+    let original_chunk: Uuid = sqlx::query_scalar("SELECT id FROM run_chunks WHERE run_id=$1")
+        .bind(run)
+        .fetch_one(&primary)
+        .await?;
+    insert_extra_run_chunk(&primary, run, 0).await?;
+    lease_run_shard_chunk(&primary, run, 0).await?;
+
+    let mut control = Config::new(config.primary_url.clone());
+    control.max_connections = 1;
+    let control = Client::new(control)?;
+    let operator = PlacementClient::new(
+        control.clone(),
+        [(SHARD_DATABASE_URL_ENV.into(), config.shard_url.clone())].into(),
+    )?;
+    let version = operator.list_run_shards(run).await?[0].route_version;
+    let mut request = MoveRunShardRequest {
+        operation_id: Uuid::now_v7(),
+        run_id: run,
+        run_shard: 0,
+        expected_route_version: version + 1,
+        target_database_alias: SHARD_ALIAS.into(),
+        max_batches: 1,
+    };
+    assert!(matches!(
+        operator.move_run_shard(&request).await,
+        Err(Error::Conflict(_))
+    ));
+    assert_eq!(active_move_operation_count(&primary, run, 0).await?, 0);
+    request.expected_route_version = version;
+    let first = operator.move_run_shard(&request).await?;
+    assert_eq!(
+        (first.operation_id, first.progress, first.batches_processed),
+        (request.operation_id, RunShardMoveProgress::Copying, 1)
+    );
+    let competitor = MoveRunShardRequest {
+        operation_id: Uuid::now_v7(),
+        target_database_alias: SHARD_ALIAS.into(),
+        ..request
+    };
+    assert!(matches!(
+        operator.move_run_shard(&competitor).await,
+        Err(Error::Conflict(_))
+    ));
+    let mut drained = false;
+    for _ in 0..12 {
+        let report = operator.move_run_shard(&request).await?;
+        assert_eq!(report.operation_id, request.operation_id);
+        assert!(report.batches_processed <= 1);
+        if report.progress == RunShardMoveProgress::Draining {
+            drained = true;
+            break;
+        }
+        assert_eq!(report.progress, RunShardMoveProgress::Copying);
+    }
+    assert!(drained);
+    assert_eq!(run_shard_chunk_count(&shard, run, 0).await?, 2);
+    assert_eq!(local_admission_state(&shard, run, 0).await?.2, "prepared");
+    assert_eq!(local_admission_state(&primary, run, 0).await?.2, "draining");
+
+    delete_extra_run_chunk(&primary, run, 0).await?;
+    set_run_shard_chunk_status(&primary, run, 0, "pending").await?;
+    sqlx::query("UPDATE runs SET execution_control='paused',control_revision=1 WHERE id=$1")
+        .bind(run)
+        .execute(&primary)
+        .await?;
+    let stop = operator.move_run_shard(&request).await?;
+    assert_eq!(
+        (stop.progress, stop.batches_processed),
+        (RunShardMoveProgress::CuttingOver, 1)
+    );
+    assert_eq!(local_admission_state(&shard, run, 0).await?.2, "prepared");
+    let mut done = false;
+    for _ in 0..8 {
+        let report = operator.move_run_shard(&request).await?;
+        assert!(report.batches_processed <= 1);
+        if report.progress == RunShardMoveProgress::Completed {
+            done = true;
+            break;
+        }
+        assert_eq!(report.progress, RunShardMoveProgress::CuttingOver);
+    }
+    assert!(done);
+    let accepted: (Uuid, String, i64) = sqlx::query_as(
+        "SELECT id,execution_control::text,control_revision FROM run_chunks WHERE run_id=$1",
+    )
+    .bind(run)
+    .fetch_one(&shard)
+    .await?;
+    assert_eq!(accepted, (original_chunk, "paused".into(), 1));
+    assert_eq!(run_shard_chunk_count(&shard, run, 0).await?, 1);
+    assert_eq!(local_admission_state(&primary, run, 0).await?.2, "closed");
+    assert_eq!(local_admission_state(&shard, run, 0).await?.2, "open");
+    assert_eq!(dispatch_cursor_count(&primary, run).await?, 1);
+
+    let route = operator.list_run_shards(run).await?.remove(0);
+    let back = MoveRunShardRequest {
+        operation_id: Uuid::now_v7(),
+        run_id: run,
+        run_shard: 0,
+        expected_route_version: route.route_version,
+        target_database_alias: PRIMARY_ALIAS.into(),
+        max_batches: 16,
+    };
+    assert_eq!(
+        operator.move_run_shard(&back).await?.progress,
+        RunShardMoveProgress::Completed
+    );
+    let from_control_only = PlacementClient::new(control, Default::default())?;
+    let receipt = from_control_only.move_run_shard(&request).await?;
+    assert_eq!(
+        (receipt.progress, receipt.batches_processed),
+        (RunShardMoveProgress::Completed, 0)
+    );
+    assert_eq!(
+        shard_route_state(&primary, run, 0).await?,
+        (PRIMARY_ALIAS.into(), "active".into(), 3)
+    );
+    assert_eq!(active_move_operation_count(&primary, run, 0).await?, 0);
     Ok(())
 }
 

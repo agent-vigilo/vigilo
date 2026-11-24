@@ -75,6 +75,16 @@ pub fn check(client: &Client, restricted: &UserClient, caller: UserContext) {
         },
     ));
     operation::<Vec<placement::RunShardPlacement>>(placement_operator.list_run_shards(id));
+    operation::<placement::MoveRunShardOutcome>(placement_operator.move_run_shard(
+        &placement::MoveRunShardRequest {
+            operation_id: id,
+            run_id: id,
+            run_shard: 0,
+            expected_route_version: 1,
+            target_database_alias: "shard_001".into(),
+            max_batches: 1,
+        },
+    ));
     operation::<setup::MigrationOutcome>(setup::apply_migrations(
         client,
         &setup::DatabaseIdentity {

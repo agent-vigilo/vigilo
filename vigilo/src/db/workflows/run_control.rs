@@ -195,39 +195,17 @@ pub(crate) async fn deliver(
 
 async fn apply(pool: &PgPool, delivery: &Delivery) -> anyhow::Result<bool> {
     let mut tx = pool.begin().await?;
-    // The fixed lock statement follows scope installation in the same submission.
-    // A non-key lock serializes control changes while allowing finishing results
-    // to check their parent FK before releasing the chunk that delivery needs.
-    // Only canonical UUIDs enter this SQL; arbitrary fields remain bound below.
-    let sql = format!(
-        "{}SELECT control_revision,execution_control FROM runs WHERE tenant_id='{}'::uuid AND id='{}'::uuid FOR NO KEY UPDATE",
-        crate::db::scope::system_settings(delivery.tenant_id, delivery.run_id),
+    let Some((revision, state)) = apply_destination_root(
+        &mut tx,
         delivery.tenant_id,
         delivery.run_id,
-    );
-    let row = sqlx::Executor::fetch_optional(&mut *tx, sql.as_str()).await?;
-    let local = row
-        .as_ref()
-        .map(<(i64, ExecutionControl) as sqlx::FromRow<_>>::from_row)
-        .transpose()?;
-    // No local root means no admitted work. Canonical control fences admission;
-    // no existing queue work can claim a nonexistent chunk.
-    let Some((revision, state)) = local else {
+        delivery.revision,
+        delivery.execution_control,
+    )
+    .await?
+    else {
         tx.commit().await?;
         return Ok(true);
-    };
-    ensure!(
-        revision != delivery.revision || state == delivery.execution_control,
-        "control revision has conflicting contents"
-    );
-    if revision <= delivery.revision {
-        sqlx::query("UPDATE runs SET execution_control=$3,control_revision=$4,control_reason=CASE WHEN $3='revoked' THEN 'run execution permission revoked' ELSE NULL END WHERE tenant_id=$1 AND id=$2 AND control_revision<$4")
-            .bind(delivery.tenant_id).bind(delivery.run_id).bind(delivery.execution_control).bind(delivery.revision).execute(&mut *tx).await?;
-    }
-    let (revision, state) = if revision > delivery.revision {
-        (revision, state)
-    } else {
-        (delivery.revision, delivery.execution_control)
     };
     // A move can copy rows after an earlier delivery. Reconcile those rows to
     // the newest local root; a stale retry must never repair them backwards.
@@ -237,6 +215,49 @@ async fn apply(pool: &PgPool, delivery: &Delivery) -> anyhow::Result<bool> {
         .bind(delivery.tenant_id).bind(delivery.run_id).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     Ok(quiet)
+}
+
+/// Applies the shared local run revision fence before repairing chunk state.
+async fn apply_destination_root(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    run_id: Uuid,
+    revision: i64,
+    state: ExecutionControl,
+) -> anyhow::Result<Option<(i64, ExecutionControl)>> {
+    // The fixed lock statement follows scope installation in the same submission.
+    // A non-key lock serializes control changes while allowing finishing results
+    // to check their parent FK before releasing the chunk that delivery needs.
+    // Only canonical UUIDs enter this SQL; arbitrary fields remain bound below.
+    let sql = format!(
+        "{}SELECT control_revision,execution_control FROM runs WHERE tenant_id='{}'::uuid AND id='{}'::uuid FOR NO KEY UPDATE",
+        crate::db::scope::system_settings(tenant_id, run_id),
+        tenant_id,
+        run_id,
+    );
+    let row = sqlx::Executor::fetch_optional(&mut **tx, sql.as_str()).await?;
+    let local = row
+        .as_ref()
+        .map(<(i64, ExecutionControl) as sqlx::FromRow<_>>::from_row)
+        .transpose()?;
+    // No local root means no admitted work. Canonical control fences admission;
+    // no existing queue work can claim a nonexistent chunk.
+    let Some((local_revision, local_state)) = local else {
+        return Ok(None);
+    };
+    ensure!(
+        local_revision != revision || local_state == state,
+        "control revision has conflicting contents"
+    );
+    if local_revision <= revision {
+        sqlx::query("UPDATE runs SET execution_control=$3,control_revision=$4,control_reason=CASE WHEN $3='revoked' THEN 'run execution permission revoked' ELSE NULL END WHERE tenant_id=$1 AND id=$2 AND control_revision<$4")
+            .bind(tenant_id).bind(run_id).bind(state).bind(revision).execute(&mut **tx).await?;
+    }
+    Ok(Some(if local_revision > revision {
+        (local_revision, local_state)
+    } else {
+        (revision, state)
+    }))
 }
 
 /// Retries terminal cleanup only after every recorded destination is quiescent.
@@ -302,11 +323,7 @@ pub(crate) async fn synchronize_destination(
     target: &PgPool,
     run_id: Uuid,
 ) -> anyhow::Result<()> {
-    let (tenant_id, revision, execution_control): (Uuid, i64, ExecutionControl) =
-        sqlx::query_as("SELECT tenant_id,control_revision,execution_control FROM runs WHERE id=$1")
-            .bind(run_id)
-            .fetch_one(control)
-            .await?;
+    let (tenant_id, revision, execution_control) = destination_revision(control, run_id).await?;
     if revision > 0 {
         apply(
             target,
@@ -323,6 +340,57 @@ pub(crate) async fn synchronize_destination(
         .await?;
     }
     Ok(())
+}
+
+pub(crate) async fn destination_revision(
+    control: &PgPool,
+    run_id: Uuid,
+) -> anyhow::Result<(Uuid, i64, ExecutionControl)> {
+    Ok(
+        sqlx::query_as("SELECT tenant_id,control_revision,execution_control FROM runs WHERE id=$1")
+            .bind(run_id)
+            .fetch_one(control)
+            .await?,
+    )
+}
+
+/// Reconciles one prepared shard page. The mover holds the target write fence.
+/// A newer local revision invalidates the cursor and restarts the bounded scan.
+pub(crate) async fn synchronize_destination_shard_page(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: Uuid,
+    run_shard: i16,
+    (tenant, revision, state): (Uuid, i64, ExecutionControl),
+    cursor: Option<(i64, Uuid)>,
+    page_size: i64,
+) -> anyhow::Result<(i64, i64, Option<Uuid>)> {
+    let (revision, state) = apply_destination_root(tx, tenant, run_id, revision, state)
+        .await?
+        .context("prepared shard has no local run root")?;
+    let after = cursor
+        .filter(|cursor| cursor.0 == revision)
+        .map(|cursor| cursor.1);
+    let (examined, last_id) = sqlx::query_as(
+        "WITH page AS MATERIALIZED (
+          SELECT id, ctid FROM run_chunks WHERE run_id=$2 AND run_shard=$3
+            AND ($7::uuid IS NULL OR id>$7) ORDER BY id LIMIT $6
+         ), repaired AS (
+           UPDATE run_chunks SET execution_control=$4,control_revision=$5
+           WHERE tenant_id=$1 AND run_id=$2 AND run_shard=$3 AND control_revision<$5
+             AND ctid=ANY(ARRAY(SELECT ctid FROM page))
+         ) SELECT count(*), (SELECT id FROM page ORDER BY id DESC LIMIT 1) FROM page",
+    )
+    .bind(tenant)
+    .bind(run_id)
+    .bind(run_shard)
+    .bind(state)
+    .bind(revision)
+    .bind(page_size)
+    .bind(after)
+    .persistent(false)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok((revision, examined, last_id))
 }
 
 /// Adds newly published placements to the same durable revision while holding

@@ -255,6 +255,46 @@ pub(crate) struct ShardMoveOptions {
     pub(crate) force: bool,
 }
 
+/// Client-chosen identity and initial routing compare-and-swap fence.
+#[derive(Clone, Copy)]
+pub(crate) struct ShardMoveIdentity {
+    pub(crate) operation_id: Uuid,
+    pub(crate) starting_route_version: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ShardMoveProgress {
+    #[error("target reset requires another move call")]
+    Resetting,
+    #[error("backfill requires another move call")]
+    Copying,
+    #[error("online replay requires another move call")]
+    CatchingUp,
+    #[error("admitted source work is still draining")]
+    Draining,
+    #[error("cutover requires another move call")]
+    CuttingOver,
+    #[error("move complete")]
+    Completed,
+}
+
+struct MoveBudget {
+    remaining: usize,
+}
+
+impl MoveBudget {
+    fn record_batch(&mut self) {
+        self.remaining -= 1;
+    }
+}
+
+struct ShardMoveStep<'a> {
+    identity: ShardMoveIdentity,
+    existing: Option<ShardMoveOperation>,
+    budget: MoveBudget,
+    bindings: &'a BTreeMap<String, database::OperatorDatabaseBinding>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShardRebalanceCandidate {
     run_id: Uuid,
@@ -323,6 +363,7 @@ struct ShardMoveOperation {
     run_shard: i16,
     source_database_alias: String,
     target_database_alias: String,
+    starting_route_version: i64,
     status: String,
     phase: String,
     target_reset_at: Option<DateTime<Utc>>,
@@ -1615,6 +1656,109 @@ pub(crate) async fn move_shard_placement(
     target_database_alias: &str,
     options: ShardMoveOptions,
 ) -> anyhow::Result<ShardMoveOutcome> {
+    move_shard_placement_inner(
+        database_router,
+        run_id,
+        run_shard,
+        target_database_alias,
+        options,
+        None,
+    )
+    .await
+}
+
+/// Advances a caller-identified move and returns after at most the requested
+/// number of data batches. A completed ID is an idempotent receipt.
+pub(crate) async fn advance_shard_move(
+    database_router: &database::DatabaseRouter,
+    bindings: &BTreeMap<String, database::OperatorDatabaseBinding>,
+    run_id: Uuid,
+    run_shard: i16,
+    target_database_alias: &str,
+    identity: ShardMoveIdentity,
+    max_batches: u16,
+) -> anyhow::Result<(ShardMoveProgress, u16)> {
+    let control = database_router.control().await?;
+    let existing = select_move_by_id(control, identity.operation_id).await?;
+    if let Some(operation) = &existing {
+        if !operation.matches_request(run_id, run_shard, target_database_alias, identity) {
+            return Err(PlacementConflict("move ID already belongs to another request").into());
+        }
+        match operation.status.as_str() {
+            "completed" => return Ok((ShardMoveProgress::Completed, 0)),
+            "active" => {}
+            _ => return Err(PlacementConflict("move operation is no longer active").into()),
+        }
+    }
+    let mut step = ShardMoveStep {
+        identity,
+        existing,
+        budget: MoveBudget {
+            remaining: usize::from(max_batches),
+        },
+        bindings,
+    };
+    let outcome = move_shard_placement_inner(
+        database_router,
+        run_id,
+        run_shard,
+        target_database_alias,
+        ShardMoveOptions {
+            dry_run: false,
+            verify_only: false,
+            force: false,
+        },
+        Some(&mut step),
+    )
+    .await;
+    let progress = match outcome {
+        Ok(_) => ShardMoveProgress::Completed,
+        Err(error) => error.downcast::<ShardMoveProgress>()?,
+    };
+    Ok((progress, max_batches - step.budget.remaining as u16))
+}
+
+impl ShardMoveOperation {
+    fn matches_request(
+        &self,
+        run_id: Uuid,
+        run_shard: i16,
+        target: &str,
+        identity: ShardMoveIdentity,
+    ) -> bool {
+        self.id == identity.operation_id
+            && self.run_id == run_id
+            && self.run_shard == run_shard
+            && self.target_database_alias == target
+            && self.starting_route_version == identity.starting_route_version
+    }
+}
+
+async fn move_execution_database(
+    router: &database::DatabaseRouter,
+    step: Option<&ShardMoveStep<'_>>,
+    alias: &str,
+    accepts_new_ownership: bool,
+) -> anyhow::Result<PgPool> {
+    if let Some(step) = step {
+        router
+            .operator_execution_database(alias, accepts_new_ownership, step.bindings)
+            .await
+    } else if accepts_new_ownership {
+        router.execution_target_database(alias).await
+    } else {
+        router.execution_database(alias).await
+    }
+}
+
+async fn move_shard_placement_inner(
+    database_router: &database::DatabaseRouter,
+    run_id: Uuid,
+    run_shard: i16,
+    target_database_alias: &str,
+    options: ShardMoveOptions,
+    mut step: Option<&mut ShardMoveStep<'_>>,
+) -> anyhow::Result<ShardMoveOutcome> {
     validate_run_shard(run_shard)?;
     validate_non_empty(target_database_alias, "target database alias")?;
 
@@ -1634,12 +1778,54 @@ pub(crate) async fn move_shard_placement(
             )
         })?;
 
+    if let Some(step) = step.as_deref() {
+        if step.existing.is_none()
+            && (current.status != SHARD_PLACEMENT_STATUS_ACTIVE
+                || current.route_version != step.identity.starting_route_version
+                || current.database_alias == target_database_alias)
+        {
+            return Err(PlacementConflict(
+                "the initial shard route is stale or already at the target",
+            )
+            .into());
+        }
+        if let Some(operation) = &step.existing {
+            let route_step = match current.status.as_str() {
+                SHARD_PLACEMENT_STATUS_ACTIVE
+                    if current.database_alias == operation.target_database_alias =>
+                {
+                    4
+                }
+                SHARD_PLACEMENT_STATUS_ACTIVE => 0,
+                SHARD_PLACEMENT_STATUS_COPYING => 1,
+                SHARD_PLACEMENT_STATUS_DRAINING => 2,
+                SHARD_PLACEMENT_STATUS_MOVING => 3,
+                _ => {
+                    return Err(
+                        PlacementConflict("shard route is no longer part of the move").into(),
+                    );
+                }
+            };
+            if operation.starting_route_version.checked_add(route_step)
+                != Some(current.route_version)
+                || (route_step != 4 && current.database_alias != operation.source_database_alias)
+            {
+                return Err(PlacementConflict("shard route is no longer part of the move").into());
+            }
+        }
+    }
+
     let completed_operation = if !options.dry_run
         && !options.verify_only
         && current.database_alias == target_database_alias
         && current.status == SHARD_PLACEMENT_STATUS_ACTIVE
     {
-        select_latest_move_to_target(control_db, run_id, run_shard, target_database_alias).await?
+        if let Some(step) = step.as_deref() {
+            step.existing.clone()
+        } else {
+            select_latest_move_to_target(control_db, run_id, run_shard, target_database_alias)
+                .await?
+        }
     } else {
         None
     };
@@ -1663,17 +1849,23 @@ pub(crate) async fn move_shard_placement(
         );
     }
 
-    let source_db = database_router
-        .execution_database(&current.database_alias)
-        .await?;
-    let target_db = if options.verify_only || retrying_completed_move {
-        database_router
-            .execution_database(target_database_alias)
-            .await?
+    let source_db = move_execution_database(
+        database_router,
+        step.as_deref(),
+        &current.database_alias,
+        false,
+    )
+    .await?;
+    let target_db = if retrying_completed_move {
+        source_db.clone()
     } else {
-        database_router
-            .execution_target_database(target_database_alias)
-            .await?
+        move_execution_database(
+            database_router,
+            step.as_deref(),
+            target_database_alias,
+            !options.verify_only,
+        )
+        .await?
     };
     let copied_rows_by_table = std::collections::BTreeMap::<&'static str, u64>::new();
 
@@ -1705,9 +1897,36 @@ pub(crate) async fn move_shard_placement(
 
     if retrying_completed_move {
         let operation = completed_operation.expect("completed move retry has an operation");
-        let old_source = database_router
-            .execution_database(&operation.source_database_alias)
+        if let Some(step) = step.as_deref_mut() {
+            resume_activated_shard_move(
+                control_db,
+                &target_db,
+                &current,
+                &operation,
+                &mut step.budget,
+            )
             .await?;
+            return Ok(ShardMoveOutcome {
+                run_id,
+                run_shard,
+                source_database_alias: operation.source_database_alias,
+                target_database_alias: target_database_alias.to_string(),
+                dry_run: false,
+                verify_only: false,
+                forced: false,
+                active_work_count: 0,
+                moved: false,
+                placement: current,
+                tables: Vec::new(),
+            });
+        }
+        let old_source = move_execution_database(
+            database_router,
+            step.as_deref(),
+            &operation.source_database_alias,
+            false,
+        )
+        .await?;
         let mut identity_tx = old_source.begin().await?;
         let same_database = databases_share_identity(&mut identity_tx, &target_db).await?;
         identity_tx.commit().await?;
@@ -1801,32 +2020,70 @@ pub(crate) async fn move_shard_placement(
     }
 
     let claim_token = Uuid::now_v7();
-    let operation =
-        claim_shard_move_operation(control_db, &current, target_database_alias, claim_token)
-            .await?;
-    let prepared = match prepare_online_shard_move(
+    let operation = claim_shard_move_operation(
+        control_db,
+        &current,
+        target_database_alias,
+        claim_token,
+        step.as_deref().map(|step| step.identity),
+    )
+    .await?;
+    let result = apply_claimed_shard_move(
         database_router,
+        control_db,
         &source_db,
         &target_db,
         current,
         &operation,
         claim_token,
+        options.force,
+        step.map(|step| &mut step.budget),
     )
-    .await
-    {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            release_shard_move_claim(control_db, operation.id, claim_token).await?;
-            return Err(error);
-        }
-    };
+    .await;
+    if result.is_err() {
+        release_shard_move_claim(control_db, operation.id, claim_token).await?;
+    }
+    result
+}
+
+/// Owns one normal claim attempt from preparation through target admission.
+/// The caller releases the claim after a budget stop or a recoverable failure.
+#[allow(clippy::too_many_arguments)]
+async fn apply_claimed_shard_move(
+    database_router: &database::DatabaseRouter,
+    control_db: &PgPool,
+    source_db: &PgPool,
+    target_db: &PgPool,
+    current: ShardPlacement,
+    operation: &ShardMoveOperation,
+    claim_token: Uuid,
+    force: bool,
+    mut budget: Option<&mut MoveBudget>,
+) -> anyhow::Result<ShardMoveOutcome> {
+    let run_id = current.run_id;
+    let run_shard = current.run_shard;
+    let target_database_alias = operation.target_database_alias.as_str();
+    let copied_rows_by_table = BTreeMap::new();
+    let prepared = prepare_online_shard_move(
+        database_router,
+        source_db,
+        target_db,
+        current,
+        operation,
+        claim_token,
+        budget.as_deref_mut(),
+    )
+    .await?;
     let current = prepared.route;
     let initial_route = current.clone();
     let source_database_alias = current.database_alias.clone();
     let source_is_control = source_database_alias == database_router.control_database_alias();
-    let active_work_count = count_active_shard_work(&source_db, run_id, run_shard).await?;
+    let active_work_count =
+        move_active_work_count(source_db, run_id, run_shard, budget.is_some()).await?;
     if active_work_count > 0 {
-        release_shard_move_claim(control_db, operation.id, claim_token).await?;
+        if budget.is_some() {
+            return Err(ShardMoveProgress::Draining.into());
+        }
         return Err(ShardMoveDrainPending {
             run_id,
             run_shard,
@@ -1855,11 +2112,14 @@ pub(crate) async fn move_shard_placement(
     if current.database_alias == target_database_alias
         && current.status == SHARD_PLACEMENT_STATUS_ACTIVE
     {
+        if budget.is_some() {
+            return Err(PlacementConflict("shard route changed during move admission").into());
+        }
         let active_work_count =
             count_active_shard_work_with(&mut *source_tx, run_id, run_shard).await?;
         let reports = verify_move_tables_with_source(
             &mut source_tx,
-            &target_db,
+            target_db,
             run_id,
             run_shard,
             &copied_rows_by_table,
@@ -1882,7 +2142,7 @@ pub(crate) async fn move_shard_placement(
             target_database_alias: target_database_alias.to_string(),
             dry_run: false,
             verify_only: false,
-            forced: options.force,
+            forced: force,
             active_work_count,
             moved: false,
             placement: current,
@@ -1944,10 +2204,12 @@ pub(crate) async fn move_shard_placement(
         .await;
 
     let active_work_count =
-        count_active_shard_work_with(&mut *source_tx, run_id, run_shard).await?;
+        move_active_work_count(&mut *source_tx, run_id, run_shard, budget.is_some()).await?;
     if active_work_count > 0 {
         source_tx.commit().await?;
-        release_shard_move_claim(control_db, operation.id, claim_token).await?;
+        if budget.is_some() {
+            return Err(ShardMoveProgress::Draining.into());
+        }
         return Err(ShardMoveDrainPending {
             run_id,
             run_shard,
@@ -1956,8 +2218,13 @@ pub(crate) async fn move_shard_placement(
         .into());
     }
 
+    if budget.is_some() {
+        verify_cutover_source(&mut source_tx, &draining, target_database_alias).await?;
+    }
+
     let moving = if draining.status == SHARD_PLACEMENT_STATUS_DRAINING {
         let placement = if source_is_control {
+            validate_new_ownership_target(&mut source_tx, target_database_alias).await?;
             shard_placements::mark_shard_placement_moving(
                 &mut *source_tx,
                 run_id,
@@ -1992,22 +2259,32 @@ pub(crate) async fn move_shard_placement(
         .invalidate_execution_placement(run_id, run_shard)
         .await;
 
-    if update_claimed_move_phase(control_db, operation.id, claim_token, "cutover").await? != 1 {
+    let cutover_claim = if source_is_control {
+        update_claimed_move_phase(&mut *source_tx, operation.id, claim_token, "cutover").await?
+    } else {
+        update_claimed_move_phase(control_db, operation.id, claim_token, "cutover").await?
+    };
+    if cutover_claim != 1 {
         anyhow::bail!("shard move {} lost its claim before cutover", operation.id);
     }
     let remaining_dirty = if let Some(target_fence) = prepared.target_fence.as_ref() {
         replay_dirty_shard_keys(
-            &source_db,
-            &target_db,
+            &mut source_tx,
+            target_db,
             target_fence,
             operation.id,
             usize::MAX,
+            budget.as_deref_mut(),
         )
         .await?
     } else {
         0
     };
     if remaining_dirty != 0 {
+        if budget.is_some() {
+            source_tx.commit().await?;
+            return Err(ShardMoveProgress::CuttingOver.into());
+        }
         anyhow::bail!(
             "run {} shard {} final replay retained {} dirty key(s)",
             run_id,
@@ -2015,8 +2292,6 @@ pub(crate) async fn move_shard_placement(
             remaining_dirty
         );
     }
-    let reports = checkpoint_move_reports(control_db, operation.id).await?;
-
     let next_write_epoch = moving.write_epoch + 1;
     transition_local_shard_admission(
         &mut *source_tx,
@@ -2082,29 +2357,35 @@ pub(crate) async fn move_shard_placement(
             next_write_epoch
         );
     }
-    super::run_control::synchronize_destination(control_db, &target_db, run_id).await?;
-    transition_local_admission_with_fence(
-        &target_db,
-        LocalShardAdmissionDraft {
-            run_id,
-            run_shard,
-            database_alias: target_database_alias.to_string(),
-            write_epoch: placement.write_epoch,
-            state: LocalShardAdmissionState::Open,
-            redirect_database_alias: None,
-            move_fence: None,
-        },
-        &[
-            LocalShardAdmissionState::Prepared,
-            LocalShardAdmissionState::Closed,
-            LocalShardAdmissionState::Open,
-        ],
-    )
-    .await?;
+    if let Some(budget) = budget {
+        let fence = prepared
+            .target_fence
+            .as_ref()
+            .expect("bounded moves have a destination fence");
+        finish_bounded_destination(control_db, target_db, fence, budget).await?;
+    } else {
+        super::run_control::synchronize_destination(control_db, target_db, run_id).await?;
+        transition_local_admission_with_fence(
+            target_db,
+            open_move_destination(
+                run_id,
+                run_shard,
+                target_database_alias,
+                placement.write_epoch,
+            ),
+            &[
+                LocalShardAdmissionState::Prepared,
+                LocalShardAdmissionState::Closed,
+                LocalShardAdmissionState::Open,
+            ],
+        )
+        .await?;
+    }
     settle_completed_move_operation(control_db, operation.id, Some(claim_token)).await?;
     database_router
         .invalidate_execution_placement(run_id, run_shard)
         .await;
+    let reports = checkpoint_move_reports(control_db, operation.id).await?;
 
     Ok(ShardMoveOutcome {
         run_id,
@@ -2113,12 +2394,172 @@ pub(crate) async fn move_shard_placement(
         target_database_alias: target_database_alias.to_string(),
         dry_run: false,
         verify_only: false,
-        forced: options.force,
+        forced: force,
         active_work_count,
         moved: true,
         placement,
         tables: reports,
     })
+}
+
+fn open_move_destination(
+    run_id: Uuid,
+    run_shard: i16,
+    database_alias: &str,
+    write_epoch: i64,
+) -> LocalShardAdmissionDraft {
+    LocalShardAdmissionDraft {
+        run_id,
+        run_shard,
+        database_alias: database_alias.to_owned(),
+        write_epoch,
+        state: LocalShardAdmissionState::Open,
+        redirect_database_alias: None,
+        move_fence: None,
+    }
+}
+
+/// Accepts the draining source or the closed source in a split cutover's
+/// committed gap. An unrelated database binding cannot stand in for either.
+async fn verify_cutover_source(
+    tx: &mut Transaction<'_, Postgres>,
+    route: &ShardPlacement,
+    target: &str,
+) -> anyhow::Result<()> {
+    let local = select_local_shard_admission(&mut **tx, route.run_id, route.run_shard).await?;
+    let valid = local.is_some_and(|local| {
+        local.database_alias == route.database_alias
+            && ((local.write_epoch == route.write_epoch
+                && local.parsed_state().ok() == Some(LocalShardAdmissionState::Draining))
+                || (route.status == SHARD_PLACEMENT_STATUS_MOVING
+                    && route.write_epoch.checked_add(1) == Some(local.write_epoch)
+                    && local.parsed_state().ok() == Some(LocalShardAdmissionState::Closed)
+                    && local.redirect_database_alias.as_deref() == Some(target)))
+    });
+    if !valid {
+        return Err(PlacementConflict("move source does not hold the cutover admission").into());
+    }
+    Ok(())
+}
+
+/// The control route already changed and the old owner is fenced. Resume only
+/// target admission, with a new target claim if it still needs repair.
+async fn resume_activated_shard_move(
+    control: &PgPool,
+    target: &PgPool,
+    route: &ShardPlacement,
+    pending: &ShardMoveOperation,
+    budget: &mut MoveBudget,
+) -> anyhow::Result<()> {
+    if pending.phase != "cutover"
+        || pending.starting_route_version.checked_add(4) != Some(route.route_version)
+    {
+        return Err(PlacementConflict("activated shard route no longer matches the move").into());
+    }
+    let token = Uuid::now_v7();
+    let mut tx = control.begin().await?;
+    if lock_move_route_version(&mut tx, route.run_id, route.run_shard).await?
+        != Some(route.route_version)
+    {
+        return Err(PlacementConflict("shard route changed before destination recovery").into());
+    }
+    let operation = claim_move_with(&mut tx, pending.id, token).await?;
+    tx.commit().await?;
+    let result = async {
+        let fence = TargetMoveWriteFence::from_operation(&operation, route.write_epoch, token)?;
+        if prepare_activated_destination(target, &fence).await? {
+            finish_bounded_destination(control, target, &fence, budget).await?;
+        }
+        settle_completed_move_operation(control, operation.id, Some(token)).await
+    }
+    .await;
+    if result.is_err() {
+        release_shard_move_claim(control, operation.id, token).await?;
+    }
+    result
+}
+
+async fn prepare_activated_destination(
+    db: &PgPool,
+    fence: &TargetMoveWriteFence,
+) -> anyhow::Result<bool> {
+    let mut tx = db.begin().await?;
+    crate::db::shard_write_fence::lock_exclusive(&mut tx, fence.run_id, fence.run_shard).await?;
+    let local = select_local_shard_admission(&mut *tx, fence.run_id, fence.run_shard)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("activated shard has no target admission"))?;
+    if local.database_alias != fence.database_alias || local.write_epoch != fence.write_epoch {
+        return Err(PlacementConflict("activated target no longer owns the expected epoch").into());
+    }
+    if local.parsed_state()? == LocalShardAdmissionState::Open {
+        tx.commit().await?;
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        local.parsed_state()? == LocalShardAdmissionState::Prepared,
+        "activated shard target is no longer prepared"
+    );
+    install_target_move_write_fence_with(&mut tx, fence).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Pages a copied control revision while the destination is still prepared.
+/// A checkpoint acknowledges only data already committed on the target.
+async fn finish_bounded_destination(
+    control: &PgPool,
+    target: &PgPool,
+    fence: &TargetMoveWriteFence,
+    budget: &mut MoveBudget,
+) -> anyhow::Result<()> {
+    let state = super::run_control::destination_revision(control, fence.run_id).await?;
+    if state.1 > 0 {
+        let mut cursor = destination_control_cursor(control, fence.move_fence.move_id).await?;
+        loop {
+            if budget.remaining == 0 {
+                return Err(ShardMoveProgress::CuttingOver.into());
+            }
+            let mut tx = target.begin().await?;
+            crate::db::shard_write_fence::lock_shared(&mut tx, fence.run_id, fence.run_shard)
+                .await?;
+            validate_target_move_write(&mut tx, fence).await?;
+            let (revision, examined, last_id) =
+                super::run_control::synchronize_destination_shard_page(
+                    &mut tx,
+                    fence.run_id,
+                    fence.run_shard,
+                    state,
+                    cursor,
+                    SHARD_MOVE_COPY_BATCH_SIZE as i64,
+                )
+                .await?;
+            tx.commit().await?;
+            if let Some(after) = last_id {
+                budget.record_batch();
+                save_destination_control_cursor(control, fence, revision, after).await?;
+                cursor = Some((revision, after));
+            }
+            if examined < SHARD_MOVE_COPY_BATCH_SIZE as i64 {
+                break;
+            }
+        }
+    }
+    let mut tx = target.begin().await?;
+    crate::db::shard_write_fence::lock_exclusive(&mut tx, fence.run_id, fence.run_shard).await?;
+    validate_target_move_write(&mut tx, fence).await?;
+    transition_local_shard_admission(
+        &mut *tx,
+        open_move_destination(
+            fence.run_id,
+            fence.run_shard,
+            &fence.database_alias,
+            fence.write_epoch,
+        ),
+        &[LocalShardAdmissionState::Prepared],
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Restores an in-progress shard move to active ownership on its source.
@@ -2912,11 +3353,35 @@ fn move_key_expression(table_alias: &str, key_columns: &[&str]) -> String {
 async fn install_target_move_write_fence(
     target_db: &PgPool,
     fence: &TargetMoveWriteFence,
+    require_prepared: bool,
 ) -> anyhow::Result<()> {
     let mut tx = target_db.begin().await?;
     crate::db::shard_write_fence::lock_exclusive(&mut tx, fence.run_id, fence.run_shard).await?;
+    if require_prepared {
+        let local = select_local_shard_admission(&mut *tx, fence.run_id, fence.run_shard).await?;
+        if !local.is_some_and(|local| {
+            local.database_alias == fence.database_alias
+                && local.write_epoch == fence.write_epoch
+                && local
+                    .move_fence()
+                    .is_some_and(|authority| authority.move_id == fence.move_fence.move_id)
+        }) {
+            return Err(
+                PlacementConflict("move target does not hold the checkpointed admission").into(),
+            );
+        }
+    }
+    install_target_move_write_fence_with(&mut tx, fence).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn install_target_move_write_fence_with(
+    tx: &mut Transaction<'_, Postgres>,
+    fence: &TargetMoveWriteFence,
+) -> anyhow::Result<()> {
     install_local_shard_move_fence(
-        &mut *tx,
+        &mut **tx,
         LocalShardAdmissionDraft {
             run_id: fence.run_id,
             run_shard: fence.run_shard,
@@ -2928,7 +3393,6 @@ async fn install_target_move_write_fence(
         },
     )
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -2951,13 +3415,33 @@ async fn validate_target_move_write(
 async fn reset_target_move_rows(
     target_db: &PgPool,
     fence: &TargetMoveWriteFence,
-) -> anyhow::Result<()> {
+    budget: Option<&mut MoveBudget>,
+) -> anyhow::Result<bool> {
     let mut tx = target_db.begin().await?;
     crate::db::shard_write_fence::lock_exclusive(&mut tx, fence.run_id, fence.run_shard).await?;
     validate_target_move_write(&mut tx, fence).await?;
-    reset_target_shard_rows(&mut tx, fence.run_id, fence.run_shard).await?;
+    if let Some(budget) = budget {
+        for table in SHARD_TABLES.iter().rev() {
+            loop {
+                if budget.remaining == 0 {
+                    tx.commit().await?;
+                    return Ok(false);
+                }
+                let removed =
+                    reset_target_shard_page(&mut tx, *table, fence.run_id, fence.run_shard).await?;
+                if removed > 0 {
+                    budget.record_batch();
+                }
+                if removed < SHARD_MOVE_COPY_BATCH_SIZE as u64 {
+                    break;
+                }
+            }
+        }
+    } else {
+        reset_target_shard_rows(&mut tx, fence.run_id, fence.run_shard).await?;
+    }
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
 async fn copy_target_move_rows(
@@ -3037,7 +3521,10 @@ async fn copy_and_checkpoint_move_page(
     Ok(())
 }
 
-async fn backfill_shard_move(context: &ShardMoveCopyContext<'_>) -> anyhow::Result<()> {
+async fn backfill_shard_move(
+    context: &ShardMoveCopyContext<'_>,
+    mut budget: Option<&mut MoveBudget>,
+) -> anyhow::Result<()> {
     for table in move_table_names() {
         let (mut page_number, mut cursor) = select_last_move_page(
             context.control_db,
@@ -3046,6 +3533,9 @@ async fn backfill_shard_move(context: &ShardMoveCopyContext<'_>) -> anyhow::Resu
         )
         .await?;
         loop {
+            if budget.as_ref().is_some_and(|budget| budget.remaining == 0) {
+                return Err(ShardMoveProgress::Copying.into());
+            }
             let rows = select_move_source_page(
                 context.source_db,
                 table,
@@ -3059,6 +3549,9 @@ async fn backfill_shard_move(context: &ShardMoveCopyContext<'_>) -> anyhow::Resu
             }
             copy_and_checkpoint_move_page(context, table, page_number, cursor.as_deref(), &rows)
                 .await?;
+            if let Some(budget) = budget.as_deref_mut() {
+                budget.record_batch();
+            }
             cursor = rows.last().map(|row| row.row_key.clone());
             page_number += 1;
         }
@@ -3097,30 +3590,44 @@ fn key_join_predicate(table_alias: &str, key_alias: &str, key_columns: &[&str]) 
 }
 
 async fn replay_dirty_shard_keys(
-    source_db: &PgPool,
+    source: &mut PgConnection,
     target_db: &PgPool,
     target_fence: &TargetMoveWriteFence,
     move_id: Uuid,
     max_batches: usize,
+    budget: Option<&mut MoveBudget>,
 ) -> anyhow::Result<i64> {
+    // During an online bounded pass, queue deletes for the final source fence.
+    // Replaying them there gives child-first ordering a stable view and avoids
+    // a parent cascade racing newly journaled child deletions.
+    let include_deletes = budget.is_none() || max_batches == usize::MAX;
+    let batch_limit = budget
+        .as_ref()
+        .map_or(max_batches, |budget| max_batches.min(budget.remaining));
+    let dirty_limit = budget
+        .as_ref()
+        .map(|_| SHARD_MOVE_FINAL_DIRTY_KEY_LIMIT + 1);
     let mut completed_batches = 0;
     for table in SHARD_TABLES {
-        while completed_batches < max_batches {
+        while completed_batches < batch_limit {
             let keys = select_dirty_shard_keys_for_table(
-                source_db,
+                &mut *source,
                 move_id,
                 table.name,
-                table.key_columns,
-                true,
+                false,
                 SHARD_MOVE_COPY_BATCH_SIZE,
             )
             .await?;
             if keys.is_empty() {
                 break;
             }
-            let current =
-                select_current_rows_for_dirty_keys(source_db, table.name, table.key_columns, &keys)
-                    .await?;
+            let current = select_current_rows_for_dirty_keys(
+                &mut *source,
+                table.name,
+                table.key_columns,
+                &keys,
+            )
+            .await?;
             let rows = current.values().cloned().collect::<Vec<_>>();
             upsert_target_move_rows(target_db, target_fence, table.name, table.key_columns, rows)
                 .await?;
@@ -3128,19 +3635,18 @@ async fn replay_dirty_shard_keys(
                 .into_iter()
                 .filter(|key| current.contains_key(&key.row_key.to_string()))
                 .collect::<Vec<_>>();
-            settle_replayed_dirty_keys(source_db, move_id, &replayed).await?;
+            settle_replayed_dirty_keys(&mut *source, move_id, &replayed).await?;
             completed_batches += 1;
         }
     }
 
-    for table in SHARD_TABLES.iter().rev() {
-        while completed_batches < max_batches {
+    for table in SHARD_TABLES.iter().rev().filter(|_| include_deletes) {
+        while completed_batches < batch_limit {
             let keys = select_dirty_shard_keys_for_table(
-                source_db,
+                &mut *source,
                 move_id,
                 table.name,
-                table.key_columns,
-                false,
+                true,
                 SHARD_MOVE_COPY_BATCH_SIZE,
             )
             .await?;
@@ -3159,12 +3665,15 @@ async fn replay_dirty_shard_keys(
                 &missing,
             )
             .await?;
-            settle_replayed_dirty_keys(source_db, move_id, &keys).await?;
+            settle_replayed_dirty_keys(&mut *source, move_id, &keys).await?;
             completed_batches += 1;
         }
     }
 
-    count_dirty_move_keys(source_db, move_id).await
+    if let Some(budget) = budget {
+        budget.remaining -= completed_batches;
+    }
+    count_dirty_move_keys(source, move_id, dirty_limit, include_deletes).await
 }
 
 async fn ensure_move_target_reset(
@@ -3173,11 +3682,14 @@ async fn ensure_move_target_reset(
     target_fence: &TargetMoveWriteFence,
     operation: &ShardMoveOperation,
     claim_token: Uuid,
+    budget: Option<&mut MoveBudget>,
 ) -> anyhow::Result<()> {
     if operation.target_reset_at.is_some() {
         return Ok(());
     }
-    reset_target_move_rows(target_db, target_fence).await?;
+    if !reset_target_move_rows(target_db, target_fence, budget).await? {
+        return Err(ShardMoveProgress::Resetting.into());
+    }
     let updated = mark_move_target_reset(control_db, operation.id, claim_token).await?;
     if updated != 1 {
         anyhow::bail!(
@@ -3195,11 +3707,17 @@ async fn prepare_online_shard_move(
     current: ShardPlacement,
     operation: &ShardMoveOperation,
     claim_token: Uuid,
+    mut budget: Option<&mut MoveBudget>,
 ) -> anyhow::Result<PreparedShardMove> {
     let control_db = database_router.control().await?;
     let mut identity_tx = source_db.begin().await?;
     let same_database = databases_share_identity(&mut identity_tx, target_db).await?;
     identity_tx.commit().await?;
+    if same_database && budget.is_some() {
+        return Err(
+            PlacementConflict("shard move endpoints use the same PostgreSQL database").into(),
+        );
+    }
     let mut route = current;
     if route.status != SHARD_PLACEMENT_STATUS_MOVING {
         let state = if route.status == SHARD_PLACEMENT_STATUS_DRAINING {
@@ -3219,6 +3737,7 @@ async fn prepare_online_shard_move(
                 move_fence: None,
             },
             route.status.as_str(),
+            budget.is_some(),
         )
         .await?;
     }
@@ -3321,30 +3840,54 @@ async fn prepare_online_shard_move(
     } else {
         let target_fence =
             TargetMoveWriteFence::from_operation(operation, route.write_epoch + 1, claim_token)?;
-        install_target_move_write_fence(target_db, &target_fence).await?;
-        ensure_move_target_reset(control_db, target_db, &target_fence, operation, claim_token)
-            .await?;
+        install_target_move_write_fence(
+            target_db,
+            &target_fence,
+            budget.is_some() && operation.target_reset_at.is_some(),
+        )
+        .await?;
+        ensure_move_target_reset(
+            control_db,
+            target_db,
+            &target_fence,
+            operation,
+            claim_token,
+            budget.as_deref_mut(),
+        )
+        .await?;
         if !matches!(
             operation.phase.as_str(),
             "catch_up" | "draining" | "cutover"
         ) {
-            backfill_shard_move(&ShardMoveCopyContext {
-                control_db,
-                source_db,
-                target_db,
-                target_fence: &target_fence,
-            })
+            backfill_shard_move(
+                &ShardMoveCopyContext {
+                    control_db,
+                    source_db,
+                    target_db,
+                    target_fence: &target_fence,
+                },
+                budget.as_deref_mut(),
+            )
             .await?;
         }
-        let remaining_dirty = replay_dirty_shard_keys(
-            source_db,
-            target_db,
-            &target_fence,
-            operation.id,
-            SHARD_MOVE_ONLINE_REPLAY_BATCHES,
-        )
-        .await?;
+        let remaining_dirty = if budget.is_some() && route.status == SHARD_PLACEMENT_STATUS_MOVING {
+            0
+        } else {
+            let mut source = source_db.acquire().await?;
+            replay_dirty_shard_keys(
+                &mut source,
+                target_db,
+                &target_fence,
+                operation.id,
+                SHARD_MOVE_ONLINE_REPLAY_BATCHES,
+                budget.as_deref_mut(),
+            )
+            .await?
+        };
         if remaining_dirty > SHARD_MOVE_FINAL_DIRTY_KEY_LIMIT {
+            if budget.is_some() {
+                return Err(ShardMoveProgress::CatchingUp.into());
+            }
             return Err(ShardMoveCatchUpPending {
                 run_id: operation.run_id,
                 run_shard: operation.run_shard,
@@ -3433,10 +3976,18 @@ async fn reconcile_source_admission_with_fence(
     db: &PgPool,
     mut draft: LocalShardAdmissionDraft,
     route_status: &str,
+    require_current_owner: bool,
 ) -> anyhow::Result<()> {
     let mut tx = db.begin().await?;
     crate::db::shard_write_fence::lock_exclusive(&mut tx, draft.run_id, draft.run_shard).await?;
     let current = select_local_shard_admission(&mut *tx, draft.run_id, draft.run_shard).await?;
+    if require_current_owner
+        && !current.as_ref().is_some_and(|local| {
+            local.database_alias == draft.database_alias && local.write_epoch == draft.write_epoch
+        })
+    {
+        return Err(PlacementConflict("move source does not hold the expected admission").into());
+    }
     // A crash can persist the local drain before the control route advances
     // from copying. Preserve the stricter local state; retry advances control.
     if route_status == SHARD_PLACEMENT_STATUS_COPYING
@@ -3463,6 +4014,22 @@ async fn reconcile_source_admission_with_fence(
 
 async fn count_active_shard_work(db: &PgPool, run_id: Uuid, run_shard: i16) -> anyhow::Result<i64> {
     count_active_shard_work_with(db, run_id, run_shard).await
+}
+
+async fn move_active_work_count<'e>(
+    executor: impl Executor<'e, Database = Postgres>,
+    run_id: Uuid,
+    run_shard: i16,
+    bounded: bool,
+) -> anyhow::Result<i64> {
+    if !bounded {
+        return count_active_shard_work_with(executor, run_id, run_shard).await;
+    }
+    let busy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM run_chunks WHERE run_id=$1 AND run_shard=$2 AND status='leased')
+             OR EXISTS (SELECT 1 FROM execution_attempts WHERE run_id=$1 AND run_shard=$2 AND status='running')",
+    ).bind(run_id).bind(run_shard).fetch_one(executor).await?;
+    Ok(i64::from(busy))
 }
 
 fn normalized_prerequisite_row(table: &str, mut row: Value) -> anyhow::Result<Value> {

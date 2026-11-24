@@ -642,6 +642,43 @@ impl DatabaseRouter {
         self.resolve_placement_pool(&placement, started).await
     }
 
+    /// Resolves an operator's explicit move binding against the live catalog.
+    /// This path shares control and opens pools only for the two move endpoints.
+    pub(crate) async fn operator_execution_database(
+        &self,
+        alias: &str,
+        accepts_new_ownership: bool,
+        bindings: &BTreeMap<String, OperatorDatabaseBinding>,
+    ) -> anyhow::Result<PgPool> {
+        let placement = if accepts_new_ownership {
+            self.require_active_placement(alias).await?
+        } else {
+            self.require_serviceable_placement(alias).await?
+        };
+        require_shard_capable_placement(&placement)?;
+        if alias == self.control_database_alias() {
+            self.validate_control_pool_reference(&placement)?;
+            return Ok(self.control().await?.clone());
+        }
+        let reference = &placement.database_url_env;
+        let binding = bindings
+            .get(reference)
+            .ok_or_else(|| anyhow::anyhow!("undeclared shard database reference {reference}"))?;
+        binding
+            .pool
+            .get_or_try_init(|| {
+                runtime_pool_options(
+                    self.max_connections_per_pool,
+                    self.acquire_timeout,
+                    self.operation_timeout_config,
+                )
+                .connect_with(binding.options.clone())
+            })
+            .await
+            .cloned()
+            .map_err(Into::into)
+    }
+
     /// Returns a pool for one shard placement undergoing readiness verification.
     #[cfg(test)]
     pub(crate) async fn provisioning_database(&self, alias: &str) -> anyhow::Result<PgPool> {
@@ -1685,6 +1722,21 @@ pub(crate) struct PlacementPool {
     database_url_env: String,
     #[allow(dead_code)]
     pool: OnceCell<PgPool>,
+}
+
+/// Explicit standalone operator credentials and their lazy, shared pool.
+pub(crate) struct OperatorDatabaseBinding {
+    pub(crate) options: sqlx::postgres::PgConnectOptions,
+    pool: OnceCell<PgPool>,
+}
+
+impl OperatorDatabaseBinding {
+    pub(crate) fn new(options: sqlx::postgres::PgConnectOptions) -> Self {
+        Self {
+            options,
+            pool: OnceCell::new(),
+        }
+    }
 }
 
 impl PlacementPool {

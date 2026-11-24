@@ -16,7 +16,6 @@ use sqlx::{
     ConnectOptions,
     PgConnection,
     PgPool,
-    postgres::PgConnectOptions,
 };
 use uuid::Uuid;
 
@@ -26,7 +25,10 @@ use super::{
     setup::DatabaseIdentity,
 };
 use crate::{
-    context::database::standalone_connect_options,
+    context::database::{
+        OperatorDatabaseBinding,
+        standalone_connect_options,
+    },
     db::{
         tables::database_placements,
         workflows::shard_admin,
@@ -36,6 +38,7 @@ use crate::{
             DEFAULT_DATABASE_URL_ENV,
             DatabasePlacement,
         },
+        run_chunk::RUN_SHARD_COUNT,
         shard_placement::ShardPlacement,
     },
 };
@@ -43,12 +46,14 @@ use crate::{
 const MAX_PAGE_SIZE: u16 = 100;
 const MAX_ACTIVATION_PEERS: i64 = 128;
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_MOVE_BATCHES: u16 = 64;
+const MOVE_STEP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Operator handle sharing the standalone client's control pool.
 #[derive(Clone)]
 pub struct PlacementClient {
     client: Client,
-    bindings: Arc<BTreeMap<String, PgConnectOptions>>,
+    bindings: Arc<BTreeMap<String, OperatorDatabaseBinding>>,
 }
 
 /// One catalog page in ascending alias order. Defaults to 50 rows.
@@ -133,6 +138,43 @@ pub struct RunShardPlacement {
     pub write_epoch: i64,
 }
 
+/// Starts or resumes a specific move. Keep the same identity fields on retry;
+/// the batch budget may change on each call.
+pub struct MoveRunShardRequest {
+    /// Caller-generated UUID, retained before the first call.
+    pub operation_id: Uuid,
+    pub run_id: Uuid,
+    pub run_shard: i16,
+    /// Route version from the active source in [`PlacementClient::list_run_shards`].
+    pub expected_route_version: i64,
+    pub target_database_alias: String,
+    /// Number of nonempty batches allowed in this call, from 1 through 64.
+    pub max_batches: u16,
+}
+
+/// The next stage of a move. A caller can resume every unfinished stage with
+/// the same request identity after waiting for work or recovering a dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RunShardMoveProgress {
+    ResettingTarget,
+    Copying,
+    CatchingUp,
+    /// Previously admitted source work must settle or recover before cutover.
+    Draining,
+    CuttingOver,
+    /// The move completed. The route may have changed after completion.
+    Completed,
+}
+
+/// Durable move identity and the work completed by this call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveRunShardOutcome {
+    pub operation_id: Uuid,
+    pub progress: RunShardMoveProgress,
+    pub batches_processed: u16,
+}
+
 impl RunShardPlacement {
     fn from_row(row: ShardPlacement) -> Self {
         Self {
@@ -174,7 +216,7 @@ impl PlacementClient {
             let options = standalone_connect_options(&uri).map_err(|_| {
                 Error::InvalidConfiguration("invalid shard PostgreSQL connection string")
             })?;
-            bindings.insert(reference, options);
+            bindings.insert(reference, OperatorDatabaseBinding::new(options));
         }
         Ok(Self {
             client,
@@ -297,6 +339,60 @@ impl PlacementClient {
         )
     }
 
+    /// Advances one move with an explicit data batch budget and a 30-second
+    /// deadline. An interrupted claim may remain leased for up to five minutes.
+    /// Retry with the original ID and route version. Completed IDs return a
+    /// read-only receipt, including after the shard moves again.
+    pub async fn move_run_shard(
+        &self,
+        request: &MoveRunShardRequest,
+    ) -> Result<MoveRunShardOutcome, Error> {
+        if request.operation_id.is_nil()
+            || request.run_id.is_nil()
+            || !(0..RUN_SHARD_COUNT).contains(&request.run_shard)
+            || request.expected_route_version <= 0
+            || !valid_name(&request.target_database_alias)
+            || !(1..=MAX_MOVE_BATCHES).contains(&request.max_batches)
+        {
+            return Err(Error::InvalidInput(
+                "invalid shard move identity, route, or batch budget",
+            ));
+        }
+        let (progress, batches_processed) = tokio::time::timeout(
+            MOVE_STEP_TIMEOUT,
+            shard_admin::advance_shard_move(
+                &self.client.database,
+                &self.bindings,
+                request.run_id,
+                request.run_shard,
+                &request.target_database_alias,
+                shard_admin::ShardMoveIdentity {
+                    operation_id: request.operation_id,
+                    starting_route_version: request.expected_route_version,
+                },
+                request.max_batches,
+            ),
+        )
+        .await
+        .map_err(|error| {
+            Error::Dependency(anyhow::Error::new(error).context("shard move step timed out"))
+        })?
+        .map_err(placement_error)?;
+        use shard_admin::ShardMoveProgress as Progress;
+        Ok(MoveRunShardOutcome {
+            operation_id: request.operation_id,
+            progress: match progress {
+                Progress::Resetting => RunShardMoveProgress::ResettingTarget,
+                Progress::Copying => RunShardMoveProgress::Copying,
+                Progress::CatchingUp => RunShardMoveProgress::CatchingUp,
+                Progress::Draining => RunShardMoveProgress::Draining,
+                Progress::CuttingOver => RunShardMoveProgress::CuttingOver,
+                Progress::Completed => RunShardMoveProgress::Completed,
+            },
+            batches_processed,
+        })
+    }
+
     async fn control(&self) -> Result<&PgPool, Error> {
         self.client
             .database
@@ -310,7 +406,7 @@ impl PlacementClient {
             .bindings
             .get(reference)
             .ok_or_else(|| anyhow::anyhow!("undeclared shard database reference {reference}"))?;
-        Ok(options.connect().await?)
+        Ok(options.options.connect().await?)
     }
 
     async fn verify_readiness(
