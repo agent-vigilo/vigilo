@@ -23,6 +23,7 @@ use vigilo::operations::{
     datasets,
     evaluators,
     export,
+    placement,
     resources,
     setup,
 };
@@ -54,6 +55,26 @@ pub fn check(client: &Client, restricted: &UserClient, caller: UserContext) {
     let id = "0198f36d-f7db-7d90-998c-d60d498dd979".parse().unwrap();
     let cancel = CancellationToken::new();
     operation::<operations::RunStatus>(client.run_status(id));
+    let placement_operator =
+        placement::PlacementClient::new(client.clone(), Default::default()).unwrap();
+    operation::<placement::DatabasePlacementPage>(
+        placement_operator.list_database_placements(&Default::default()),
+    );
+    operation::<placement::DatabaseRegistration>(placement_operator.register_database_placement(
+        &placement::RegisterDatabasePlacement {
+            alias: "shard_001".into(),
+            database_url_reference: "SHARD_001_URL".into(),
+        },
+    ));
+    operation::<placement::DatabaseActivation>(placement_operator.activate_database_placement(
+        "shard_001",
+        &setup::DatabaseIdentity {
+            system_identifier: 1,
+            database: "vigilo".into(),
+            schema: "public".into(),
+        },
+    ));
+    operation::<Vec<placement::RunShardPlacement>>(placement_operator.list_run_shards(id));
     operation::<setup::MigrationOutcome>(setup::apply_migrations(
         client,
         &setup::DatabaseIdentity {

@@ -72,7 +72,6 @@ use crate::{
             DATABASE_PLACEMENT_ROLE_CONTROL_AND_SHARD,
             DATABASE_PLACEMENT_ROLE_SHARD,
             DATABASE_PLACEMENT_STATUS_ACTIVE,
-            DATABASE_PLACEMENT_STATUS_PROVISIONING,
             DEFAULT_DATABASE_URL_ENV,
             DatabasePlacement,
         },
@@ -644,6 +643,7 @@ impl DatabaseRouter {
     }
 
     /// Returns a pool for one shard placement undergoing readiness verification.
+    #[cfg(test)]
     pub(crate) async fn provisioning_database(&self, alias: &str) -> anyhow::Result<PgPool> {
         let started = Instant::now();
         let alias = normalize_alias(alias.to_string(), "database alias")?;
@@ -652,7 +652,9 @@ impl DatabaseRouter {
             .await?
             .ok_or_else(|| anyhow::anyhow!("database placement alias {} was not found", alias))?;
 
-        if placement.status != DATABASE_PLACEMENT_STATUS_PROVISIONING {
+        if placement.status
+            != crate::models::database_placement::DATABASE_PLACEMENT_STATUS_PROVISIONING
+        {
             anyhow::bail!(
                 "database placement alias {} has status {}, which is not awaiting activation",
                 alias,
@@ -664,7 +666,7 @@ impl DatabaseRouter {
         self.resolve_placement_pool(&placement, started).await
     }
 
-    async fn resolve_placement_pool(
+    pub(crate) async fn resolve_placement_pool(
         &self,
         placement: &DatabasePlacement,
         started: Instant,
@@ -1717,7 +1719,9 @@ impl PlacementPool {
 
 /// Establish the standalone identity in PostgreSQL's startup packet, without
 /// adding a SQL exchange. Restricted request pools must not use this constructor.
-fn standalone_connect_options(uri: &str) -> Result<sqlx::postgres::PgConnectOptions, sqlx::Error> {
+pub(crate) fn standalone_connect_options(
+    uri: &str,
+) -> Result<sqlx::postgres::PgConnectOptions, sqlx::Error> {
     use std::str::FromStr;
     Ok(sqlx::postgres::PgConnectOptions::from_str(uri)?.options([
         ("vigilo.tenant_id", "00000000-0000-0000-0000-000000000000"),

@@ -353,6 +353,29 @@ from every active or draining placement. A failed check leaves the placement in
 Activation validates the secret available to that command process, so deploy
 the same environment variable to coordinators and workers before activating.
 
+### Library operator calls
+
+`vigilo::operations::placement::PlacementClient` shares the standalone operator
+`Client` control pool. Supply a map of operator-owned PostgreSQL URLs keyed by
+the catalog's connection reference names. The control client supplies the
+`DATABASE_URL` binding. Deploy matching references to the runtimes that will
+serve the placement. The library uses its explicit map for shard references.
+
+`list_database_placements` reads one control page ordered by alias, with a limit
+of 100 rows and an exclusive continuation alias. `list_run_shards` reads one
+run's routes in logical shard order, with up to 128 rows and the current route
+version and write epoch. Both calls use a single data query on control.
+
+`register_database_placement` creates a provisioning shard. The same alias and
+reference return the current row on retry. A conflicting registration fails.
+For activation, first provision the target with
+[verified setup](/docs/architecture/flows/setup/). Pass the expected PostgreSQL
+cluster, database, and schema to `activate_database_placement`. The operator
+logins need access to `pg_catalog.pg_control_system()` for physical duplicate
+checks. Activation checks up to 128 active or draining peers within a 30-second
+deadline. A retry after activation reports the active row and whether this
+invocation ran a readiness probe.
+
 Set the default for future run shards:
 
 ```text
@@ -395,11 +418,11 @@ stateDiagram-v2
 | `draining` | Rejected | Rejected | Served |
 | `disabled` | Rejected | Rejected | Blocked |
 
-Activation performs target I/O before taking the placement lifecycle lock, then
-rechecks the registered role, environment reference, and absence of routing
-references while atomically changing `provisioning` to `active`. This keeps slow
-network checks outside the control transaction without exposing an unchecked
-target. Concurrent activation attempts are idempotent.
+Activation performs target and peer I/O before opening the control transaction.
+The final transition serializes activation commits in the control catalog and
+rechecks the registration, the verified peer set, and the absence of ownership
+references. Competing attempts with the same registration can observe the
+winning active row. A change to the peer set requires a fresh verification.
 
 New-ownership writes take a shared row lock on the target placement through
 route commit. Drain and disable take an exclusive row lock on the same catalog

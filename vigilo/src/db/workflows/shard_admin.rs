@@ -5,7 +5,11 @@
 //! databases, verify and activate their targets, drain or disable shard
 //! databases, assign empty run shards, and move or restore shard-owned routes.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    time::Instant,
+};
 
 use chrono::{
     DateTime,
@@ -15,7 +19,9 @@ use futures_util::TryStreamExt;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::{
+    Connection,
     Executor,
+    PgConnection,
     PgPool,
     Postgres,
     Transaction,
@@ -83,6 +89,10 @@ pub(crate) struct DatabasePlacementActivationOutcome {
     pub(crate) readiness_verified: bool,
     pub(crate) migration_count: Option<usize>,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct PlacementConflict(pub(crate) &'static str);
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 struct MigrationFingerprint {
@@ -523,14 +533,46 @@ pub(crate) async fn add_shard_database_placement(
         })?;
     }
 
-    database_placements::insert_database_placement(
+    database_placements::try_insert_database_placement(
         db,
         alias,
         database_url_env,
         DATABASE_PLACEMENT_ROLE_SHARD,
         DATABASE_PLACEMENT_STATUS_PROVISIONING,
     )
-    .await
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("database placement alias {} already exists", alias))
+}
+
+/// Creates a provisioning shard or returns the exact previously registered row.
+/// A retry never reopens a retired placement or rewrites catalog metadata.
+pub(crate) async fn register_shard_database_placement(
+    db: &PgPool,
+    alias: &str,
+    reference: &str,
+) -> anyhow::Result<(DatabasePlacement, bool)> {
+    if let Some(inserted) = database_placements::try_insert_database_placement(
+        db,
+        alias,
+        reference,
+        DATABASE_PLACEMENT_ROLE_SHARD,
+        DATABASE_PLACEMENT_STATUS_PROVISIONING,
+    )
+    .await?
+    {
+        return Ok((inserted, true));
+    }
+    let existing = database_placements::select_database_placement(db, alias)
+        .await?
+        .ok_or(PlacementConflict(
+            "registration changed while resolving a retry",
+        ))?;
+    if existing.role != DATABASE_PLACEMENT_ROLE_SHARD || existing.database_url_env != reference {
+        return Err(
+            PlacementConflict("placement alias already has a different registration").into(),
+        );
+    }
+    Ok((existing, false))
 }
 
 /// Verifies a registered target and atomically makes it eligible for routing.
@@ -543,8 +585,29 @@ pub(crate) async fn activate_database_placement(
     alias: &str,
 ) -> anyhow::Result<DatabasePlacementActivationOutcome> {
     validate_non_empty(alias, "database alias")?;
+    database_router
+        .run_database_operation(alias, "database_activation", async {
+            let control = database_router.control().await?;
+            activate_placement_with(control, alias, None, |snapshot, peers| async move {
+                verify_database_placement_readiness(database_router, control, &snapshot, &peers)
+                    .await
+            })
+            .await
+        })
+        .await
+}
 
-    let control_db = database_router.control().await?;
+/// Commits only the verified registration and peer set. The callback performs
+/// endpoint-specific readiness checks before any control lock is held.
+pub(crate) async fn activate_placement_with<F>(
+    control_db: &PgPool,
+    alias: &str,
+    max_peers: Option<i64>,
+    probe: impl FnOnce(DatabasePlacement, Vec<DatabasePlacement>) -> F,
+) -> anyhow::Result<DatabasePlacementActivationOutcome>
+where
+    F: Future<Output = anyhow::Result<usize>>,
+{
     let snapshot = database_placements::select_database_placement(control_db, alias)
         .await?
         .ok_or_else(|| anyhow::anyhow!("database placement alias {} was not found", alias))?;
@@ -558,18 +621,35 @@ pub(crate) async fn activate_database_placement(
         });
     }
     require_provisioning_shard_placement(&snapshot)?;
+    let limit = max_peers.map(|max| max + 1);
+    let peers = database_placements::list_activation_peers(control_db, limit).await?;
+    if max_peers.is_some_and(|max| peers.len() as i64 > max) {
+        return Err(PlacementConflict("activation exceeds the serviceable peer limit").into());
+    }
+    let migration_count = probe(snapshot.clone(), peers.clone()).await?;
 
-    let migration_count = database_router
-        .run_database_operation(alias, "database_activation", async {
-            verify_database_placement_readiness(database_router, &snapshot).await
-        })
+    // Take a new snapshot after waiting for the lock, even when the operator
+    // connection defaults to repeatable read.
+    let mut tx = control_db
+        .begin_with("BEGIN ISOLATION LEVEL READ COMMITTED")
         .await?;
-
-    let mut tx = control_db.begin().await?;
+    // Serialize only the final catalog check and write across activation aliases.
+    // Otherwise two aliases can each prove the same physical target is unused.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('vigilo:placement_activation', 0))")
+        .execute(&mut *tx)
+        .await?;
     let current = database_placements::select_database_placement_for_update(&mut tx, alias)
         .await?
         .ok_or_else(|| anyhow::anyhow!("database placement alias {} was not found", alias))?;
 
+    if current.database_url_env != snapshot.database_url_env
+        || current.role != snapshot.role
+        || current.created_at != snapshot.created_at
+    {
+        return Err(
+            PlacementConflict("placement registration changed during readiness checks").into(),
+        );
+    }
     if current.status == DATABASE_PLACEMENT_STATUS_ACTIVE {
         tx.commit().await?;
         return Ok(DatabasePlacementActivationOutcome {
@@ -580,15 +660,13 @@ pub(crate) async fn activate_database_placement(
         });
     }
     require_provisioning_shard_placement(&current)?;
-    if current.database_url_env != snapshot.database_url_env || current.role != snapshot.role {
-        anyhow::bail!(
-            "database placement alias {} changed while readiness was being verified; retry activation",
-            alias
-        );
+    if current != snapshot
+        || database_placements::list_activation_peers(&mut *tx, limit).await? != peers
+    {
+        return Err(PlacementConflict("placement catalog changed during readiness checks").into());
     }
 
-    let references = select_database_placement_references(&mut tx, alias).await?;
-    if references.route_count + references.creation_count + references.rebalance_count > 0 {
+    if has_database_activation_references(&mut tx, alias).await? {
         anyhow::bail!(
             "database placement alias {} gained control-plane references while provisioning; remove them before activation",
             alias
@@ -632,16 +710,19 @@ fn require_provisioning_shard_placement(placement: &DatabasePlacement) -> anyhow
 
 async fn verify_database_placement_readiness(
     database_router: &database::DatabaseRouter,
+    control_db: &PgPool,
     placement: &DatabasePlacement,
+    peers: &[DatabasePlacement],
 ) -> anyhow::Result<usize> {
-    let control_db = database_router.control().await?;
     let target_db = database_router
-        .provisioning_database(&placement.alias)
+        .resolve_placement_pool(placement, Instant::now())
         .await?;
     let target_identity = select_database_identity(&target_db).await?;
 
-    for existing in database_placements::list_serviceable_database_placements(control_db).await? {
-        let existing_db = database_router.placement(&existing.alias).await?;
+    for existing in peers {
+        let existing_db = database_router
+            .resolve_placement_pool(existing, Instant::now())
+            .await?;
         if select_database_identity(&existing_db).await? == target_identity {
             anyhow::bail!(
                 "database placement alias {} resolves to the same PostgreSQL database as serviceable placement {}",
@@ -651,32 +732,44 @@ async fn verify_database_placement_readiness(
         }
     }
 
-    let control_migrations = select_migration_fingerprints(control_db).await?;
-    let target_migrations = select_migration_fingerprints(&target_db).await?;
+    let mut target = target_db.acquire().await?;
+    verify_activation_target(control_db, &mut target, &placement.alias).await
+}
+
+/// Checks migration parity and rolls back a placement-local write probe.
+pub(crate) async fn verify_activation_target(
+    control: &PgPool,
+    target: &mut PgConnection,
+    alias: &str,
+) -> anyhow::Result<usize> {
+    let control_migrations = select_migration_fingerprints(control).await?;
+    let target_migrations = select_migration_fingerprints(&mut *target).await?;
     if target_migrations != control_migrations {
         anyhow::bail!(
             "database placement alias {} schema migrations do not match the control database",
-            placement.alias
+            alias
         );
     }
 
     let has_admissions = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM local_shard_admissions LIMIT 1)",
     )
-    .fetch_one(&target_db)
+    .fetch_one(&mut *target)
     .await?;
     if has_admissions {
         anyhow::bail!(
             "database placement alias {} already contains local shard ownership",
-            placement.alias
+            alias
         );
     }
 
-    verify_target_writable(&target_db, &placement.alias).await?;
+    verify_target_writable(target, alias).await?;
     Ok(target_migrations.len())
 }
 
-async fn select_migration_fingerprints(db: &PgPool) -> anyhow::Result<Vec<MigrationFingerprint>> {
+async fn select_migration_fingerprints<'e>(
+    db: impl Executor<'e, Database = Postgres>,
+) -> anyhow::Result<Vec<MigrationFingerprint>> {
     sqlx::query_as(
         r#"
         SELECT version, description, checksum
@@ -690,7 +783,7 @@ async fn select_migration_fingerprints(db: &PgPool) -> anyhow::Result<Vec<Migrat
     .map_err(Into::into)
 }
 
-async fn verify_target_writable(db: &PgPool, alias: &str) -> anyhow::Result<()> {
+async fn verify_target_writable(db: &mut PgConnection, alias: &str) -> anyhow::Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query(
         r#"

@@ -64,6 +64,30 @@ pub(in crate::db::workflows::shard_admin) async fn select_database_placement_ref
     .map_err(Into::into)
 }
 
+/// Detects an ownership reference without counting a placement's history.
+pub(in crate::db::workflows::shard_admin) async fn has_database_activation_references(
+    tx: &mut Transaction<'_, Postgres>,
+    alias: &str,
+) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (SELECT 1 FROM shard_placements WHERE database_alias = $1)
+            OR EXISTS (SELECT 1 FROM shard_placements WHERE move_target_database_alias = $1
+                       AND status IN ('copying', 'draining', 'moving'))
+            OR EXISTS (SELECT 1 FROM run_plan_shards creation JOIN runs run ON run.id = creation.run_id
+                       WHERE creation.database_alias = $1 AND run.status = 'creating'::run_status)
+            OR EXISTS (SELECT 1 FROM shard_rebalance_items item
+                       JOIN shard_rebalance_operations operation ON operation.id = item.operation_id
+                       WHERE operation.status IN ('planned', 'running')
+                         AND item.status IN ('pending', 'running')
+                         AND ($1 = item.source_database_alias OR $1 = item.target_database_alias))
+        "#,
+    )
+    .bind(alias)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
 pub(in crate::db::workflows::shard_admin) async fn select_shard_move_inspection(
     db: &PgPool,
     run_id: Uuid,

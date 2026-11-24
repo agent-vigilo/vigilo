@@ -63,8 +63,9 @@ and the upload-specific signing contract.
 
 The CLI uses typed operations for creation, cancellation, status/watch,
 results summaries, datasets and evaluators. Operator setup shares its workflows
-with the library's [setup operations](/docs/architecture/flows/setup/). Placement
-administration remains on its command path. CLI and hosted daemon
+with the library's [setup operations](/docs/architecture/flows/setup/). The
+standalone placement client exposes bounded catalog reads, registration, and
+verified activation. CLI and hosted daemon
 adapters share orchestration and worker cycles. Neither pools nor persistence
 records are part of the public operation API.
 
@@ -80,6 +81,7 @@ The public `operations` module returns typed values for interface adapters:
 | Dataset upload, resume and cleanup | `datasets::DatasetClient` |
 | Evaluator discovery, publication, state and tests | `evaluators::EvaluatorClient` |
 | Verified migrations, placement checks and pinned evaluator installation | `operations::setup` |
+| Database placement pages, registration, activation and per-run routes | `placement::PlacementClient` |
 | Coordinator and worker execution | `Coordinator` and `Worker`, constructed directly or through `HostedRuntime` |
 | Authenticated callback acceptance and due invocation work | `HostedRuntime::invocations` when a callback issuer is configured |
 

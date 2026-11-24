@@ -12,7 +12,10 @@ use std::path::{
 
 use anyhow::Context;
 use sqlx::{
+    Executor,
+    PgConnection,
     PgPool,
+    Postgres,
     migrate::Migrator,
 };
 
@@ -27,6 +30,48 @@ pub struct DatabaseIdentity {
     pub database: String,
     /// Exact installation schema, already present and first in the effective search path.
     pub schema: String,
+}
+
+impl DatabaseIdentity {
+    /// Reads the same cluster, database, and schema contract for setup and
+    /// placement readiness. An empty effective search path has no identity.
+    pub(crate) async fn observe<'e>(
+        connection: impl Executor<'e, Database = Postgres>,
+    ) -> anyhow::Result<(Option<Self>, bool)> {
+        let (system_identifier, database, schema, standby): (i64, String, Option<String>, bool) =
+            sqlx::query_as(
+                "SELECT system_identifier, pg_catalog.current_database()::text,
+                        pg_catalog.current_schema()::text, pg_catalog.pg_is_in_recovery()
+                 FROM pg_catalog.pg_control_system()",
+            )
+            .fetch_one(connection)
+            .await
+            .context("read PostgreSQL database identity")?;
+        Ok((
+            schema.map(|schema| Self {
+                system_identifier,
+                database,
+                schema,
+            }),
+            standby,
+        ))
+    }
+
+    pub(crate) fn same_database(&self, other: &Self) -> bool {
+        self.system_identifier == other.system_identifier && self.database == other.database
+    }
+
+    /// Constrains unqualified installation reads and writes to the verified schema.
+    pub(crate) async fn pin_schema(&self, connection: &mut PgConnection) -> anyhow::Result<()> {
+        sqlx::query(
+            "SELECT pg_catalog.set_config('search_path', pg_catalog.quote_ident($1), false)",
+        )
+        .bind(&self.schema)
+        .execute(connection)
+        .await
+        .context("pin schema on verified session")?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -63,31 +108,13 @@ pub(crate) async fn migrate_on_target(
     connection.close_on_drop();
     let result = async {
         if let Some(target) = target {
-            let (cluster, database, schema, standby): (i64, String, Option<String>, bool) =
-                sqlx::query_as(
-                    "SELECT system_identifier, pg_catalog.current_database()::text,
-                            pg_catalog.current_schema()::text, pg_catalog.pg_is_in_recovery()
-                     FROM pg_catalog.pg_control_system()",
-                )
-                .fetch_one(&mut *connection)
-                .await
-                .context("read PostgreSQL migration target identity")?;
-            if cluster != target.system_identifier
-                || database != target.database
-                || schema.as_deref() != Some(target.schema.as_str())
-                || standby
-            {
+            let (observed, standby) = DatabaseIdentity::observe(&mut *connection).await?;
+            if observed.as_ref() != Some(target) || standby {
                 return Err(WrongTarget.into());
             }
             // Keep SQLx's unqualified history table and the embedded DDL in the
             // verified schema even if another schema has objects of the same name.
-            sqlx::query(
-                "SELECT pg_catalog.set_config('search_path', pg_catalog.quote_ident($1), false)",
-            )
-            .bind(&target.schema)
-            .execute(&mut *connection)
-            .await
-            .context("pin migration schema on verified session")?;
+            target.pin_schema(&mut connection).await?;
         }
         migrator
             .run_direct(&mut *connection)

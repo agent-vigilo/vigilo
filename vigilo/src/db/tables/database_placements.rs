@@ -5,6 +5,7 @@
 //! row's `database_url_env`.
 
 use sqlx::{
+    Executor,
     PgPool,
     Postgres,
     Transaction,
@@ -27,6 +28,33 @@ pub(crate) async fn list_database_placements(
     .await?;
 
     Ok(placements)
+}
+
+/// Reads a bounded page using the catalog's primary-key order.
+pub(crate) async fn list_database_placement_page(
+    db: &PgPool,
+    after: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<DatabasePlacement>> {
+    let rows = if let Some(after) = after {
+        sqlx::query_as::<_, DatabasePlacement>(
+            "SELECT alias, database_url_env, role, status, created_at, updated_at
+             FROM database_placements WHERE alias > $1 ORDER BY alias LIMIT $2",
+        )
+        .bind(after)
+        .bind(limit)
+        .fetch_all(db)
+        .await?
+    } else {
+        sqlx::query_as::<_, DatabasePlacement>(
+            "SELECT alias, database_url_env, role, status, created_at, updated_at
+             FROM database_placements ORDER BY alias LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(db)
+        .await?
+    };
+    Ok(rows)
 }
 
 /// Lists active database placements ordered by alias for deterministic
@@ -52,14 +80,24 @@ pub(crate) async fn list_active_database_placements(
 pub(crate) async fn list_serviceable_database_placements(
     db: &PgPool,
 ) -> anyhow::Result<Vec<DatabasePlacement>> {
+    list_activation_peers(db, None).await
+}
+
+/// Reads the live peer set from either control or the activation transaction.
+pub(crate) async fn list_activation_peers<'e>(
+    db: impl Executor<'e, Database = Postgres>,
+    limit: Option<i64>,
+) -> anyhow::Result<Vec<DatabasePlacement>> {
     let placements = sqlx::query_as::<_, DatabasePlacement>(
         r#"
         SELECT alias, database_url_env, role, status, created_at, updated_at
         FROM database_placements
         WHERE status IN ('active', 'draining')
         ORDER BY alias
+        LIMIT $1
         "#,
     )
+    .bind(limit)
     .fetch_all(db)
     .await?;
 
@@ -128,17 +166,19 @@ pub(crate) async fn select_database_placement_for_share(
     Ok(placement)
 }
 
-pub(crate) async fn insert_database_placement(
+/// Inserts a catalog row without rewriting a winner's metadata on conflict.
+pub(crate) async fn try_insert_database_placement(
     db: &PgPool,
     alias: &str,
     database_url_env: &str,
     role: &str,
     status: &str,
-) -> anyhow::Result<DatabasePlacement> {
+) -> anyhow::Result<Option<DatabasePlacement>> {
     let placement = sqlx::query_as::<_, DatabasePlacement>(
         r#"
         INSERT INTO database_placements (alias, database_url_env, role, status)
         VALUES ($1, $2, $3, $4)
+        ON CONFLICT (alias) DO NOTHING
         RETURNING alias, database_url_env, role, status, created_at, updated_at
         "#,
     )
@@ -146,7 +186,7 @@ pub(crate) async fn insert_database_placement(
     .bind(database_url_env)
     .bind(role)
     .bind(status)
-    .fetch_one(db)
+    .fetch_optional(db)
     .await?;
 
     Ok(placement)

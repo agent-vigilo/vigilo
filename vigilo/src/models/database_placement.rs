@@ -26,7 +26,7 @@ pub(crate) const DATABASE_PLACEMENT_STATUS_DRAINING: &str = "draining";
 pub(crate) const DATABASE_PLACEMENT_STATUS_DISABLED: &str = "disabled";
 
 /// Persisted database placement row.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub(crate) struct DatabasePlacement {
     /// Stable routing alias.
     pub(crate) alias: String,

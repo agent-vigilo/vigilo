@@ -60,6 +60,7 @@ pub mod datasets;
 pub mod evaluators;
 pub mod export;
 pub mod invocations;
+pub mod placement;
 pub mod resources;
 pub(crate) mod results;
 pub mod setup;

@@ -20,6 +20,7 @@ placement owns.
 | 0036 | Shared change-capture function and triggers for shard moves |
 | 0037 | Durable execution-control delivery records |
 | 0038 | Tenant-scoped run listing index |
+| 0039 | Serviceable placement catalog index |
 
 Each table has one `create_<table>.sql` file containing its definition,
 partitions, initial indexes, comments, and associated integrity functions/triggers.

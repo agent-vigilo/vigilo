@@ -103,6 +103,7 @@ flowchart TD
     LibraryHost -->|"RunClient prepares and accepts immutable work"| RunPlanner
     HostedRuntime -->|"Caller-bound preparation and acceptance"| RunPlanner
     CliRouter -->|"Runs export and placement administration using"| RunQueries
+    LibraryHost -->|"Reads catalog pages and registers and activates placements"| RunQueries
     CliRouter -->|"Starts and runs service mode using"| CoordinatorFacade
     CliRouter -->|"Starts and runs service mode using"| WorkerFacade
 
