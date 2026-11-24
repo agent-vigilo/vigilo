@@ -85,6 +85,22 @@ pub fn check(client: &Client, restricted: &UserClient, caller: UserContext) {
             max_batches: 1,
         },
     ));
+    operation::<placement::ShardRebalancePlan>(placement_operator.plan_shard_rebalance(
+        &placement::PlanShardRebalanceRequest {
+            operation_id: id,
+            source_database_alias: Some("primary".into()),
+            target_database_alias: "shard_001".into(),
+            max_items: 32,
+        },
+    ));
+    operation::<placement::ShardRebalanceApplyOutcome>(placement_operator.apply_shard_rebalance(
+        &placement::ApplyShardRebalanceRequest {
+            operation_id: id,
+            after_sequence: None,
+            max_items: 4,
+            max_batches: 8,
+        },
+    ));
     operation::<setup::MigrationOutcome>(setup::apply_migrations(
         client,
         &setup::DatabaseIdentity {

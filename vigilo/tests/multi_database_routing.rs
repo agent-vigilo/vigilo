@@ -13,6 +13,7 @@ use std::{
         PathBuf,
     },
     process::Command,
+    time::Duration,
 };
 
 use serde_json::Value;
@@ -26,9 +27,13 @@ use vigilo::operations::{
     Config,
     Error,
     placement::{
+        ApplyShardRebalanceRequest,
         MoveRunShardRequest,
         PlacementClient,
+        PlanShardRebalanceRequest,
         RunShardMoveProgress,
+        ShardRebalanceItemProgress,
+        ShardRebalanceStatus,
     },
 };
 
@@ -621,6 +626,178 @@ async fn library_shard_move_budgets_drain_replay_and_destination_repair() -> any
         (PRIMARY_ALIAS.into(), "active".into(), 3)
     );
     assert_eq!(active_move_operation_count(&primary, run, 0).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn library_rebalance_shares_budget_and_resumes_exclusive_claims() -> anyhow::Result<()> {
+    let Some(config) = IntegrationConfig::from_env() else {
+        return Ok(());
+    };
+    let config = config.isolated().await?;
+    let primary = connect(&config.primary_url).await?;
+    let shard = connect(&config.shard_url).await?;
+    migrate(&primary).await?;
+    migrate(&shard).await?;
+    seed_evaluator(&primary).await?;
+    configure_shard_placement(&primary).await?;
+    let mut runs = Vec::new();
+    for _ in 0..3 {
+        runs.push(create_run(&config, PRIMARY_ALIAS, 1).await?);
+    }
+    runs.sort_unstable();
+    let operator = PlacementClient::new(
+        Client::new(Config::new(config.primary_url.clone()))?,
+        [(SHARD_DATABASE_URL_ENV.into(), config.shard_url.clone())].into(),
+    )?;
+    let id = Uuid::now_v7();
+    let request = PlanShardRebalanceRequest {
+        operation_id: id,
+        source_database_alias: Some(PRIMARY_ALIAS.into()),
+        target_database_alias: SHARD_ALIAS.into(),
+        max_items: 3,
+    };
+    let plan = operator.plan_shard_rebalance(&request).await?;
+    assert_eq!(plan.summary.status, ShardRebalanceStatus::Planned);
+    assert_eq!(
+        plan.items
+            .iter()
+            .map(|item| item.run_id)
+            .collect::<Vec<_>>(),
+        runs
+    );
+    assert_eq!(operator.plan_shard_rebalance(&request).await?, plan);
+    sqlx::query("UPDATE shard_placements SET route_version=route_version+1 WHERE run_id=$1")
+        .bind(runs[2])
+        .execute(&primary)
+        .await?;
+
+    // Hold the first move inside preparation, after both of its durable claims.
+    let mut fence = primary.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text,0))")
+        .bind(runs[0])
+        .execute(&mut *fence)
+        .await?;
+    let first = tokio::spawn({
+        let operator = operator.clone();
+        async move {
+            operator
+                .apply_shard_rebalance(&ApplyShardRebalanceRequest {
+                    operation_id: id,
+                    after_sequence: None,
+                    max_items: 1,
+                    max_batches: 1,
+                })
+                .await
+        }
+    });
+    let (first_move, first_token, move_token) = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(claims) = sqlx::query_as::<_, (Uuid, Uuid, Uuid)>(
+                "SELECT i.move_operation_id,i.claim_token,m.claim_token
+                 FROM shard_rebalance_items i JOIN shard_move_operations m ON m.id=i.move_operation_id
+                 WHERE i.operation_id=$1 AND i.sequence_no=0 AND i.status='running' AND m.claim_token IS NOT NULL",
+            ).bind(id).fetch_optional(&primary).await? { break Ok::<_, sqlx::Error>(claims); }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    }).await??;
+    let mut apply = ApplyShardRebalanceRequest {
+        operation_id: id,
+        after_sequence: None,
+        max_items: 3,
+        max_batches: 1,
+    };
+    let second = operator.apply_shard_rebalance(&apply).await?;
+    assert_eq!(second.batches_processed, 1);
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(second.items[0].item.run_id, runs[1]);
+    assert_ne!(second.items[0].move_operation_id, first_move);
+    assert_eq!(second.next_after_sequence, Some(1));
+    apply.after_sequence = second.next_after_sequence;
+    let stale = operator.apply_shard_rebalance(&apply).await?;
+    assert_eq!(stale.batches_processed, 0);
+    assert_eq!(stale.items.len(), 1);
+    assert_eq!(stale.items[0].item.run_id, runs[2]);
+    assert_eq!(
+        stale.items[0].progress,
+        ShardRebalanceItemProgress::StaleRoute
+    );
+    assert!(stale.next_after_sequence.is_none());
+    assert_eq!(stale.summary.failed_items, 1);
+
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    fence.commit().await?;
+    // Advance only this fixture's expired claims so the test need not sleep
+    // through the production lease intervals.
+    assert_eq!(sqlx::query("UPDATE shard_rebalance_items SET claimed_until=now()-interval '1 second' WHERE operation_id=$1 AND claim_token=$2")
+        .bind(id).bind(first_token).execute(&primary).await?.rows_affected(), 1);
+    assert_eq!(sqlx::query("UPDATE shard_move_operations SET claimed_until=now()-interval '1 second' WHERE id=$1 AND claim_token=$2")
+        .bind(first_move).bind(move_token).execute(&primary).await?.rows_affected(), 1);
+    apply.after_sequence = None;
+    let reclaimed = operator.apply_shard_rebalance(&apply).await?;
+    assert_eq!(reclaimed.batches_processed, 1);
+    assert_eq!(reclaimed.items.len(), 1);
+    assert_eq!(reclaimed.items[0].move_operation_id, first_move);
+    let operation = id.to_string();
+    let cli_resume = run_vigilo(
+        &config,
+        PRIMARY_ALIAS,
+        ["rebalance", "apply", &operation, "--max-items", "1"],
+    )?;
+    assert_eq!(
+        cli_resume["data"]["items"][0]["run_id"],
+        runs[0].to_string()
+    );
+    assert_eq!(cli_resume["data"]["items"][0]["status"], "completed");
+    let first_move_status: String =
+        sqlx::query_scalar("SELECT status FROM shard_move_operations WHERE id=$1")
+            .bind(first_move)
+            .fetch_one(&primary)
+            .await?;
+    assert_eq!(first_move_status, "completed");
+    let mut completed = None;
+    for _ in 0..20 {
+        let report = operator.apply_shard_rebalance(&apply).await?;
+        assert!(report.batches_processed <= 1);
+        for item in &report.items {
+            let expected = if item.sequence == 0 {
+                first_move
+            } else {
+                second.items[0].move_operation_id
+            };
+            assert_eq!(item.move_operation_id, expected);
+        }
+        if report.summary.status == ShardRebalanceStatus::Failed {
+            completed = Some(report.summary);
+            break;
+        }
+    }
+    let completed = completed.expect("both moves complete while the stale item stays failed");
+    assert_eq!((completed.completed_items, completed.failed_items), (2, 1));
+    let retry = operator.apply_shard_rebalance(&apply).await?;
+    assert_eq!(retry.summary, completed);
+    assert!(retry.items.is_empty());
+
+    let expected: Vec<(Uuid, Uuid)> =
+        sqlx::query_as("SELECT run_id,id FROM run_chunks WHERE run_id=ANY($1) ORDER BY run_id,id")
+            .bind(&runs[..2])
+            .fetch_all(&primary)
+            .await?;
+    let actual: Vec<(Uuid, Uuid)> =
+        sqlx::query_as("SELECT run_id,id FROM run_chunks ORDER BY run_id,id")
+            .fetch_all(&shard)
+            .await?;
+    assert_eq!(actual, expected);
+    assert_eq!(actual.len(), 2);
+    for run in &runs[..2] {
+        assert_eq!(local_admission_state(&shard, *run, 0).await?.2, "open");
+        assert_eq!(dispatch_cursor_count(&primary, *run).await?, 1);
+    }
+    assert_eq!(
+        shard_placement_alias(&primary, runs[2], 0).await?,
+        PRIMARY_ALIAS
+    );
     Ok(())
 }
 

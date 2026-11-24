@@ -81,7 +81,7 @@ The public `operations` module returns typed values for interface adapters:
 | Dataset upload, resume and cleanup | `datasets::DatasetClient` |
 | Evaluator discovery, publication, state and tests | `evaluators::EvaluatorClient` |
 | Verified migrations, placement checks and pinned evaluator installation | `operations::setup` |
-| Database placement catalog, per-run routes and resumable shard moves | `placement::PlacementClient` |
+| Database placement catalog, per-run routes, shard moves and bounded rebalancing | `placement::PlacementClient` |
 | Coordinator and worker execution | `Coordinator` and `Worker`, constructed directly or through `HostedRuntime` |
 | Authenticated callback acceptance and due invocation work | `HostedRuntime::invocations` when a callback issuer is configured |
 

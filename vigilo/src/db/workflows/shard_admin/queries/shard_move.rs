@@ -182,14 +182,14 @@ pub(in crate::db::workflows::shard_admin) async fn claim_shard_move_operation(
     current: &ShardPlacement,
     target_database_alias: &str,
     claim_token: Uuid,
-    identity: Option<ShardMoveIdentity>,
+    identity: Option<ShardMoveIdentity<'_>>,
 ) -> anyhow::Result<ShardMoveOperation> {
     let mut tx = control_db.begin().await?;
     validate_new_ownership_target(&mut tx, target_database_alias).await?;
 
     let route_version = lock_move_route_version(&mut tx, current.run_id, current.run_shard).await?;
     if route_version != Some(current.route_version) {
-        return Err(PlacementConflict("shard route changed before the move claim").into());
+        return Err(StaleShardMoveRoute("shard route changed before the move claim").into());
     }
 
     let existing = sqlx::query_as::<_, ShardMoveOperation>(
@@ -238,7 +238,7 @@ pub(in crate::db::workflows::shard_admin) async fn claim_shard_move_operation(
             identity.starting_route_version != current.route_version
                 || current.status != SHARD_PLACEMENT_STATUS_ACTIVE
         }) {
-            return Err(PlacementConflict("the initial shard route is stale").into());
+            return Err(StaleShardMoveRoute("the initial shard route is stale").into());
         }
         sqlx::query_as::<_, ShardMoveOperation>(
             r#"

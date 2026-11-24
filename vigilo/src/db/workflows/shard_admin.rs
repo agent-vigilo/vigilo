@@ -72,6 +72,7 @@ use crate::{
 };
 
 mod queries;
+pub(crate) mod rebalance_steps;
 
 use queries::*;
 
@@ -93,6 +94,11 @@ pub(crate) struct DatabasePlacementActivationOutcome {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub(crate) struct PlacementConflict(pub(crate) &'static str);
+
+/// A stored move fence can no longer authorize a route change.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct StaleShardMoveRoute(pub(crate) &'static str);
 
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 struct MigrationFingerprint {
@@ -177,6 +183,8 @@ pub(crate) struct ShardRebalanceOperation {
     pub(crate) completed_at: Option<DateTime<Utc>>,
     pub(crate) cancelled_at: Option<DateTime<Utc>>,
     pub(crate) updated_at: DateTime<Utc>,
+    #[serde(skip)]
+    library_max_items: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -196,9 +204,11 @@ pub(crate) struct ShardRebalanceItem {
     pub(crate) started_at: Option<DateTime<Utc>>,
     pub(crate) completed_at: Option<DateTime<Utc>>,
     pub(crate) updated_at: DateTime<Utc>,
+    #[serde(skip)]
+    move_operation_id: Option<Uuid>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
 pub(crate) struct PlannedShardRebalanceItem {
     pub(crate) run_id: Uuid,
     pub(crate) run_shard: i16,
@@ -257,9 +267,10 @@ pub(crate) struct ShardMoveOptions {
 
 /// Client-chosen identity and initial routing compare-and-swap fence.
 #[derive(Clone, Copy)]
-pub(crate) struct ShardMoveIdentity {
+pub(crate) struct ShardMoveIdentity<'a> {
     pub(crate) operation_id: Uuid,
     pub(crate) starting_route_version: i64,
+    pub(crate) expected_source: Option<&'a str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -289,10 +300,10 @@ impl MoveBudget {
 }
 
 struct ShardMoveStep<'a> {
-    identity: ShardMoveIdentity,
+    identity: ShardMoveIdentity<'a>,
     existing: Option<ShardMoveOperation>,
     budget: MoveBudget,
-    bindings: &'a BTreeMap<String, database::OperatorDatabaseBinding>,
+    bindings: Option<&'a BTreeMap<String, database::OperatorDatabaseBinding>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1384,6 +1395,28 @@ pub(crate) async fn apply_shard_rebalance(
             anyhow::anyhow!("shard rebalance operation {} was not found", operation_id)
         })?;
 
+    if operation.library_max_items.is_some() {
+        let bounded = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            rebalance_steps::apply_known(
+                database_router,
+                None,
+                operation,
+                rebalance_steps::ApplyRequest {
+                    operation_id,
+                    after_sequence: -1,
+                    max_items: options.max_items.min(64) as u16,
+                    max_batches: 64,
+                },
+            ),
+        )
+        .await??;
+        return Ok(ShardRebalanceApplyOutcome {
+            operation: bounded.operation,
+            processed_items: bounded.items.into_iter().map(|entry| entry.item).collect(),
+        });
+    }
+
     if matches!(
         operation.status.as_str(),
         REBALANCE_OPERATION_STATUS_COMPLETED
@@ -1671,11 +1704,11 @@ pub(crate) async fn move_shard_placement(
 /// number of data batches. A completed ID is an idempotent receipt.
 pub(crate) async fn advance_shard_move(
     database_router: &database::DatabaseRouter,
-    bindings: &BTreeMap<String, database::OperatorDatabaseBinding>,
+    bindings: Option<&BTreeMap<String, database::OperatorDatabaseBinding>>,
     run_id: Uuid,
     run_shard: i16,
     target_database_alias: &str,
-    identity: ShardMoveIdentity,
+    identity: ShardMoveIdentity<'_>,
     max_batches: u16,
 ) -> anyhow::Result<(ShardMoveProgress, u16)> {
     let control = database_router.control().await?;
@@ -1687,7 +1720,7 @@ pub(crate) async fn advance_shard_move(
         match operation.status.as_str() {
             "completed" => return Ok((ShardMoveProgress::Completed, 0)),
             "active" => {}
-            _ => return Err(PlacementConflict("move operation is no longer active").into()),
+            _ => return Err(StaleShardMoveRoute("move operation is no longer active").into()),
         }
     }
     let mut step = ShardMoveStep {
@@ -1724,13 +1757,16 @@ impl ShardMoveOperation {
         run_id: Uuid,
         run_shard: i16,
         target: &str,
-        identity: ShardMoveIdentity,
+        identity: ShardMoveIdentity<'_>,
     ) -> bool {
         self.id == identity.operation_id
             && self.run_id == run_id
             && self.run_shard == run_shard
             && self.target_database_alias == target
             && self.starting_route_version == identity.starting_route_version
+            && identity
+                .expected_source
+                .is_none_or(|source| source == self.source_database_alias)
     }
 }
 
@@ -1740,9 +1776,9 @@ async fn move_execution_database(
     alias: &str,
     accepts_new_ownership: bool,
 ) -> anyhow::Result<PgPool> {
-    if let Some(step) = step {
+    if let Some(bindings) = step.and_then(|step| step.bindings) {
         router
-            .operator_execution_database(alias, accepts_new_ownership, step.bindings)
+            .operator_execution_database(alias, accepts_new_ownership, bindings)
             .await
     } else if accepts_new_ownership {
         router.execution_target_database(alias).await
@@ -1782,9 +1818,13 @@ async fn move_shard_placement_inner(
         if step.existing.is_none()
             && (current.status != SHARD_PLACEMENT_STATUS_ACTIVE
                 || current.route_version != step.identity.starting_route_version
+                || step
+                    .identity
+                    .expected_source
+                    .is_some_and(|source| source != current.database_alias)
                 || current.database_alias == target_database_alias)
         {
-            return Err(PlacementConflict(
+            return Err(StaleShardMoveRoute(
                 "the initial shard route is stale or already at the target",
             )
             .into());
@@ -1802,7 +1842,7 @@ async fn move_shard_placement_inner(
                 SHARD_PLACEMENT_STATUS_MOVING => 3,
                 _ => {
                     return Err(
-                        PlacementConflict("shard route is no longer part of the move").into(),
+                        StaleShardMoveRoute("shard route is no longer part of the move").into(),
                     );
                 }
             };
@@ -1810,7 +1850,9 @@ async fn move_shard_placement_inner(
                 != Some(current.route_version)
                 || (route_step != 4 && current.database_alias != operation.source_database_alias)
             {
-                return Err(PlacementConflict("shard route is no longer part of the move").into());
+                return Err(
+                    StaleShardMoveRoute("shard route is no longer part of the move").into(),
+                );
             }
         }
     }
@@ -2113,7 +2155,7 @@ async fn apply_claimed_shard_move(
         && current.status == SHARD_PLACEMENT_STATUS_ACTIVE
     {
         if budget.is_some() {
-            return Err(PlacementConflict("shard route changed during move admission").into());
+            return Err(StaleShardMoveRoute("shard route changed during move admission").into());
         }
         let active_work_count =
             count_active_shard_work_with(&mut *source_tx, run_id, run_shard).await?;
@@ -2454,14 +2496,14 @@ async fn resume_activated_shard_move(
     if pending.phase != "cutover"
         || pending.starting_route_version.checked_add(4) != Some(route.route_version)
     {
-        return Err(PlacementConflict("activated shard route no longer matches the move").into());
+        return Err(StaleShardMoveRoute("activated shard route no longer matches the move").into());
     }
     let token = Uuid::now_v7();
     let mut tx = control.begin().await?;
     if lock_move_route_version(&mut tx, route.run_id, route.run_shard).await?
         != Some(route.route_version)
     {
-        return Err(PlacementConflict("shard route changed before destination recovery").into());
+        return Err(StaleShardMoveRoute("shard route changed before destination recovery").into());
     }
     let operation = claim_move_with(&mut tx, pending.id, token).await?;
     tx.commit().await?;

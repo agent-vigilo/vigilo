@@ -22,6 +22,7 @@ placement owns.
 | 0038 | Tenant-scoped run listing index |
 | 0039 | Serviceable placement catalog index |
 | 0040 | Indexed shard move replay and destination control checkpoints |
+| 0041 | Bounded rebalance planning cursors, candidate indexes, and stable item move IDs |
 
 Each table has one `create_<table>.sql` file containing its definition,
 partitions, initial indexes, comments, and associated integrity functions/triggers.

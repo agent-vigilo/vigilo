@@ -49,6 +49,19 @@ const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_MOVE_BATCHES: u16 = 64;
 const MOVE_STEP_TIMEOUT: Duration = Duration::from_secs(30);
 
+mod rebalance;
+pub use rebalance::{
+    AppliedShardRebalanceItem,
+    ApplyShardRebalanceRequest,
+    PlanShardRebalanceRequest,
+    ShardRebalanceApplyOutcome,
+    ShardRebalanceItem,
+    ShardRebalanceItemProgress,
+    ShardRebalancePlan,
+    ShardRebalanceStatus,
+    ShardRebalanceSummary,
+};
+
 /// Operator handle sharing the standalone client's control pool.
 #[derive(Clone)]
 pub struct PlacementClient {
@@ -165,6 +178,20 @@ pub enum RunShardMoveProgress {
     CuttingOver,
     /// The move completed. The route may have changed after completion.
     Completed,
+}
+
+impl From<shard_admin::ShardMoveProgress> for RunShardMoveProgress {
+    fn from(progress: shard_admin::ShardMoveProgress) -> Self {
+        use shard_admin::ShardMoveProgress as Progress;
+        match progress {
+            Progress::Resetting => Self::ResettingTarget,
+            Progress::Copying => Self::Copying,
+            Progress::CatchingUp => Self::CatchingUp,
+            Progress::Draining => Self::Draining,
+            Progress::CuttingOver => Self::CuttingOver,
+            Progress::Completed => Self::Completed,
+        }
+    }
 }
 
 /// Durable move identity and the work completed by this call.
@@ -362,13 +389,14 @@ impl PlacementClient {
             MOVE_STEP_TIMEOUT,
             shard_admin::advance_shard_move(
                 &self.client.database,
-                &self.bindings,
+                Some(&self.bindings),
                 request.run_id,
                 request.run_shard,
                 &request.target_database_alias,
                 shard_admin::ShardMoveIdentity {
                     operation_id: request.operation_id,
                     starting_route_version: request.expected_route_version,
+                    expected_source: None,
                 },
                 request.max_batches,
             ),
@@ -378,17 +406,9 @@ impl PlacementClient {
             Error::Dependency(anyhow::Error::new(error).context("shard move step timed out"))
         })?
         .map_err(placement_error)?;
-        use shard_admin::ShardMoveProgress as Progress;
         Ok(MoveRunShardOutcome {
             operation_id: request.operation_id,
-            progress: match progress {
-                Progress::Resetting => RunShardMoveProgress::ResettingTarget,
-                Progress::Copying => RunShardMoveProgress::Copying,
-                Progress::CatchingUp => RunShardMoveProgress::CatchingUp,
-                Progress::Draining => RunShardMoveProgress::Draining,
-                Progress::CuttingOver => RunShardMoveProgress::CuttingOver,
-                Progress::Completed => RunShardMoveProgress::Completed,
-            },
+            progress: progress.into(),
             batches_processed,
         })
     }
@@ -465,7 +485,10 @@ fn valid_name(name: &str) -> bool {
 fn placement_error(error: anyhow::Error) -> Error {
     match error.downcast::<shard_admin::PlacementConflict>() {
         Ok(conflict) => Error::Conflict(conflict.0),
-        Err(error) => Error::Dependency(error),
+        Err(error) => match error.downcast::<shard_admin::StaleShardMoveRoute>() {
+            Ok(conflict) => Error::Conflict(conflict.0),
+            Err(error) => Error::Dependency(error),
+        },
     }
 }
 

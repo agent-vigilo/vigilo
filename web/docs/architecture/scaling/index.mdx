@@ -657,7 +657,8 @@ vigilo rebalance cancel <operation_id>
 
 A rebalance plan records one item per targeted `run_id + run_shard` in the
 control database.
-Apply is resumable and bounded. The `rebalance apply` process atomically claims
+CLI apply is resumable and caps the number of items per invocation. The
+`rebalance apply` process atomically claims
 one item immediately before processing it, completes that item's single-shard
 move, and then selects another item. Multiple apply processes can work on the
 same plan because their item claims do not overlap. Only pending items or
@@ -676,3 +677,47 @@ changed with `--lease-seconds` or `VIGILO_REBALANCE_LEASE_SECONDS`.
 Drain-source planning includes shards owned by an `active` or `draining`
 source. Every target is revalidated as `active` when the route is activated,
 so a target that begins draining during a copy cannot receive the shard.
+
+### Bounded library rebalancing
+
+Call `PlacementClient::plan_shard_rebalance` with a caller-generated UUID,
+the target alias, and a total item limit of 1–256. Supply a source alias to
+drain that placement. Omit it to fill the target using observed active
+placement counts. Retry with the same request until the plan seals. Each
+call scans at most one page of 128 placements and one page of 256 route
+entries. The route cursor advances even when the page contains only
+creating runs. Selected items and the next cursor commit together on control.
+
+```mermaid
+stateDiagram-v2
+    [*] --> planning
+    planning --> planning: checkpoint another planning page
+    planning --> planned: seal selected items
+    planning --> completed: no items selected
+    planned --> running: claim an item
+    running --> running: checkpoint a move or settle an item
+    running --> completed: all items settled successfully
+    running --> failed: all items settled with failures
+    planning --> cancelled: cancel plan
+    planned --> cancelled: cancel plan
+    running --> cancelled: cancel plan
+```
+
+Fill-target planning observes committed metadata across calls. It fills toward
+the observed rounded-up average and selects at most each donor's observed
+excess. Every item retains its source and route version for apply-time
+validation. Planning leaves execution placement connections idle.
+
+Pass the sealed plan ID to `apply_shard_rebalance` with an item-claim limit and
+a shared move batch budget, both from 1 through 64. Each claim persists the
+same single-shard move ID across budget stops and lease recovery. The returned
+sequence can advance to later items when an earlier shard is still draining.
+Resume from the beginning to revisit deferred items after reaching the end.
+Stale routes fail individually, and terminal plans return their durable totals.
+Each call has a 30-second deadline. An interrupted apply can retain its item
+claim for up to six minutes while the move's own claim expires.
+
+The CLI can apply a library plan with the same bounded mover and configured
+placement credentials. CLI-created plans use the CLI apply workflow.
+Cancelling a plan can leave an unfinished single-shard move. Use the move ID
+from apply to resume it independently, or abort the move through the CLI.

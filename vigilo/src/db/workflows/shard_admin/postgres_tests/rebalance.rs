@@ -175,3 +175,161 @@ async fn concurrent_rebalance_apply_workers_move_each_item_once(pool: PgPool) {
     assert_eq!(route_versions.len(), items.len());
     assert!(route_versions.into_iter().all(|version| version == 5));
 }
+
+async fn seed_rebalance_routes(
+    pool: &PgPool,
+    run_id: Uuid,
+    alias: &str,
+    count: i32,
+    creating: bool,
+) {
+    seed_run(pool, run_id, run_id, run_id).await;
+    if creating {
+        sqlx::query("UPDATE runs SET status='creating' WHERE id=$1")
+            .bind(run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO shard_placements(run_id,run_shard,database_alias,status)
+         SELECT $1,shard::smallint,$2,'active' FROM generate_series(0,$3-1) AS shard",
+    )
+    .bind(run_id)
+    .bind(alias)
+    .bind(count)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
+async fn bounded_rebalance_plan_advances_past_a_sparse_raw_page(pool: PgPool) {
+    let _ = seed_rebalance_operation(&pool, 0).await;
+    seed_rebalance_routes(&pool, Uuid::from_u128(1), "primary", 128, true).await;
+    seed_rebalance_routes(&pool, Uuid::from_u128(2), "primary", 128, true).await;
+    let run = Uuid::from_u128(3);
+    seed_rebalance_routes(&pool, run, "primary", 3, false).await;
+
+    let id = Uuid::now_v7();
+    let request = || rebalance_steps::PlanRequest {
+        operation_id: id,
+        source: Some("primary"),
+        target: "shard_001",
+        max_items: 2,
+    };
+    let first = rebalance_steps::plan(&pool, request()).await.unwrap();
+    assert_eq!(first.operation.status, "planning");
+    assert_eq!(first.operation.planned_item_count, 0);
+    assert!(first.items.is_empty());
+    let raw_cursor: Value = sqlx::query_scalar(
+        "SELECT planning_state->'route' FROM shard_rebalance_operations WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        raw_cursor,
+        serde_json::json!({"run_id": Uuid::from_u128(2), "run_shard": 127})
+    );
+    assert!(
+        claim_next_rebalance_apply_item(&pool, id, Uuid::now_v7(), 60)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Both planners retry the same ID. Only one transaction builds the items.
+    let (sealed, replay) = tokio::join!(
+        rebalance_steps::plan(&pool, request()),
+        rebalance_steps::plan(&pool, request()),
+    );
+    let sealed = sealed.unwrap();
+    let replay = replay.unwrap();
+    assert_eq!(sealed.operation.status, "planned");
+    assert_eq!(sealed.items, replay.items);
+    assert_eq!(
+        sealed
+            .items
+            .iter()
+            .map(|item| (item.run_id, item.run_shard))
+            .collect::<Vec<_>>(),
+        [(run, 0), (run, 1)],
+    );
+    let moves: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT move_operation_id FROM shard_rebalance_items WHERE operation_id=$1 ORDER BY sequence_no",
+    ).bind(id).fetch_all(&pool).await.unwrap();
+    assert_eq!(moves.len(), 2);
+    assert_ne!(moves[0], moves[1]);
+    assert!(matches!(
+        rebalance_steps::plan(&pool, rebalance_steps::PlanRequest { max_items: 3, ..request() }).await,
+        Err(error) if error.is::<PlacementConflict>()
+    ));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL for sqlx shard admin tests"]
+async fn bounded_rebalance_fill_uses_resumed_counts_and_respects_donor_excess(pool: PgPool) {
+    let _ = seed_rebalance_operation(&pool, 0).await;
+    sqlx::query(
+        "INSERT INTO database_placements(alias,database_url_env,role,status)
+         VALUES ('alpha','ALPHA_DB_URL','shard','active'),('other','OTHER_DB_URL','shard','active')",
+    ).execute(&pool).await.unwrap();
+    let alpha_run = Uuid::from_u128(1);
+    let primary_run = Uuid::from_u128(2);
+    seed_rebalance_routes(&pool, primary_run, "primary", 9, false).await;
+    seed_rebalance_routes(&pool, alpha_run, "alpha", 8, false).await;
+
+    let id = Uuid::now_v7();
+    let request = || rebalance_steps::PlanRequest {
+        operation_id: id,
+        source: None,
+        target: "shard_001",
+        max_items: 9,
+    };
+    let catalog = rebalance_steps::plan(&pool, request()).await.unwrap();
+    assert_eq!(catalog.operation.status, "planning");
+    assert!(catalog.items.is_empty());
+    let mut sealed = None;
+    let mut changed_owner = false;
+    for _ in 0..12 {
+        let current = rebalance_steps::plan(&pool, request()).await.unwrap();
+        if current.operation.status == "planned" {
+            sealed = Some(current);
+            break;
+        }
+        assert!(current.items.is_empty());
+        if current.operation.planned_item_count == 3 && !changed_owner {
+            // A selected shard enters a later donor's range. Keep the first
+            // fence and skip the duplicate identity.
+            sqlx::query("UPDATE shard_placements SET database_alias='primary',route_version=2 WHERE run_id=$1 AND run_shard=0")
+                .bind(alpha_run).execute(&pool).await.unwrap();
+            changed_owner = true;
+        }
+    }
+    let items = sealed
+        .expect("fill plan seals after observing all placements")
+        .items;
+    let expected = [
+        (alpha_run, 0),
+        (alpha_run, 1),
+        (alpha_run, 2),
+        (primary_run, 0),
+        (primary_run, 1),
+    ];
+    assert_eq!(
+        items
+            .iter()
+            .map(|item| (item.run_id, item.run_shard))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(changed_owner);
+    assert_eq!(items[0].planned_route_version, 1);
+    assert_eq!(
+        rebalance_steps::plan(&pool, request()).await.unwrap().items,
+        items
+    );
+}

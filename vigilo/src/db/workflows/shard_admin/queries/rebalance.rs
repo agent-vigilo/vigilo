@@ -28,6 +28,7 @@ pub(in crate::db::workflows::shard_admin) async fn cancel_rebalance_operation(
         r#"
         UPDATE shard_rebalance_operations
         SET status = 'cancelled',
+            planning_state = NULL,
             cancelled_at = COALESCE(cancelled_at, now()),
             updated_at = now()
         WHERE id = $1::uuid
@@ -128,34 +129,64 @@ pub(in crate::db::workflows::shard_admin) async fn insert_rebalance_operation(
     .fetch_one(tx.as_mut())
     .await?;
 
-    for (idx, item) in items.iter().enumerate() {
-        sqlx::query(
-            r#"
-            INSERT INTO shard_rebalance_items (
-                operation_id,
-                sequence_no,
-                run_id,
-                run_shard,
-                source_database_alias,
-                target_database_alias,
-                planned_route_version
-            )
-            VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7)
-            "#,
-        )
-        .bind(operation.id)
-        .bind(idx as i32)
-        .bind(item.run_id)
-        .bind(item.run_shard)
-        .bind(&item.source_database_alias)
-        .bind(&item.target_database_alias)
-        .bind(item.planned_route_version)
-        .execute(tx.as_mut())
-        .await?;
+    let mut sequence = 0;
+    for page in items.chunks(256) {
+        append_rebalance_items(&mut tx, &operation, sequence, page).await?;
+        sequence += page.len() as i32;
     }
 
     tx.commit().await?;
     Ok(operation)
+}
+
+/// Stores a scored route page atomically with its planning cursor. Resolve the
+/// owning tenant from the run rather than a connection's default tenant.
+pub(in crate::db::workflows::shard_admin) async fn append_rebalance_items(
+    tx: &mut Transaction<'_, Postgres>,
+    operation: &ShardRebalanceOperation,
+    sequence: i32,
+    items: &[PlannedShardRebalanceItem],
+) -> anyhow::Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let runs: Vec<_> = items.iter().map(|item| item.run_id).collect();
+    let shards: Vec<_> = items.iter().map(|item| item.run_shard).collect();
+    let sources: Vec<_> = items
+        .iter()
+        .map(|item| item.source_database_alias.as_str())
+        .collect();
+    let versions: Vec<_> = items
+        .iter()
+        .map(|item| item.planned_route_version)
+        .collect();
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO shard_rebalance_items (tenant_id, operation_id, sequence_no, run_id, run_shard,
+            source_database_alias, target_database_alias, planned_route_version, move_operation_id)
+        SELECT run.tenant_id, $1, ($2::int + item.position - 1)::int, item.run_id, item.run_shard,
+               item.source_alias, $7, item.route_version, CASE WHEN $8 THEN gen_random_uuid() END
+        FROM unnest($3::uuid[], $4::smallint[], $5::text[], $6::bigint[]) WITH ORDINALITY
+            AS item(run_id, run_shard, source_alias, route_version, position)
+        JOIN runs run ON run.id = item.run_id
+        "#,
+    )
+    .bind(operation.id)
+    .bind(sequence)
+    .bind(runs)
+    .bind(shards)
+    .bind(sources)
+    .bind(versions)
+    .bind(&operation.target_database_alias)
+    .bind(operation.library_max_items.is_some())
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    anyhow::ensure!(
+        inserted == items.len() as u64,
+        "a planned shard lost its run before persistence"
+    );
+    Ok(())
 }
 
 pub(in crate::db::workflows::shard_admin) async fn select_rebalance_operation(
@@ -207,6 +238,16 @@ pub(in crate::db::workflows::shard_admin) async fn claim_next_rebalance_apply_it
     claimed_by: Uuid,
     lease_seconds: i32,
 ) -> anyhow::Result<Option<ClaimedShardRebalanceItem>> {
+    claim_next_rebalance_item_after(db, operation_id, claimed_by, lease_seconds, -1).await
+}
+
+pub(in crate::db::workflows::shard_admin) async fn claim_next_rebalance_item_after(
+    db: &PgPool,
+    operation_id: Uuid,
+    claimed_by: Uuid,
+    lease_seconds: i32,
+    after_sequence: i32,
+) -> anyhow::Result<Option<ClaimedShardRebalanceItem>> {
     let item = sqlx::query_as::<_, ClaimedShardRebalanceItem>(
         r#"
         WITH active_operation AS (
@@ -227,11 +268,11 @@ pub(in crate::db::workflows::shard_admin) async fn claim_next_rebalance_apply_it
             FROM shard_rebalance_items i
             JOIN active_operation operation
               ON operation.id = i.operation_id
-            WHERE i.status = 'pending'
+            WHERE i.sequence_no > $4 AND (i.status = 'pending'
                OR (
                     i.status = 'running'
                     AND i.claimed_until <= now()
-               )
+               ))
             ORDER BY i.sequence_no
             FOR UPDATE OF i SKIP LOCKED
             LIMIT 1
@@ -259,6 +300,7 @@ pub(in crate::db::workflows::shard_admin) async fn claim_next_rebalance_apply_it
     .bind(operation_id)
     .bind(claimed_by)
     .bind(lease_seconds)
+    .bind(after_sequence)
     .fetch_optional(db)
     .await?;
 
@@ -273,20 +315,24 @@ pub(in crate::db::workflows::shard_admin) async fn defer_rebalance_item(
 ) -> anyhow::Result<Option<ShardRebalanceItem>> {
     let item = sqlx::query_as::<_, ShardRebalanceItem>(
         r#"
-        UPDATE shard_rebalance_items
-        SET status = 'pending',
-            error_message = $5,
+        WITH operation AS MATERIALIZED (
+            SELECT status FROM shard_rebalance_operations WHERE id = $1::uuid FOR UPDATE
+        )
+        UPDATE shard_rebalance_items item
+        SET status = CASE WHEN operation.status = 'cancelled' THEN 'cancelled' ELSE 'pending' END,
+            error_message = CASE WHEN operation.status = 'cancelled' THEN NULL ELSE $5 END,
             claim_token = NULL,
             claimed_by = NULL,
             claimed_until = NULL,
-            completed_at = NULL,
+            completed_at = CASE WHEN operation.status = 'cancelled' THEN now() ELSE NULL END,
             updated_at = now()
-        WHERE operation_id = $1::uuid
-          AND run_id = $2::uuid
-          AND run_shard = $3
-          AND status = 'running'
-          AND claim_token = $4::uuid
-        RETURNING *
+        FROM operation
+        WHERE item.operation_id = $1::uuid
+          AND item.run_id = $2::uuid
+          AND item.run_shard = $3
+          AND item.status = 'running'
+          AND item.claim_token = $4::uuid
+        RETURNING item.*
         "#,
     )
     .bind(item.operation_id)
