@@ -4,6 +4,8 @@
  * work well for content-centric websites.
  */
 
+@import "./brand.css";
+
 /* You can override the default Infima variables here. */
 .navbar__logo {
   height: 20px;
@@ -11,10 +13,10 @@
 
 .button.button--primary {
   align-items: center;
-  background: #f2f0e9;
+  background: var(--vigilo-paper);
   border: 1px solid #b7b5af;
   border-radius: 6px;
-  color: #171717;
+  color: var(--vigilo-ink);
   display: inline-flex;
   font-size: 1rem;
   font-weight: 800;
@@ -29,7 +31,7 @@
 .button.button--primary:focus-visible {
   background: var(--vigilo-interactive-on-dark);
   border-color: var(--vigilo-interactive-on-dark);
-  color: #171717;
+  color: var(--vigilo-ink);
   text-decoration: none;
 }
 
@@ -45,9 +47,9 @@
 }
 
 .footer--dark {
-  --ifm-footer-background-color: #171717;
+  --ifm-footer-background-color: var(--vigilo-ink);
   --ifm-footer-color: #d6d6d6;
-  --ifm-footer-title-color: #f2f0e9;
+  --ifm-footer-title-color: var(--vigilo-paper);
   --ifm-footer-link-color: #e0e0e0;
   --ifm-footer-link-hover-color: var(--vigilo-interactive-on-dark);
   border-top: 1px solid #343434;
@@ -65,9 +67,7 @@
 }
 
 :root {
-  /* The hero and footer keep dark surfaces in both color modes. */
-  --vigilo-interactive-on-dark: #78aaff;
-  --ifm-color-primary: #0b5fff;
+  --ifm-color-primary: var(--vigilo-interactive);
   --ifm-color-primary-dark: #0052d6;
   --ifm-color-primary-darker: #0047ba;
   --ifm-color-primary-darkest: #003985;

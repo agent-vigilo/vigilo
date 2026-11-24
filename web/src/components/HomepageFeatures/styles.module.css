@@ -48,7 +48,7 @@
   align-items: center;
   background: #242424;
   border-radius: 6px;
-  color: #f2f0e9;
+  color: var(--vigilo-paper);
   display: inline-flex;
   font-size: 0.78rem;
   font-weight: 900;

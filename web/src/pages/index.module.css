@@ -1,7 +1,7 @@
 .heroBanner {
-  background: #171717;
+  background: var(--vigilo-ink);
   border-bottom: 1px solid #343434;
-  color: #f2f0e9;
+  color: var(--vigilo-paper);
   overflow: hidden;
   position: relative;
 }
@@ -87,7 +87,7 @@
 .secondaryButton {
   background: transparent;
   border: 1px solid #b7b5af;
-  color: #f2f0e9;
+  color: var(--vigilo-paper);
 }
 
 .secondaryButton:hover,
