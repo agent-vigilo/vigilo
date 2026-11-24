@@ -42,5 +42,7 @@ write('social-card.svg', `<svg xmlns="http://www.w3.org/2000/svg" width="1200" h
 `);
 
 render(['-background', 'none', '-density', '384', 'favicon.svg', '-define', 'icon:auto-resize=64,48,32,24,16', '-depth', '8', '-strip', 'favicon.ico']);
-render(['-background', ink, '-density', '384', 'favicon.svg', '-resize', '180x180', '-depth', '8', '-strip', 'apple-touch-icon.png']);
+for (const [name, size] of [['apple-touch-icon.png', 180], ['pwa-192.png', 192], ['pwa-512.png', 512]]) {
+  render(['-background', ink, '-density', '384', 'favicon.svg', '-resize', `${size}x${size}`, '-depth', '8', '-strip', name]);
+}
 render(['-background', 'none', '-density', '192', 'social-card.svg', '-resize', '1200x630', '-depth', '8', '-strip', 'social-card.png']);

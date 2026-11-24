@@ -32,7 +32,9 @@ to the canonical guides instead of duplicating them.
 Brand assets live in `static/img/`. `logo.svg` owns the mark geometry;
 `logo-dark.svg` supplies the ivory variant for dark surfaces. The README and
 navigation select the appropriate variant, while the homepage uses the ivory
-mark on charcoal. Favicons and the social sharing card use the same geometry.
+mark on charcoal. Favicons, the web app icons, and the social sharing card use
+the same geometry. The current site links to `/manifest.webmanifest`, which
+declares the 192×192 and 512×512 web app icons and the homepage launch URL.
 
 After editing the source mark, regenerate the derived assets with ImageMagick 7
 (`magick`) and the Liberation Sans font installed:

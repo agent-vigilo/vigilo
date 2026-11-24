@@ -25,6 +25,10 @@ const config: Config = {
   favicon: 'img/favicon.svg',
   staticDirectories: ['static', '../vigilo/fixtures'],
   headTags: [
+    ...(!archive ? [{
+      tagName: 'link',
+      attributes: {rel: 'manifest', href: '/manifest.webmanifest'},
+    }] : []),
     {
       tagName: 'link',
       attributes: {rel: 'alternate icon', type: 'image/x-icon', href: `${baseUrl}img/favicon.ico`},
