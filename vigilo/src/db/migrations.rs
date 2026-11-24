@@ -5,7 +5,10 @@
 //! application. Setup applies only pending migrations and fails on inconsistent
 //! history or invalid SQL before continuing to placement validation.
 
-use std::path::PathBuf;
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 use anyhow::Context;
 use sqlx::{
@@ -15,15 +18,39 @@ use sqlx::{
 
 static EMBEDDED: Migrator = sqlx::migrate!("./migrations");
 
+/// PostgreSQL identity obtained independently from the intended installation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseIdentity {
+    /// Cluster identifier returned by `pg_catalog.pg_control_system()`.
+    pub system_identifier: i64,
+    /// Exact PostgreSQL database name.
+    pub database: String,
+    /// Exact installation schema, already present and first in the effective search path.
+    pub schema: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("migration session does not match the expected writable database and schema")]
+pub(crate) struct WrongTarget;
+
 /// Applies pending migrations using embedded SQL or an explicit directory.
 ///
 /// The directory override never falls back to embedded SQL on failure. Applied
 /// versions and checksums are checked under SQLx's migration lock, and each
 /// pending migration is transactional unless its SQL explicitly opts out.
 pub(crate) async fn migrate(db: &PgPool, migrations_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    migrate_on_target(db, migrations_dir.as_deref(), None).await
+}
+
+/// Verifies an optional operator pin on the session SQLx will use for DDL.
+pub(crate) async fn migrate_on_target(
+    db: &PgPool,
+    migrations_dir: Option<&Path>,
+    target: Option<&DatabaseIdentity>,
+) -> anyhow::Result<()> {
     let directory = match migrations_dir {
         Some(path) => Some(
-            Migrator::new(path.as_path())
+            Migrator::new(path)
                 .await
                 .with_context(|| format!("load migrations from {}", path.display()))?,
         ),
@@ -34,9 +61,42 @@ pub(crate) async fn migrate(db: &PgPool, migrations_dir: Option<PathBuf>) -> any
     // SQLx releases its session lock on success only. Never return a session
     // holding that lock to the pool after an error or cancelled setup.
     connection.close_on_drop();
-    let result = migrator.run_direct(&mut *connection).await;
+    let result = async {
+        if let Some(target) = target {
+            let (cluster, database, schema, standby): (i64, String, Option<String>, bool) =
+                sqlx::query_as(
+                    "SELECT system_identifier, pg_catalog.current_database()::text,
+                            pg_catalog.current_schema()::text, pg_catalog.pg_is_in_recovery()
+                     FROM pg_catalog.pg_control_system()",
+                )
+                .fetch_one(&mut *connection)
+                .await
+                .context("read PostgreSQL migration target identity")?;
+            if cluster != target.system_identifier
+                || database != target.database
+                || schema.as_deref() != Some(target.schema.as_str())
+                || standby
+            {
+                return Err(WrongTarget.into());
+            }
+            // Keep SQLx's unqualified history table and the embedded DDL in the
+            // verified schema even if another schema has objects of the same name.
+            sqlx::query(
+                "SELECT pg_catalog.set_config('search_path', pg_catalog.quote_ident($1), false)",
+            )
+            .bind(&target.schema)
+            .execute(&mut *connection)
+            .await
+            .context("pin migration schema on verified session")?;
+        }
+        migrator
+            .run_direct(&mut *connection)
+            .await
+            .context("apply database migrations")
+    }
+    .await;
     let close_result = connection.close().await;
-    result.context("apply database migrations")?;
+    result?;
     close_result.context("close migration connection")?;
     Ok(())
 }

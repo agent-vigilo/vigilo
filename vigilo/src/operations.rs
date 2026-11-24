@@ -62,6 +62,7 @@ pub mod export;
 pub mod invocations;
 pub mod resources;
 pub(crate) mod results;
+pub mod setup;
 pub(crate) mod status;
 use std::time::Duration;
 

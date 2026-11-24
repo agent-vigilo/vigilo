@@ -24,6 +24,7 @@ use vigilo::operations::{
     evaluators,
     export,
     resources,
+    setup,
 };
 
 const STORAGE: &str =
@@ -53,6 +54,30 @@ pub fn check(client: &Client, restricted: &UserClient, caller: UserContext) {
     let id = "0198f36d-f7db-7d90-998c-d60d498dd979".parse().unwrap();
     let cancel = CancellationToken::new();
     operation::<operations::RunStatus>(client.run_status(id));
+    operation::<setup::MigrationOutcome>(setup::apply_migrations(
+        client,
+        &setup::DatabaseIdentity {
+            system_identifier: 1,
+            database: "vigilo".into(),
+            schema: "public".into(),
+        },
+        None,
+    ));
+    operation::<setup::PlacementValidation>(setup::validate_placements(
+        client,
+        &setup::PlacementValidationRequest {
+            default_shard_database_alias: "primary".into(),
+            database_url_references: Default::default(),
+        },
+    ));
+    operation::<setup::EvaluatorInstallation>(setup::install_official_evaluators(
+        client,
+        &setup::EvaluatorCollectionPin {
+            collection: "2026.10.28.1".into(),
+            catalog_sha256: "0".repeat(64),
+        },
+        None,
+    ));
     operation::<operations::RunResults>(client.run_results(id));
     operation::<operations::Cancellation>(client.cancel_run(id));
     operation::<operations::ControlOutcome>(

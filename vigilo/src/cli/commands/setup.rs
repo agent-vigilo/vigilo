@@ -57,7 +57,8 @@ impl Executable for Command {
 
         if !self.skip_evaluators {
             use anyhow::Context as _;
-            crate::core_evaluators::install(&context, self.evaluators.as_deref())
+            let github_token = std::env::var("VIGILO_GITHUB_TOKEN").ok();
+            crate::core_evaluators::install(&context, self.evaluators.as_deref(), None, github_token.as_deref())
                 .await.context("database setup completed, but core evaluator installation failed; rerun setup to retry, or use --skip-evaluators for database-only setup")?;
         }
         Ok(())

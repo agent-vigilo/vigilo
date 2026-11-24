@@ -150,7 +150,9 @@ async fn metadata_and_archive_limits_and_checksums_fail_closed() {
 #[cfg(feature = "evaluator-abi-fixtures")]
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires PostgreSQL"]
-async fn collection_publication_replays_without_download_and_rejects_conflicts(pool: sqlx::PgPool) {
+async fn pinned_collection_resumes_partial_install_and_preserves_registry_state(
+    pool: sqlx::PgPool,
+) {
     use sqlx::ConnectOptions;
 
     use crate::context::{
@@ -206,13 +208,38 @@ async fn collection_publication_replays_without_download_and_rejects_conflicts(p
             > cargo_metadata::semver::Version::parse(&entry.version).unwrap()
     );
     identity["version"] = newer_version.into();
-    let identity = serde_json::to_vec(&identity).unwrap();
+    let encoded = serde_json::to_vec(&identity).unwrap();
     assert_eq!(
-        identity.len(),
+        encoded.len(),
         length,
         "fixture package versions must have equal encoded width"
     );
-    newer_bytes[offset..offset + length].copy_from_slice(&identity);
+    newer_bytes[offset..offset + length].copy_from_slice(&encoded);
+    let other_name = "sentiment-other-en";
+    identity["name"] = other_name.into();
+    identity["version"] = entry.version.clone().into();
+    let encoded = serde_json::to_vec(&identity).unwrap();
+    assert_eq!(encoded.len(), length);
+    let mut other_bytes = newer_bytes.clone();
+    other_bytes[offset..offset + length].copy_from_slice(&encoded);
+    let other_path = directory.path().join("other.tar.gz");
+    let mut other = catalog().evaluators.remove(0);
+    other.name = other_name.into();
+    other.asset = format!("{}-{}.tar.gz", other.name, other.version);
+    other.artifact_blake3 = blake3::hash(&other_bytes).to_hex().to_string();
+    crate::evaluator_package::write(
+        &other_path,
+        crate::evaluator_package::PackageInput {
+            name: other.name.clone(),
+            version: other.version.clone(),
+            description: prepared.description.clone(),
+            tags: prepared.tags.clone(),
+            metadata: prepared.metadata.clone(),
+            abi: prepared.abi.clone(),
+            wasm: other_bytes,
+        },
+    )
+    .unwrap();
     let newer_path = directory.path().join("newer.tar.gz");
     let mut newer_entry = catalog().evaluators.remove(0);
     newer_entry.name = entry.name.clone();
@@ -266,7 +293,48 @@ async fn collection_publication_replays_without_download_and_rejects_conflicts(p
             .fetch_one(&pool)
             .await
             .unwrap();
-    publish_archive(&context, path, &entry).await.unwrap();
+    let first_archive = std::fs::read(path).unwrap();
+    let other_archive = std::fs::read(other_path).unwrap();
+    for (entry, archive) in [(&mut entry, &first_archive), (&mut other, &other_archive)] {
+        entry.size_bytes = archive.len() as u64;
+        entry.sha256 = format!("{:x}", Sha256::digest(archive));
+    }
+    let mut pinned = catalog();
+    pinned.evaluators = vec![entry, other];
+    let [first, second] = pinned.evaluators.as_slice() else {
+        unreachable!()
+    };
+    let failure = install_fixture(
+        &context,
+        &pinned,
+        vec![(&first.asset, Some(first_archive)), (&second.asset, None)],
+    )
+    .await
+    .unwrap_err();
+    assert!(format!("{failure:#}").contains("fixture archive transfer interrupted"));
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM evaluators")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows, 2,
+        "the newer version and first collection entry survive the failure"
+    );
+    sqlx::query("UPDATE evaluators SET state = 'disabled' WHERE version = $1")
+        .bind(&first.version)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replay = install_fixture(
+        &context,
+        &pinned,
+        vec![(&second.asset, Some(other_archive))],
+    )
+    .await
+    .unwrap();
+    assert_eq!((replay.installed, replay.already_present), (1, 1));
+    let complete = install_fixture(&context, &pinned, vec![]).await.unwrap();
+    assert_eq!((complete.installed, complete.already_present), (0, 2));
     let newer_after: serde_json::Value =
         sqlx::query_scalar("SELECT to_jsonb(e) FROM evaluators e WHERE version = $1")
             .bind(newer_version)
@@ -277,31 +345,17 @@ async fn collection_publication_replays_without_download_and_rejects_conflicts(p
         newer_after, newer_before,
         "installing an older collection must preserve the newer row exactly"
     );
-    sqlx::query("UPDATE evaluators SET state = 'disabled' WHERE version = $1")
-        .bind(&entry.version)
-        .execute(&pool)
-        .await
-        .unwrap();
-    // No proxy listener exists: a replay must finish without trying any HTTP request.
-    let client = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
-        .timeout(Duration::from_millis(100))
-        .build()
-        .unwrap();
-    install_entry(&context, &client, "2026.10.28.1", &entry)
-        .await
-        .unwrap();
-    entry.artifact_blake3 = "0".repeat(64);
-    let error = install_entry(&context, &client, "2026.10.28.1", &entry)
+    pinned.evaluators[0].artifact_blake3 = "0".repeat(64);
+    let error = install_fixture(&context, &pinned, vec![])
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("conflicts with catalog"));
+    assert!(format!("{error:#}").contains("conflicts with catalog"));
     let states: Vec<String> =
-        sqlx::query_scalar("SELECT state::text FROM evaluators ORDER BY version")
+        sqlx::query_scalar("SELECT state::text FROM evaluators ORDER BY name, version")
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(states, ["disabled", "active"]);
+    assert_eq!(states, ["disabled", "active", "active"]);
     context
         .dbr()
         .await
@@ -311,6 +365,53 @@ async fn collection_publication_replays_without_download_and_rejects_conflicts(p
         .unwrap()
         .close()
         .await;
+}
+
+#[cfg(feature = "evaluator-abi-fixtures")]
+async fn install_fixture(
+    context: &Context,
+    catalog: &Catalog,
+    archives: Vec<(&str, Option<Vec<u8>>)>,
+) -> anyhow::Result<EvaluatorInstallation> {
+    let bytes = serde_json::to_vec(catalog).unwrap();
+    let sha = format!("{:x}", Sha256::digest(&bytes));
+    let assets = std::iter::once(serde_json::json!({"name":"catalog.json", "size":bytes.len()}))
+        .chain(
+            catalog
+                .evaluators
+                .iter()
+                .map(|entry| serde_json::json!({"name":entry.asset,"size":entry.size_bytes})),
+        )
+        .collect::<Vec<_>>();
+    let release = serde_json::json!({"tag_name":format!("evaluators/{}",catalog.collection),"draft":false,"prerelease":false,"assets":assets});
+    let mut responses = std::collections::VecDeque::from([
+        (true, "", Some(serde_json::to_vec(&release).unwrap())),
+        (false, "catalog.json", Some(bytes)),
+    ]);
+    responses.extend(archives.into_iter().map(|(name, data)| (false, name, data)));
+    let result = install_from_source(
+        context,
+        Some(&catalog.collection),
+        Some(&sha),
+        |url, api| {
+            let (expected_api, expected_name, data) =
+                responses.pop_front().expect("unexpected archive request");
+            assert_eq!(api, expected_api);
+            if !api {
+                assert_eq!(
+                    url.path_segments().unwrap().next_back(),
+                    Some(expected_name)
+                );
+            }
+            std::future::ready(
+                data.map(response_body)
+                    .context("fixture archive transfer interrupted"),
+            )
+        },
+    )
+    .await;
+    assert!(responses.is_empty());
+    result
 }
 
 fn release_json(collection: &str) -> serde_json::Value {
@@ -324,7 +425,7 @@ async fn discover_fixture(
     replies: Vec<serde_json::Value>,
 ) -> anyhow::Result<Catalog> {
     let mut replies = std::collections::VecDeque::from(replies);
-    discover(pin, |url, api| {
+    discover(pin, None, |url, api| {
         assert_eq!(url.scheme(), "https");
         assert_eq!(
             url.host_str().unwrap(),
@@ -406,11 +507,41 @@ async fn discovery_rejects_missing_assets_forged_catalogs_and_hidden_releases() 
             .await
             .is_err()
     );
-    let error = discover(None, |_, _| {
+    let error = discover(None, None, |_, _| {
         std::future::ready(Err(anyhow::anyhow!("transport failure")))
     })
     .await;
     assert!(error.is_err());
+}
+
+#[tokio::test]
+async fn pinned_catalog_checks_the_original_bytes() {
+    let mut bytes = serde_json::to_vec(&catalog()).unwrap();
+    let compact_sha = format!("{:x}", Sha256::digest(&bytes));
+    bytes.push(b'\n');
+    let actual_sha = format!("{:x}", Sha256::digest(&bytes));
+    for (sha, expected) in [(compact_sha, false), (actual_sha, true)] {
+        let result = discover(Some("2026.10.28.1"), Some(&sha), |_, api| {
+            let data = if api {
+                serde_json::to_vec(&release_json("2026.10.28.1")).unwrap()
+            } else {
+                bytes.clone()
+            };
+            std::future::ready(Ok(response_body(data)))
+        })
+        .await;
+        if expected {
+            assert_eq!(result.unwrap().collection, "2026.10.28.1");
+        } else {
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("catalog SHA-256 does not match pin")
+            );
+        }
+    }
 }
 
 #[tokio::test]

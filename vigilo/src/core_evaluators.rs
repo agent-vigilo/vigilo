@@ -7,7 +7,11 @@
 //! are sequential and temporary files are removed on success or failure.
 
 use std::{
-    collections::HashSet,
+    collections::{
+        HashMap,
+        HashSet,
+    },
+    future::Future,
     time::Duration,
 };
 
@@ -25,8 +29,13 @@ use tracing::info;
 
 use crate::{
     context::Context,
+    db::tables::evaluators::{
+        EvaluatorRuntimeMetadata,
+        select_evaluator_runtime_metadata_by_identities,
+    },
     evaluator_abi::resolve_declaration,
     evaluator_package::Wit,
+    evaluators::PublishEvaluatorOutcome,
 };
 
 const API: &str = "https://api.github.com/repos/agent-vigilo/vigilo";
@@ -95,7 +104,7 @@ struct Entry {
     wit: Wit,
 }
 
-fn valid_hash(value: &str) -> bool {
+pub(crate) fn valid_hash(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
@@ -172,10 +181,10 @@ fn asset_url(collection: &str, asset: &str) -> anyhow::Result<reqwest::Url> {
 async fn response(
     client: &reqwest::Client,
     url: reqwest::Url,
-    api: bool,
+    token: Option<&str>,
 ) -> anyhow::Result<reqwest::Response> {
     let mut request = client.get(url);
-    if api && let Ok(token) = std::env::var("VIGILO_GITHUB_TOKEN") {
+    if let Some(token) = token {
         request = request.bearer_auth(token);
     }
     Ok(request
@@ -186,9 +195,15 @@ async fn response(
 }
 
 async fn bounded_json<T: serde::de::DeserializeOwned>(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     limit: u64,
 ) -> anyhow::Result<T> {
+    Ok(serde_json::from_slice(
+        &bounded_bytes(response, limit).await?,
+    )?)
+}
+
+async fn bounded_bytes(mut response: reqwest::Response, limit: u64) -> anyhow::Result<Vec<u8>> {
     ensure!(
         response.content_length().is_none_or(|size| size <= limit),
         "release metadata exceeds byte limit"
@@ -201,7 +216,7 @@ async fn bounded_json<T: serde::de::DeserializeOwned>(
         );
         bytes.extend_from_slice(&chunk);
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    Ok(bytes)
 }
 
 fn collection_releases(releases: Vec<Release>) -> anyhow::Result<Vec<Release>> {
@@ -219,10 +234,14 @@ fn collection_releases(releases: Vec<Release>) -> anyhow::Result<Vec<Release>> {
 }
 
 /// Resolves release metadata independently of transport so selection stays testable offline.
-async fn discover<F, Fut>(pin: Option<&str>, mut fetch: F) -> anyhow::Result<Catalog>
+async fn discover<F, Fut>(
+    pin: Option<&str>,
+    catalog_sha256: Option<&str>,
+    mut fetch: F,
+) -> anyhow::Result<Catalog>
 where
     F: FnMut(reqwest::Url, bool) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<reqwest::Response>>,
+    Fut: Future<Output = anyhow::Result<reqwest::Response>>,
 {
     let releases = if let Some(pin) = pin {
         parse_collection(pin).map_err(anyhow::Error::msg)?;
@@ -265,11 +284,18 @@ where
             assets.len() == 1 && assets[0].size <= MAX_CATALOG,
             "release must contain one bounded catalog.json"
         );
-        let catalog: Catalog = bounded_json(
+        let bytes = bounded_bytes(
             fetch(asset_url(collection, "catalog.json")?, false).await?,
             MAX_CATALOG,
         )
         .await?;
+        if let Some(expected) = catalog_sha256 {
+            ensure!(
+                format!("{:x}", Sha256::digest(&bytes)) == expected,
+                "catalog SHA-256 does not match pin"
+            );
+        }
+        let catalog: Catalog = serde_json::from_slice(&bytes)?;
         catalog.validate(collection)?;
         for entry in &catalog.evaluators {
             ensure!(
@@ -295,82 +321,137 @@ where
     )
 }
 
-/// Installs the selected collection through the same validation/publication path as the CLI.
-pub(crate) async fn install(context: &Context, pin: Option<&str>) -> anyhow::Result<()> {
+/// Summary of a successfully installed official evaluator collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluatorInstallation {
+    /// Canonical collection identifier.
+    pub collection: String,
+    /// Versions inserted by this invocation.
+    pub installed: usize,
+    /// Matching versions already present, including concurrent insertions.
+    pub already_present: usize,
+}
+
+/// Installs through the same validation and registry path for library and CLI setup.
+pub(crate) async fn install(
+    context: &Context,
+    pin: Option<&str>,
+    catalog_sha256: Option<&str>,
+    github_token: Option<&str>,
+) -> anyhow::Result<EvaluatorInstallation> {
     let client = reqwest::Client::builder()
         .https_only(true)
         .user_agent(concat!("vigilo/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(120))
         .build()?;
-    let catalog = discover(pin, |url, api| response(&client, url, api)).await?;
-    info!(collection = %catalog.collection, "installing official core evaluators");
-    for entry in catalog.evaluators {
-        install_entry(context, &client, &catalog.collection, &entry)
-            .await
-            .with_context(|| {
-                format!(
-                    "install vigilo/{}:{} from {}",
-                    entry.name, entry.version, catalog.collection
-                )
-            })?;
-    }
-    info!(collection = %catalog.collection, "core evaluator collection installed");
-    Ok(())
+    install_from_source(context, pin, catalog_sha256, |url, api| {
+        response(&client, url, if api { github_token } else { None })
+    })
+    .await
 }
 
-async fn install_entry(
+/// The same installer consumes either official responses or exact test fixtures.
+async fn install_from_source<F, Fut>(
     context: &Context,
-    client: &reqwest::Client,
-    collection: &str,
-    entry: &Entry,
-) -> anyhow::Result<()> {
+    pin: Option<&str>,
+    catalog_sha256: Option<&str>,
+    mut fetch: F,
+) -> anyhow::Result<EvaluatorInstallation>
+where
+    F: FnMut(reqwest::Url, bool) -> Fut,
+    Fut: Future<Output = anyhow::Result<reqwest::Response>>,
+{
+    let catalog = discover(pin, catalog_sha256, &mut fetch).await?;
+    info!(collection = %catalog.collection, "installing official core evaluators");
     let db = context.dbr().await?.control().await?;
-    if let Some(existing) =
-        crate::db::tables::evaluators::select_evaluator(db, "vigilo", &entry.name, &entry.version)
+    let identities = catalog
+        .evaluators
+        .iter()
+        .map(|entry| {
+            (
+                "vigilo".to_owned(),
+                entry.name.clone(),
+                entry.version.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    // One indexed metadata read handles replays without loading stored Wasm.
+    let mut existing: HashMap<_, _> =
+        select_evaluator_runtime_metadata_by_identities(db, &identities)
             .await?
-    {
-        ensure!(
-            existing.content_hash == entry.artifact_blake3
-                && existing.abi_contract_hash == entry.wit.contract_hash
-                && existing.interface_name
-                    == format!("{}/{}", entry.wit.package, entry.wit.interface)
-                && existing.interface_version == entry.wit.version
-                && existing.wit_world == entry.wit.world
-                && existing.abi_adapter
-                    == resolve_declaration(
-                        &entry.wit.package,
-                        &entry.wit.world,
-                        &entry.wit.interface,
-                        &entry.wit.version
-                    )?
-                    .identity()
-                    .adapter,
-            "installed evaluator conflicts with catalog"
-        );
-        info!(name = %entry.name, version = %entry.version, "core evaluator already installed");
-        return Ok(());
+            .into_iter()
+            .map(|row| (row.name.clone(), row))
+            .collect();
+    let mut outcome = EvaluatorInstallation {
+        collection: catalog.collection,
+        installed: 0,
+        already_present: 0,
+    };
+    for entry in catalog.evaluators {
+        let installed = async {
+            if let Some(row) = existing.remove(&entry.name) {
+                verify_installed(&row, &entry)?;
+                info!(name = %entry.name, version = %entry.version, "core evaluator already installed");
+                return Ok(false);
+            }
+            let path = tempfile::Builder::new().suffix(".tar.gz").tempfile()?.into_temp_path();
+            let response = fetch(asset_url(&outcome.collection, &entry.asset)?, false).await?;
+            download(response, &path, &entry).await?;
+            publish_archive(context, path, &entry).await
+        }
+        .await
+        .with_context(|| format!("install vigilo/{}:{} from {}", entry.name, entry.version, outcome.collection))?;
+        if installed {
+            outcome.installed += 1;
+        } else {
+            outcome.already_present += 1;
+        }
     }
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("package.tar.gz");
-    let response = response(client, asset_url(collection, &entry.asset)?, false).await?;
-    download(response, &path, entry).await?;
-    publish_archive(context, path, entry).await
+    info!(collection = %outcome.collection, "core evaluator collection installed");
+    Ok(outcome)
+}
+
+fn verify_installed(existing: &EvaluatorRuntimeMetadata, entry: &Entry) -> anyhow::Result<()> {
+    ensure!(
+        existing.content_hash == entry.artifact_blake3
+            && existing.abi_contract_hash == entry.wit.contract_hash
+            && existing.interface_name == format!("{}/{}", entry.wit.package, entry.wit.interface)
+            && existing.interface_version == entry.wit.version
+            && existing.wit_world == entry.wit.world
+            && existing.abi_adapter
+                == resolve_declaration(
+                    &entry.wit.package,
+                    &entry.wit.world,
+                    &entry.wit.interface,
+                    &entry.wit.version
+                )?
+                .identity()
+                .adapter,
+        "installed evaluator conflicts with catalog"
+    );
+    Ok(())
 }
 
 /// Validates downloaded package identity against its catalog before registry writes.
 async fn publish_archive(
     context: &Context,
-    path: std::path::PathBuf,
+    path: impl AsRef<std::path::Path> + Send + 'static,
     entry: &Entry,
-) -> anyhow::Result<()> {
-    let component = context
-        .wasm()
-        .await?
-        .prepare_evaluator(path, "release".into())?;
+) -> anyhow::Result<bool> {
+    let wasm = context.wasm().await?.clone();
+    // The blocking preparation owns the scratch file even if the caller drops
+    // the future. A cancelled preparation cannot reach publication.
+    let component = tokio::task::spawn_blocking(move || {
+        wasm.prepare_evaluator(path.as_ref().to_path_buf(), "release".into())
+    })
+    .await
+    .context("join official evaluator preparation")??;
     verify_component(&component, entry)?;
-    crate::evaluators::publish_prepared(context, component).await?;
-    Ok(())
+    Ok(matches!(
+        crate::evaluators::publish_prepared(context, component).await?,
+        PublishEvaluatorOutcome::Inserted(_)
+    ))
 }
 
 /// Streams a bounded archive to an owned temporary path and verifies its checksum.

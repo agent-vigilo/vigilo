@@ -1,26 +1,35 @@
 sequenceDiagram
     actor Operator
-    participant CLI as Vigilo Setup
+    participant Setup as Vigilo Setup
+    participant Target as PostgreSQL Migration Target
     participant DB as Control Database
     participant GitHub as Official GitHub Releases
     participant Host as Evaluator Host
-    Operator->>CLI: setup [--evaluators ID | --skip-evaluators]
-    CLI->>DB: Apply pending migrations and validate placement
+    alt Standalone Rust host
+        Operator->>Setup: apply_migrations with verified target identity
+        Setup->>Target: Check cluster, database, schema and recovery state
+        Setup->>Target: Pin schema and apply pending migrations on the same session
+        Operator->>Setup: validate_placements with connection reference names
+        Setup->>DB: Validate the control catalog and routes
+    else CLI setup
+        Operator->>Setup: setup [--evaluators ID | --skip-evaluators]
+        Setup->>DB: Apply pending migrations and validate placement
+    end
     opt Evaluators enabled
-        CLI->>GitHub: Discover published collection and read bounded catalog
-        CLI->>CLI: Validate catalog and select exact compatible ABI set
+        Setup->>GitHub: Read published release metadata and bounded catalog
+        Setup->>Setup: Check library catalog pin and validate the ABI set
+        Setup->>DB: Read installed version metadata in one batch
         loop Each evaluator (sequential)
-            CLI->>DB: Read existing version
             alt Matching identity already installed
-                DB-->>CLI: Skip download and preserve lifecycle state
+                Setup->>Setup: Skip download and preserve lifecycle state
             else Version absent
-                CLI->>GitHub: Stream archive into owned temporary file
-                CLI->>CLI: Verify size and SHA-256
-                CLI->>Host: Validate portable package, compile, typed-link ABI
-                Host-->>CLI: Prepared artifact
-                CLI->>CLI: Match prepared artifact to catalog
-                CLI->>DB: Insert missing version, retain all existing versions
+                Setup->>GitHub: Stream archive into owned temporary file
+                Setup->>Setup: Verify size and SHA-256
+                Setup->>Host: Validate portable package, compile, typed-link ABI
+                Host-->>Setup: Prepared artifact
+                Setup->>Setup: Match prepared artifact to catalog
+                Setup->>DB: Insert missing version, retain all existing versions
             end
         end
     end
-    CLI-->>Operator: Success or contextual error, completed work retained
+    Setup-->>Operator: Success or contextual error, completed work retained

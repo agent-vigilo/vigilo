@@ -215,7 +215,7 @@ jobs:
         run: >-
           cargo llvm-cov --no-report -p vigilo --locked --lib
           --features evaluator-abi-fixtures --
-          core_evaluators::tests::collection_publication_replays_without_download_and_rejects_conflicts
+          core_evaluators::tests::pinned_collection_resumes_partial_install_and_preserves_registry_state
           --ignored --exact --nocapture
       - name: Generate SQLx coverage report
         run: >-

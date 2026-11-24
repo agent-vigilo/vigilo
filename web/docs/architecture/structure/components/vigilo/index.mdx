@@ -62,8 +62,9 @@ bindings; the CLI supplies regular files and formats its operator JSON. See
 and the upload-specific signing contract.
 
 The CLI uses typed operations for creation, cancellation, status/watch,
-results summaries, datasets and evaluators. Operator setup and placement commands
-use private library workflows. CLI and hosted daemon
+results summaries, datasets and evaluators. Operator setup shares its workflows
+with the library's [setup operations](/docs/architecture/flows/setup/). Placement
+administration remains on its command path. CLI and hosted daemon
 adapters share orchestration and worker cycles. Neither pools nor persistence
 records are part of the public operation API.
 
@@ -78,6 +79,7 @@ The public `operations` module returns typed values for interface adapters:
 | Bounded ordinary and sensitive exports | `export::ExportClient` and `export::SensitiveExportClient` |
 | Dataset upload, resume and cleanup | `datasets::DatasetClient` |
 | Evaluator discovery, publication, state and tests | `evaluators::EvaluatorClient` |
+| Verified migrations, placement checks and pinned evaluator installation | `operations::setup` |
 | Coordinator and worker execution | `Coordinator` and `Worker`, constructed directly or through `HostedRuntime` |
 | Authenticated callback acceptance and due invocation work | `HostedRuntime::invocations` when a callback issuer is configured |
 

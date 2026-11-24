@@ -1483,6 +1483,21 @@ impl DatabaseRouter {
     }
 
     pub(crate) async fn validate_placement_config(&self) -> anyhow::Result<()> {
+        self.validate_placement_bindings(
+            &self.placement_config.default_shard_database_alias,
+            |reference| self.resolve_database_url_env(reference).map(drop),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Validate the catalog using the caller's authority for resolving reference names.
+    /// Only the control pool participates. Reachability is a separate check.
+    pub(crate) async fn validate_placement_bindings(
+        &self,
+        default_shard_database_alias: &str,
+        validate_binding: impl Fn(&str) -> anyhow::Result<()> + Send,
+    ) -> anyhow::Result<usize> {
         anyhow::ensure!(
             self.fixed_pools.is_none(),
             "placement setup requires the standalone operator domain"
@@ -1495,7 +1510,7 @@ impl DatabaseRouter {
         }
 
         for placement in &placements {
-            self.resolve_database_url_env(&placement.database_url_env)?;
+            validate_binding(&placement.database_url_env)?;
         }
 
         let control_placements = placements
@@ -1528,7 +1543,7 @@ impl DatabaseRouter {
 
         validate_shard_capable_alias(
             &placements_by_alias,
-            &self.placement_config.default_shard_database_alias,
+            default_shard_database_alias,
             "VIGILO_DEFAULT_SHARD_DATABASE_ALIAS",
         )?;
 
@@ -1541,7 +1556,7 @@ impl DatabaseRouter {
             );
         }
 
-        Ok(())
+        Ok(placements.len())
     }
 
     fn resolve_database_url_env(&self, database_url_env: &str) -> anyhow::Result<String> {

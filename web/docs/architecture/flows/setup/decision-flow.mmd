@@ -1,11 +1,16 @@
 flowchart TD
-    Start[Setup] --> Schema[Apply migrations and validate placement]
-    Schema --> Skip{Skip evaluators?}
-    Skip -->|Yes| Done[Success]
-    Skip -->|No| Select[Resolve pinned or latest compatible collection]
+    Start[Setup] --> Caller{Library or CLI?}
+    Caller -->|Library| Identity{Target matches on the migration session?}
+    Identity -->|Yes| Schema[Apply migrations and validate placement]
+    Identity -->|No| Fail[Fail with context and retain completed work]
+    Caller -->|CLI| Schema
+    Schema --> Install{Install evaluators?}
+    Install -->|No| Done[Success]
+    Install -->|Yes| Select[Verify library tag and catalog digest or select CLI collection]
     Select --> Valid{Catalog valid and supported?}
-    Valid -->|No| Fail[Fail with context; retain completed work]
-    Valid -->|Yes| Next{More evaluators?}
+    Valid -->|No| Fail
+    Valid -->|Yes| Load[Read installed evaluator metadata in one batch]
+    Load --> Next{More evaluators?}
     Next -->|No| Done
     Next -->|Yes| Existing{Installed version?}
     Existing -->|Matching| Next

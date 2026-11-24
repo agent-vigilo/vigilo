@@ -10,14 +10,31 @@ import decision from './decision-flow.mmd';
 
 # Setup
 
-Setup applies pending migrations and validates placement before installing the
-selected official evaluator collection. `--skip-evaluators` ends after database
-setup. Collection discovery and bounded downloads belong to the CLI; artifact
-validation and registry publication share the evaluator publishing path.
+The CLI `vigilo setup` applies pending migrations and validates placement before
+installing the selected official evaluator collection. `--skip-evaluators` ends
+after database setup. A trusted Rust host calls `vigilo::operations::setup`
+with a standalone operator `Client`. Setup stays outside runtime construction,
+run submission, and execution.
 
-Installation preserves completed work on failure. Matching evaluator versions
-are skipped on retry, conflicting content fails, and existing profiles, runs,
-and evaluator lifecycle states remain unchanged. Pinning an older collection
+- `apply_migrations` checks the expected PostgreSQL cluster identifier,
+  database name, and current schema on the session that applies migrations.
+  Obtain the expected identity from provisioning. Use a direct connection or
+  session pooling for the SQLx migration lock. The operator login needs access
+  to `pg_catalog.pg_control_system()` and permission to install the schema.
+  PostgreSQL physical copies retain the cluster identifier. Pinning distinguishes
+  independently initialized clusters, even with the same database name.
+- `validate_placements` reads the control catalog and checks the declared
+  connection reference names, default shard alias, and serviceable routes.
+  Use it to check configuration independently of remote reachability and
+  installation readiness.
+- `install_official_evaluators` requires an exact collection identifier and the
+  SHA-256 of the original `catalog.json` bytes. It uses the official release
+  metadata endpoint and accepts an explicit optional GitHub token. A catalog
+  digest mismatch fails before registry access.
+
+Installation preserves completed work on failure. A single batched metadata
+query identifies matching versions without loading their Wasm artifacts. Setup
+skips them on retry, and conflicting content fails. Pinning an older collection
 adds missing versions while retaining newer ones; using an older evaluator
 requires an explicit profile reference change. There is no transaction across
 a whole collection. Temporary downloads are cleaned up on success and failure.

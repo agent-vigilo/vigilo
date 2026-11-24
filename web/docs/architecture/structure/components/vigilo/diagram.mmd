@@ -97,6 +97,7 @@ flowchart TD
     RuntimeContext -->|"Provides output buffer to"| OutputRenderer
 
     CliRouter -->|"Runs setup commands using"| SetupManager
+    LibraryHost -->|"Verifies migration target and pins evaluator catalog"| SetupManager
     CliRouter -->|"Runs evaluator commands using"| EvaluatorRegistry
     CliRouter -->|"Runs run commands using"| RunPlanner
     LibraryHost -->|"RunClient prepares and accepts immutable work"| RunPlanner
