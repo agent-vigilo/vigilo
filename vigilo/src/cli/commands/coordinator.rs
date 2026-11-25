@@ -58,7 +58,8 @@ use crate::{
         MqEventPublisher,
         OutboxPublishStats,
         OutboxPublisherConfig,
-        publish_pending_events,
+        publish_claimed_events,
+        within_outbox_acquisition_deadline,
     },
     runtime::ServiceRunner,
 };
@@ -945,12 +946,27 @@ async fn publish_outbox_events(
         "outbox_publication",
         aliases,
         |alias| async move {
-            let db = database_router.placement(&alias).await?;
+            let (db, mut connection) = within_outbox_acquisition_deadline(&alias, async {
+                let db = database_router.placement(&alias).await?;
+                let connection = db.acquire().await?;
+                Ok((db, connection))
+            })
+            .await?;
             let backlog_started = Instant::now();
-            let outbox_backlog = outbox_events::count_publishable_outbox_backlog(&db).await?;
+            let outbox_backlog =
+                outbox_events::count_publishable_outbox_backlog(&mut *connection).await?;
             let outbox_backlog_query_ms = backlog_started.elapsed().as_millis() as u64;
             let publish_started = Instant::now();
-            let alias_stats = publish_pending_events(&db, publisher, config).await?;
+            let claimed_events = outbox_events::claim_publishable_outbox_events(
+                &mut *connection,
+                config.batch_size,
+                config.lease_seconds,
+            )
+            .await?;
+            drop(connection);
+            let alias_stats =
+                publish_claimed_events(&db, publisher, config, claimed_events, Some(&alias))
+                    .await?;
             let outbox_publish_ms = publish_started.elapsed().as_millis() as u64;
             Ok((
                 alias_stats,
@@ -1528,7 +1544,8 @@ mod placement {
     }
 
     /// Broker publication is intentionally excluded from the database wall-clock
-    /// deadline. Its individual SQL statements still use the pool session limits.
+    /// deadline. The outbox publisher bounds acquisitions separately, and its
+    /// SQL statements still use the pool session limits.
     pub(super) async fn run_operations_without_outer_deadline<T, Operation, OperationFuture>(
         database_router: &database::DatabaseRouter,
         coordinator_id: Uuid,

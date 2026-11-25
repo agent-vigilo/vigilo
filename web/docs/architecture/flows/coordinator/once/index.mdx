@@ -47,6 +47,10 @@ execution database without advancing receipt aggregation. Unavailable, open, or
 invalid shard summaries defer only their candidate; other runs continue. See the
 [settlement contract](/docs/architecture/state/run-lifecycle/#settlement-and-partial-results).
 
+Outbox publication uses a [bounded connection wait](/docs/configuration/runtime-limits/)
+at each placement. An acquisition failure counts against that placement's
+circuit breaker, and the sweep continues with the next alias.
+
 ## Related
 
 - [Coordinator start flow](/docs/architecture/flows/coordinator/start/)

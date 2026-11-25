@@ -13,7 +13,14 @@
 //! without losing events when a process exits between commit and publish.
 //! Claims carry trusted ledger ownership across broker I/O; per-event follow-up
 //! transactions install that scope and clear unrelated caller context before
-//! atomically marking delivery or rescheduling. Publication stays at-least-once.
+//! atomically marking delivery or rescheduling. The standalone coordinator
+//! bounds connection acquisition without holding connections across publication.
+//! Publication stays at-least-once.
+
+use std::{
+    future::Future,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use futures_util::{
@@ -27,10 +34,30 @@ use tracing::{
 };
 
 use crate::{
+    context::database::DatabaseOperationTimeout,
     db::tables::outbox_events,
     models::outbox_event::OutboxEvent,
     mq,
 };
+
+const OUTBOX_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Bounds connection acquisition for the standalone outbox sweep. A timeout
+/// feeds the same placement circuit as other database availability failures.
+pub(crate) async fn within_outbox_acquisition_deadline<T>(
+    alias: &str,
+    acquisition: impl Future<Output = anyhow::Result<T>>,
+) -> anyhow::Result<T> {
+    tokio::time::timeout(OUTBOX_ACQUIRE_TIMEOUT, acquisition)
+        .await
+        .map_err(|_| {
+            DatabaseOperationTimeout::new(
+                alias,
+                "outbox_connection_acquisition",
+                OUTBOX_ACQUIRE_TIMEOUT,
+            )
+        })?
+}
 
 /// Runtime knobs for one outbox publishing pass.
 ///
@@ -113,6 +140,7 @@ async fn publish_claimed_event(
     publisher: &dyn EventPublisher,
     retry_delay_seconds: i32,
     event: OutboxEvent,
+    bounded_acquisition_alias: Option<&str>,
 ) -> anyhow::Result<OutboxPublishOutcome> {
     let Some(claim_token) = event.claim_token else {
         warn!(
@@ -123,10 +151,29 @@ async fn publish_claimed_event(
         return Ok(OutboxPublishOutcome::StaleClaim);
     };
 
-    match publisher.publish(&event).await {
+    let publication = publisher
+        .publish(&event)
+        .await
+        .map_err(|error| error.to_string());
+    if let Err(message) = &publication {
+        error!(
+            event_id = %event.id,
+            event_type = %event.event_type,
+            error = %message,
+            "outbox publish failed; scheduling retry"
+        );
+    }
+    let mut connection = match bounded_acquisition_alias {
+        Some(alias) => {
+            within_outbox_acquisition_deadline(alias, async { Ok(db.acquire().await?) }).await?
+        }
+        None => db.acquire().await?,
+    };
+    match publication {
         Ok(()) => {
             let marked =
-                outbox_events::mark_outbox_event_published(db, &event, claim_token).await?;
+                outbox_events::mark_outbox_event_published(&mut *connection, &event, claim_token)
+                    .await?;
             if marked == 0 {
                 warn!(
                     event_id = %event.id,
@@ -137,16 +184,9 @@ async fn publish_claimed_event(
             }
             Ok(OutboxPublishOutcome::Published)
         }
-        Err(err) => {
-            let message = err.to_string();
-            error!(
-                event_id = %event.id,
-                event_type = %event.event_type,
-                error = %message,
-                "outbox publish failed; scheduling retry"
-            );
+        Err(message) => {
             let rescheduled = outbox_events::reschedule_outbox_event(
-                db,
+                &mut *connection,
                 &event,
                 claim_token,
                 retry_delay_seconds,
@@ -181,6 +221,19 @@ pub(crate) async fn publish_pending_events(
         outbox_events::claim_publishable_outbox_events(db, config.batch_size, config.lease_seconds)
             .await?;
 
+    publish_claimed_events(db, publisher, config, claimed_events, None).await
+}
+
+/// Publishes a claimed batch after the caller has returned its claim connection.
+/// When the standalone sweep supplies a placement alias, each bookkeeping
+/// checkout is bounded independently of broker publication and transaction I/O.
+pub(crate) async fn publish_claimed_events(
+    db: &PgPool,
+    publisher: &dyn EventPublisher,
+    config: &OutboxPublisherConfig,
+    claimed_events: Vec<OutboxEvent>,
+    bounded_acquisition_alias: Option<&str>,
+) -> anyhow::Result<OutboxPublishStats> {
     let mut stats = OutboxPublishStats {
         claimed_events: claimed_events.len(),
         ..OutboxPublishStats::default()
@@ -201,6 +254,7 @@ pub(crate) async fn publish_pending_events(
                 publisher,
                 config.retry_delay_seconds,
                 event,
+                bounded_acquisition_alias,
             ));
         }
 

@@ -111,6 +111,7 @@ sequenceDiagram
             Vigilo->>Vigilo: Load messaging context
             Vigilo->>ControlDB: List serviceable outbox placements
             loop Serviceable outbox placements
+                Note over Vigilo,ExecutionDB: Resolve the pool and acquire the first outbox connection within one second
                 Vigilo->>ExecutionDB: Read backlog and claim payload batch through restricted functions
                 alt Placement succeeds
                     ExecutionDB-->>Vigilo: Joined event payload batch with authoritative ledger ownership
@@ -125,6 +126,7 @@ sequenceDiagram
                 end
             end
             Queue-->>Vigilo: Confirmed routed publishes or returned/nacked publishes
+            Note over Vigilo,ExecutionDB: Each per-event settlement connection has a one-second acquisition deadline
             Vigilo->>ExecutionDB: Bind claimed ownership in per-event transactions, fence tokens and commit ledger plus delivery changes
             opt Due remote cancellation after local settlement
                 Vigilo->>ExecutionDB: Claim bounded cancellation deliveries

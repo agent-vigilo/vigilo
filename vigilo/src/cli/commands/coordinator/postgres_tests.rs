@@ -64,6 +64,82 @@ async fn route(pool: &PgPool, run: Uuid) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL for coordinator outbox tests"]
+async fn outbox_bounds_placement_checkout_and_resumes_when_capacity_returns(pool: PgPool) {
+    struct EmptyOutboxPublisher;
+
+    #[async_trait]
+    impl EventPublisher for EmptyOutboxPublisher {
+        async fn publish(
+            &self,
+            _: &crate::models::outbox_event::OutboxEvent,
+        ) -> anyhow::Result<()> {
+            panic!("fixture has no outbox events")
+        }
+    }
+
+    sqlx::query("INSERT INTO database_placements (alias, database_url_env, role, status) VALUES ('shard_001', 'TEST_SHARD_URL', 'shard', 'active')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let shard_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(10))
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let router = database::DatabaseRouter::from_fixed_pools(
+        database::Config::new(
+            String::new(),
+            1,
+            Duration::from_secs(10),
+            database::CircuitBreakerConfig::default(),
+            database::PlacementConfig::default_single_database(),
+        ),
+        BTreeMap::from([
+            (
+                "primary".to_string(),
+                database::FixedPlacementPool {
+                    pool,
+                    role: "control_and_shard",
+                },
+            ),
+            (
+                "shard_001".to_string(),
+                database::FixedPlacementPool {
+                    pool: shard_pool.clone(),
+                    role: "shard",
+                },
+            ),
+        ]),
+    )
+    .unwrap();
+    let config = OutboxPublisherConfig::default();
+    let coordinator_id = Uuid::now_v7();
+    let publish = || publish_outbox_events(&router, &EmptyOutboxPublisher, &config, coordinator_id);
+
+    let held = shard_pool.acquire().await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), publish())
+        .await
+        .expect("outbox waited past its placement checkout cap")
+        .unwrap();
+    assert_eq!(result.failures.failed_operation_count(), 1);
+    assert_eq!(result.failures.retryable_error_count(), 1);
+    assert_eq!(result.output.claimed_events, 0);
+
+    let publishing = publish();
+    tokio::pin!(publishing);
+    tokio::select! {
+        _ = &mut publishing => panic!("outbox finished before the saturated pool returned a connection"),
+        () = tokio::time::sleep(Duration::from_millis(100)) => {}
+    }
+    drop(held);
+    let result = publishing.await.unwrap();
+    assert_eq!(result.failures.failed_operation_count(), 0);
+    assert_eq!(result.failures.skipped_placement_count(), 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires a PostgreSQL DATABASE_URL for coordinator settlement tests"]
 async fn aggregation_seals_multiple_runs_in_one_pass_independently_of_finalization_limit(
     pool: PgPool,

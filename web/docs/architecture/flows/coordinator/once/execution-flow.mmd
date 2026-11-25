@@ -119,10 +119,12 @@ sequenceDiagram
     Vigilo->>ControlDB: List serviceable outbox placements
     ControlDB-->>Vigilo: Database aliases
     loop Serviceable outbox placements
+        Note over Vigilo,ExecutionDB: Resolve the pool and acquire the first outbox connection within one second
         Vigilo->>ExecutionDB: Read backlog and claim payload batch through restricted functions
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Joined event payload batch with authoritative ledger ownership
             loop Bounded outbox publish concurrency
+                Note over Vigilo,ExecutionDB: Each completion or retry connection has a one-second acquisition deadline
                 Vigilo->>Vigilo: Acquire messaging circuit admission
                 alt Messaging circuit is open
                     Vigilo->>ExecutionDB: Begin scoped retry transaction, validate owner and claim token, commit ledger and delivery update

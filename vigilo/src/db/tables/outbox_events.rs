@@ -7,7 +7,12 @@
 //! transactions bind that identity, clear other caller context, and atomically
 //! change the ledger and delivery row. No transaction spans broker I/O.
 
-use sqlx::PgPool;
+use sqlx::{
+    Acquire,
+    PgExecutor,
+    PgPool,
+    Postgres,
+};
 use uuid::Uuid;
 
 use crate::models::outbox_event::{
@@ -124,8 +129,8 @@ pub(crate) async fn list_outbox_events_by_status(
 ///
 /// The returned rows are the caller's publish lease. If publishing fails, use
 /// `reschedule_outbox_event` to make the delivery row available for retry.
-pub(crate) async fn claim_publishable_outbox_events(
-    db: &PgPool,
+pub(crate) async fn claim_publishable_outbox_events<'c>(
+    db: impl PgExecutor<'c>,
     limit: i64,
     lease_seconds: i32,
 ) -> anyhow::Result<Vec<OutboxEvent>> {
@@ -142,7 +147,9 @@ pub(crate) async fn claim_publishable_outbox_events(
 ///
 /// Coordinators log this as a per-placement outbox backlog gauge before
 /// claiming a bounded publish batch.
-pub(crate) async fn count_publishable_outbox_backlog(db: &PgPool) -> anyhow::Result<i64> {
+pub(crate) async fn count_publishable_outbox_backlog<'c>(
+    db: impl PgExecutor<'c>,
+) -> anyhow::Result<i64> {
     let count = sqlx::query_scalar::<_, i64>("SELECT vigilo_outbox_backlog()")
         .fetch_one(db)
         .await?;
@@ -151,8 +158,8 @@ pub(crate) async fn count_publishable_outbox_backlog(db: &PgPool) -> anyhow::Res
 }
 
 /// Marks an outbox event as successfully published and removes delivery work.
-pub(crate) async fn mark_outbox_event_published(
-    db: &PgPool,
+pub(crate) async fn mark_outbox_event_published<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     event: &OutboxEvent,
     claim_token: Uuid,
 ) -> anyhow::Result<u64> {
@@ -189,8 +196,8 @@ pub(crate) async fn mark_outbox_event_published(
 }
 
 /// Reschedules a failed publish attempt for later retry.
-pub(crate) async fn reschedule_outbox_event(
-    db: &PgPool,
+pub(crate) async fn reschedule_outbox_event<'c>(
+    db: impl Acquire<'c, Database = Postgres>,
     event: &OutboxEvent,
     claim_token: Uuid,
     retry_after_seconds: i32,

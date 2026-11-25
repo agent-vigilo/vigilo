@@ -139,10 +139,15 @@ affect the breaker. Route state, constraints, serialization failures, deadlocks,
 lock contention, and missing secrets do not. Cooldowns use process-local jitter,
 so processes do not all probe at the same instant.
 
-Outbox claim and settlement SQL uses the server limits. The outer database
-deadline deliberately excludes broker publication, so slow RabbitMQ delivery
-does not open a database circuit. Cancellation drops owned transactions;
-uncommitted dispatch cursors and creation work remain durable for retry.
+The standalone coordinator gives each placement one second to resolve its
+outbox pool and acquire the first connection. The backlog read and batch claim
+share that connection. After broker publication, each settlement connection has
+its own one-second acquisition deadline. Acquisition failures count against the
+placement's circuit breaker and leave unfinished deliveries eligible for retry.
+Outbox claim and settlement SQL use the server limits. Broker publication runs
+outside the database deadlines and uses the messaging circuit. Cancellation
+drops owned transactions, so uncommitted dispatch cursors and creation work
+remain durable for retry.
 
 A worker checks the alias circuit before claiming a message. Availability
 timeouts and PostgreSQL contention delay only that message; they do not consume
