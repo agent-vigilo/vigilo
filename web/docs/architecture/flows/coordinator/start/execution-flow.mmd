@@ -47,6 +47,7 @@ sequenceDiagram
                 alt Circuit is open
                     Note over Vigilo,ExecutionDB: Leave durable work pending
                 else Circuit is closed or half-open probe
+                    Note over Vigilo,ExecutionDB: Separate execution pools use a one-second checkout limit
                     Vigilo->>ExecutionDB: Read expired leases with bounded lookahead and limit eligible standalone invocations
                     Vigilo->>ExecutionDB: Bind exact claimed batch, recheck ownership, recover or fail chunks and settle atomically
                 end
@@ -64,7 +65,7 @@ sequenceDiagram
             end
             Vigilo->>ControlDB: Read dispatch backlog through restricted function
             loop Bounded dispatch windows
-                Vigilo->>ControlDB: Claim cursor and bind returned work identity in one statement
+                Vigilo->>ControlDB: Claim cursor excluding deferred aliases and bind its work identity in one statement
                 Vigilo->>ControlDB: Read snapshot and routing records on the same scoped transaction
                 Vigilo->>Vigilo: Validate the execution route
                 alt Control and execution share the database

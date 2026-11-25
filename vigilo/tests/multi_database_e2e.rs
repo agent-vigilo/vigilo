@@ -439,12 +439,27 @@ async fn unavailable_shard_does_not_block_healthy_placement_work() -> anyhow::Re
         ..isolation_config.clone()
     };
 
-    run_vigilo_ok(
-        &unavailable_config,
-        PRIMARY_ALIAS,
-        "single-default",
-        ["coordinator", "--max-dispatch-per-cycle", "1", "once"],
-    )?;
+    let run_isolated_cycle = || -> anyhow::Result<()> {
+        let output = vigilo_command(&unavailable_config, PRIMARY_ALIAS, "single-default")
+            .env("RUST_LOG", "vigilo=warn")
+            .args(["coordinator", "--max-dispatch-per-cycle", "1", "once"])
+            .output()?;
+        let log = String::from_utf8_lossy(&output.stderr);
+        anyhow::ensure!(output.status.success(), "coordinator cycle failed: {log}");
+        let failed_operations = log
+            .lines()
+            .filter(|line| {
+                line.contains("placement-scoped coordinator operation failed")
+                    && line.contains(&format!("database_alias={SHARD_ALIAS}"))
+            })
+            .count();
+        assert_eq!(
+            failed_operations, 1,
+            "a connection failure must defer the placement for the rest of the cycle: {log}"
+        );
+        Ok(())
+    };
+    run_isolated_cycle()?;
     assert_eq!(
         dispatch_cursor_status_count(&fixture.primary, unavailable_run_id, "open").await?,
         1,
@@ -462,12 +477,7 @@ async fn unavailable_shard_does_not_block_healthy_placement_work() -> anyhow::Re
     );
 
     expire_chunk_lease(&fixture.primary, healthy_run_id).await?;
-    run_vigilo_ok(
-        &unavailable_config,
-        PRIMARY_ALIAS,
-        "single-default",
-        ["coordinator", "--max-dispatch-per-cycle", "1", "once"],
-    )?;
+    run_isolated_cycle()?;
     assert_eq!(
         run_chunk_recovery_state(&fixture.primary, healthy_run_id).await?,
         ("pending".to_string(), 1),

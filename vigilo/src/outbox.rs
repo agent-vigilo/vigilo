@@ -17,10 +17,7 @@
 //! bounds connection acquisition without holding connections across publication.
 //! Publication stays at-least-once.
 
-use std::{
-    future::Future,
-    time::Duration,
-};
+use std::future::Future;
 
 use async_trait::async_trait;
 use futures_util::{
@@ -34,13 +31,14 @@ use tracing::{
 };
 
 use crate::{
-    context::database::DatabaseOperationTimeout,
+    context::database::{
+        COORDINATOR_PLACEMENT_ACQUIRE_TIMEOUT,
+        DatabaseOperationTimeout,
+    },
     db::tables::outbox_events,
     models::outbox_event::OutboxEvent,
     mq,
 };
-
-const OUTBOX_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Bounds connection acquisition for the standalone outbox sweep. A timeout
 /// feeds the same placement circuit as other database availability failures.
@@ -48,13 +46,13 @@ pub(crate) async fn within_outbox_acquisition_deadline<T>(
     alias: &str,
     acquisition: impl Future<Output = anyhow::Result<T>>,
 ) -> anyhow::Result<T> {
-    tokio::time::timeout(OUTBOX_ACQUIRE_TIMEOUT, acquisition)
+    tokio::time::timeout(COORDINATOR_PLACEMENT_ACQUIRE_TIMEOUT, acquisition)
         .await
         .map_err(|_| {
             DatabaseOperationTimeout::new(
                 alias,
                 "outbox_connection_acquisition",
-                OUTBOX_ACQUIRE_TIMEOUT,
+                COORDINATOR_PLACEMENT_ACQUIRE_TIMEOUT,
             )
         })?
 }

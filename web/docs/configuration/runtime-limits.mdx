@@ -139,6 +139,13 @@ affect the breaker. Route state, constraints, serialization failures, deadlocks,
 lock contention, and missing secrets do not. Cooldowns use process-local jitter,
 so processes do not all probe at the same instant.
 
+The standalone coordinator caps connections to separately pooled execution
+placements at one second. The control pool uses the configured acquisition
+timeout. During lease recovery, dispatch, aggregation, finalization, and outbox
+publication, a connection failure defers that alias through the rest of the
+cycle. Other placements continue, and runs that require a deferred placement
+wait for their full shard summary set.
+
 The standalone coordinator gives each placement one second to resolve its
 outbox pool and acquire the first connection. The backlog read and batch claim
 share that connection. After broker publication, each settlement connection has

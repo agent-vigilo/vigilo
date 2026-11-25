@@ -84,15 +84,22 @@ async fn finalization_carries_ownership_through_reads_and_commit(pool: PgPool) {
     let router = context.dbr().await.unwrap();
     router.control_pool.set(restricted.clone()).unwrap();
     let work = async {
-        let wrong = collect_run_shard_summaries(router, Uuid::now_v7(), Uuid::now_v7(), runs[0])
-            .await
-            .unwrap();
+        let wrong = collect_run_shard_summaries(
+            router,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            runs[0],
+            &Default::default(),
+        )
+        .await
+        .unwrap();
         assert!(wrong.output.summaries.is_empty());
         let (result, queries) = record_queries(collect_run_shard_summaries(
             router,
             Uuid::now_v7(),
             tenant,
             runs[0],
+            &Default::default(),
         ))
         .await;
         let collection = result.unwrap();
@@ -196,7 +203,7 @@ async fn finalization_carries_ownership_through_reads_and_commit(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-        let result = finalize_ready_runs(router, Uuid::now_v7(), &config())
+        let result = finalize_ready_runs(router, Uuid::now_v7(), &config(), &Default::default())
             .await
             .unwrap();
         assert_eq!(result.output, 1);
@@ -211,7 +218,7 @@ async fn finalization_carries_ownership_through_reads_and_commit(pool: PgPool) {
                 .unwrap();
         assert_eq!(scorecard_owner, tenant);
         assert_eq!(
-            finalize_ready_runs(router, Uuid::now_v7(), &config())
+            finalize_ready_runs(router, Uuid::now_v7(), &config(), &Default::default())
                 .await
                 .unwrap()
                 .output,

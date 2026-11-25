@@ -116,7 +116,16 @@ async fn outbox_bounds_placement_checkout_and_resumes_when_capacity_returns(pool
     .unwrap();
     let config = OutboxPublisherConfig::default();
     let coordinator_id = Uuid::now_v7();
-    let publish = || publish_outbox_events(&router, &EmptyOutboxPublisher, &config, coordinator_id);
+    let deferred_aliases = BTreeSet::new();
+    let publish = || {
+        publish_outbox_events(
+            &router,
+            &EmptyOutboxPublisher,
+            &config,
+            coordinator_id,
+            &deferred_aliases,
+        )
+    };
 
     let held = shard_pool.acquire().await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(3), publish())
@@ -164,9 +173,10 @@ async fn aggregation_seals_multiple_runs_in_one_pass_independently_of_finalizati
         runs.push(run);
     }
 
-    let aggregation = aggregate_pending_summaries(router, Uuid::now_v7(), &config)
-        .await
-        .unwrap();
+    let aggregation =
+        aggregate_pending_summaries(router, Uuid::now_v7(), &config, &Default::default())
+            .await
+            .unwrap();
     assert_eq!(
         aggregation.output, 4,
         "both progress and canonical pages must finish for each run in one aggregation pass"
@@ -183,7 +193,7 @@ async fn aggregation_seals_multiple_runs_in_one_pass_independently_of_finalizati
     }
     for expected in [1, 1, 0] {
         assert_eq!(
-            finalize_ready_runs(router, Uuid::now_v7(), &config)
+            finalize_ready_runs(router, Uuid::now_v7(), &config, &Default::default())
                 .await
                 .unwrap()
                 .output,
@@ -234,11 +244,11 @@ async fn failed_evaluation_waits_for_live_work_then_finalizes_missing_results(po
             .unwrap();
         tx.commit().await.unwrap();
         for _ in 0..4 {
-            aggregate_pending_summaries(router, Uuid::now_v7(), &config())
+            aggregate_pending_summaries(router, Uuid::now_v7(), &config(), &Default::default())
                 .await
                 .unwrap();
             assert_eq!(
-                finalize_ready_runs(router, Uuid::now_v7(), &config())
+                finalize_ready_runs(router, Uuid::now_v7(), &config(), &Default::default())
                     .await
                     .unwrap()
                     .output,
@@ -276,13 +286,14 @@ async fn failed_evaluation_waits_for_live_work_then_finalizes_missing_results(po
         );
         let mut finalized = 0;
         for _ in 0..4 {
-            aggregate_pending_summaries(router, Uuid::now_v7(), &config())
+            aggregate_pending_summaries(router, Uuid::now_v7(), &config(), &Default::default())
                 .await
                 .unwrap();
-            finalized += finalize_ready_runs(router, Uuid::now_v7(), &config())
-                .await
-                .unwrap()
-                .output;
+            finalized +=
+                finalize_ready_runs(router, Uuid::now_v7(), &config(), &Default::default())
+                    .await
+                    .unwrap()
+                    .output;
         }
         assert_eq!(finalized, 1);
         let (status, gate, report): (String, String, Value) =
@@ -336,7 +347,7 @@ async fn invalid_candidate_does_not_block_a_healthy_run(pool: PgPool) {
     run_shard_summary::refresh_run_shard_summary(&pool, healthy, 4)
         .await
         .unwrap();
-    let result = finalize_ready_runs(router, Uuid::now_v7(), &config())
+    let result = finalize_ready_runs(router, Uuid::now_v7(), &config(), &Default::default())
         .await
         .unwrap();
     assert_eq!(result.output, 1);
@@ -372,9 +383,15 @@ async fn finalization_summary_collection_does_not_advance_pending_receipts(pool:
             .await
             .unwrap();
 
-    let collection = collect_run_shard_summaries(router, Uuid::now_v7(), Uuid::nil(), run)
-        .await
-        .unwrap();
+    let collection = collect_run_shard_summaries(
+        router,
+        Uuid::now_v7(),
+        Uuid::nil(),
+        run,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
     assert!(collection.output.complete);
     assert_eq!(collection.output.summaries.len(), 1);
     assert!(!collection.output.summaries[0].sealed);
@@ -399,7 +416,7 @@ async fn finalization_summary_collection_does_not_advance_pending_receipts(pool:
 
     for expected in [2, 0] {
         assert_eq!(
-            aggregate_pending_summaries(router, Uuid::now_v7(), &config())
+            aggregate_pending_summaries(router, Uuid::now_v7(), &config(), &Default::default())
                 .await
                 .unwrap()
                 .output,
@@ -407,7 +424,7 @@ async fn finalization_summary_collection_does_not_advance_pending_receipts(pool:
         );
     }
     assert_eq!(
-        finalize_ready_runs(router, Uuid::now_v7(), &config())
+        finalize_ready_runs(router, Uuid::now_v7(), &config(), &Default::default())
             .await
             .unwrap()
             .output,
@@ -442,6 +459,7 @@ async fn finalization_batches_only_routed_summaries_and_defers_missing_or_moving
         Uuid::now_v7(),
         Uuid::nil(),
         run,
+        &Default::default(),
     ))
     .await;
     let collection = result.unwrap();
@@ -472,9 +490,15 @@ async fn finalization_batches_only_routed_summaries_and_defers_missing_or_moving
         .execute(&pool)
         .await
         .unwrap();
-    let moving = collect_run_shard_summaries(router, Uuid::now_v7(), Uuid::nil(), run)
-        .await
-        .unwrap();
+    let moving = collect_run_shard_summaries(
+        router,
+        Uuid::now_v7(),
+        Uuid::nil(),
+        run,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
     assert!(!moving.output.complete);
     assert!(moving.output.summaries.is_empty());
     assert_eq!(moving.failures.failed_operation_count(), 1);
@@ -499,9 +523,15 @@ async fn sealed_summary_finalization_reads_without_local_write_admission(pool: P
         "SELECT jsonb_build_object('summary',to_jsonb(s),'consumptions',(SELECT jsonb_agg(to_jsonb(p)) FROM run_chunk_settlement_consumptions p WHERE p.run_id=s.run_id AND p.run_shard=s.run_shard)) FROM run_shard_summaries s WHERE run_id=$1 AND run_shard=4",
     ).bind(run).fetch_one(&pool).await.unwrap();
 
-    let collection = collect_run_shard_summaries(router, Uuid::now_v7(), Uuid::nil(), run)
-        .await
-        .unwrap();
+    let collection = collect_run_shard_summaries(
+        router,
+        Uuid::now_v7(),
+        Uuid::nil(),
+        run,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
     assert!(collection.output.complete);
     assert_eq!(collection.failures.failed_operation_count(), 0);
     assert_eq!(
@@ -509,7 +539,7 @@ async fn sealed_summary_finalization_reads_without_local_write_admission(pool: P
         json!([expected])
     );
     assert_eq!(
-        finalize_ready_runs(router, Uuid::now_v7(), &config())
+        finalize_ready_runs(router, Uuid::now_v7(), &config(), &Default::default())
             .await
             .unwrap()
             .output,

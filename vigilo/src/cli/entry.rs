@@ -26,6 +26,7 @@ use tracing_subscriber::{
 use super::{
     App,
     Executable,
+    commands::Command,
 };
 use crate::{
     agent_client,
@@ -78,15 +79,23 @@ pub(super) async fn run() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let context = Context::new(
-                context::database::Config::new(
-                    database_url,
-                    app.database_pool_max_connections_per_target,
-                    Duration::from_secs(app.database_acquire_timeout_seconds),
-                    command_context.circuit_breaker,
-                    command_context.placement,
+            let database = context::database::Config::new(
+                database_url,
+                app.database_pool_max_connections_per_target,
+                Duration::from_secs(app.database_acquire_timeout_seconds),
+                command_context.circuit_breaker,
+                command_context.placement,
+            )
+            .with_operation_timeout(command_context.database_operation_timeout);
+            let database = if matches!(&app.command, Command::Coordinator(_)) {
+                database.with_execution_acquire_timeout(
+                    context::database::COORDINATOR_PLACEMENT_ACQUIRE_TIMEOUT,
                 )
-                .with_operation_timeout(command_context.database_operation_timeout),
+            } else {
+                database
+            };
+            let context = Context::new(
+                database,
                 command_context.messaging,
                 command_context.wasm,
                 app.output_format,

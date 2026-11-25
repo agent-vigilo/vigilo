@@ -42,13 +42,14 @@ sequenceDiagram
     Vigilo->>ControlDB: Discover routed execution aliases through restricted function
     ControlDB-->>Vigilo: Execution database aliases
     loop Serviceable execution placements
+        Note over Vigilo,ExecutionDB: Separate execution pools use a one-second checkout limit
         Vigilo->>ExecutionDB: Read expired leases with bounded lookahead and limit eligible standalone invocations
         Vigilo->>ExecutionDB: Bind exact claimed batch, recheck ownership, recover or fail chunks and settle atomically
         alt Placement operation succeeds
             ExecutionDB-->>Vigilo: Recovered chunks and poison chunks failed
         else Placement operation fails
             ExecutionDB-->>Vigilo: Database error
-            Vigilo->>Vigilo: Classify, count, and continue with next alias
+            Vigilo->>Vigilo: Count failure and defer connection-failed aliases for the cycle
         end
     end
 

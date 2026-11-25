@@ -29,13 +29,8 @@ pub(super) fn classify_error(error: &anyhow::Error) -> FailureImpact {
     };
 
     match error {
-        sqlx::Error::Io(_)
-        | sqlx::Error::Tls(_)
-        | sqlx::Error::Protocol(_)
-        | sqlx::Error::PoolTimedOut
-        | sqlx::Error::PoolClosed
-        | sqlx::Error::WorkerCrashed
-        | sqlx::Error::BeginFailed => FailureImpact::Unavailable,
+        error if is_sqlx_connection_failure(error) => FailureImpact::Unavailable,
+        sqlx::Error::BeginFailed => FailureImpact::Unavailable,
         sqlx::Error::Database(error) => classify_database_error_code(error.code().as_deref()),
         _ => FailureImpact::Available,
     }
@@ -56,15 +51,42 @@ pub(crate) fn is_database_unavailable(error: &anyhow::Error) -> bool {
     classify_error(error) == FailureImpact::Unavailable
 }
 
+/// Identifies failures that make another connection attempt to this target
+/// unproductive in the current coordinator cycle. Query deadlines and lock
+/// contention remain scoped to the operation that encountered them.
+pub(crate) fn is_database_connection_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<sqlx::Error>())
+        .any(is_sqlx_connection_failure)
+}
+
+fn is_sqlx_connection_failure(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::Protocol(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed => true,
+        sqlx::Error::Database(error) => error
+            .code()
+            .as_deref()
+            .is_some_and(is_connection_error_code),
+        _ => false,
+    }
+}
+
+fn is_connection_error_code(code: &str) -> bool {
+    code.starts_with("08") || matches!(code, "57P01" | "57P02" | "57P03" | "53300")
+}
+
 fn classify_database_error_code(code: Option<&str>) -> FailureImpact {
     let Some(code) = code else {
         return FailureImpact::Available;
     };
 
-    if code == "57014"
-        || code.starts_with("08")
-        || code.starts_with("53")
-        || matches!(code, "57P01" | "57P02" | "57P03" | "58030")
+    if is_connection_error_code(code) || code.starts_with("53") || matches!(code, "57014" | "58030")
     {
         FailureImpact::Unavailable
     } else {

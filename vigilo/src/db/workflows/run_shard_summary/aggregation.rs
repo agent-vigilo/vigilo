@@ -561,6 +561,9 @@ pub(crate) async fn advance_pending_summaries(
                     return Ok(outcome);
                 }
                 Ok(PageOutcome::Deferred) => {}
+                Err(error) if crate::context::database::is_database_connection_failure(&error) => {
+                    return Err(error);
+                }
                 Err(error) => tracing::warn!(%run_id, run_shard = shard, %error,
                     "deferred invalid or unavailable shard aggregation; continuing other shards"),
             }

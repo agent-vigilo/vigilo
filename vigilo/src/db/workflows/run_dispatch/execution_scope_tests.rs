@@ -60,6 +60,7 @@ async fn execution_dispatch_uses_claimed_scope(pool: PgPool) {
             uri: "postgres://127.0.0.1:1/unavailable-control".into(),
             max_connections_per_pool: 1,
             acquire_timeout: Duration::from_secs(1),
+            execution_acquire_timeout: Duration::from_secs(1),
             circuit_breaker_config: Default::default(),
             placement_config: database::PlacementConfig::default_single_database(),
             operation_timeout_config: None,

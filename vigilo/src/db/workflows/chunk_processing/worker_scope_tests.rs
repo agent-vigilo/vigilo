@@ -64,6 +64,7 @@ async fn worker_bootstrap_verifies_local_identity_before_protected_admission(poo
             uri: "postgres://127.0.0.1:1/unavailable-control".into(),
             max_connections_per_pool: 1,
             acquire_timeout: std::time::Duration::from_secs(1),
+            execution_acquire_timeout: std::time::Duration::from_secs(1),
             circuit_breaker_config: Default::default(),
             placement_config: database::PlacementConfig::default_single_database(),
             operation_timeout_config: Default::default(),

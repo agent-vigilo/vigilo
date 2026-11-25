@@ -97,6 +97,7 @@ async fn claimed_revocation_scopes_cleanup_and_preserves_results(pool: PgPool) {
         uri: "postgres://127.0.0.1:1/unused".into(),
         max_connections_per_pool: 1,
         acquire_timeout: std::time::Duration::from_secs(2),
+        execution_acquire_timeout: std::time::Duration::from_secs(2),
         circuit_breaker_config: Default::default(),
         placement_config: crate::context::database::PlacementConfig::default_single_database(),
         operation_timeout_config: None,

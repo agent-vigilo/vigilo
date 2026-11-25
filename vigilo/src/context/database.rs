@@ -35,6 +35,7 @@ pub(crate) use circuit_breaker::{
     CircuitPermit,
     CircuitTransition,
     DatabaseCircuitBreakers,
+    is_database_connection_failure,
     is_database_contention,
     is_database_unavailable,
 };
@@ -82,6 +83,7 @@ use crate::{
 const SHARD_PLACEMENT_CACHE_TTL: Duration = Duration::from_secs(5);
 const SHARD_PLACEMENT_CACHE_CAPACITY: u64 = 10_000;
 const MAX_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const COORDINATOR_PLACEMENT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Deadline policy for runtime database work.
 ///
@@ -228,6 +230,7 @@ pub(crate) struct Config {
     pub(crate) uri: String,
     pub(crate) max_connections_per_pool: u32,
     pub(crate) acquire_timeout: Duration,
+    pub(crate) execution_acquire_timeout: Duration,
     pub(crate) circuit_breaker_config: CircuitBreakerConfig,
     pub(crate) placement_config: PlacementConfig,
     pub(crate) operation_timeout_config: Option<DatabaseOperationTimeoutConfig>,
@@ -245,6 +248,7 @@ impl Config {
             uri,
             max_connections_per_pool,
             acquire_timeout,
+            execution_acquire_timeout: acquire_timeout,
             circuit_breaker_config,
             placement_config,
             operation_timeout_config: None,
@@ -256,6 +260,13 @@ impl Config {
         operation_timeout_config: Option<DatabaseOperationTimeoutConfig>,
     ) -> Self {
         self.operation_timeout_config = operation_timeout_config;
+        self
+    }
+
+    /// Caps checkout and connection establishment for separately pooled execution
+    /// placements while preserving the mandatory control pool's own budget.
+    pub(crate) fn with_execution_acquire_timeout(mut self, timeout: Duration) -> Self {
+        self.execution_acquire_timeout = self.acquire_timeout.min(timeout);
         self
     }
 }
@@ -291,6 +302,7 @@ pub(crate) struct DatabaseRouter {
     fixed_pools: Option<BTreeMap<String, FixedPlacementPool>>,
     pub(crate) max_connections_per_pool: u32,
     pub(crate) acquire_timeout: Duration,
+    execution_acquire_timeout: Duration,
     pub(crate) placement_config: PlacementConfig,
     pub(crate) circuit_breakers: DatabaseCircuitBreakers,
     pub(crate) operation_timeout_config: Option<DatabaseOperationTimeoutConfig>,
@@ -354,6 +366,7 @@ impl DatabaseRouter {
             fixed_pools: None,
             max_connections_per_pool: config.max_connections_per_pool,
             acquire_timeout: config.acquire_timeout,
+            execution_acquire_timeout: config.execution_acquire_timeout,
             placement_config: config.placement_config,
             circuit_breakers: circuit_breaker::DatabaseCircuitBreakers::new(
                 config.circuit_breaker_config,
@@ -739,7 +752,7 @@ impl DatabaseRouter {
                     &placement.alias,
                     &database_url,
                     self.max_connections_per_pool,
-                    self.acquire_timeout,
+                    self.execution_acquire_timeout,
                     self.operation_timeout_config,
                 )
                 .await?
@@ -770,7 +783,7 @@ impl DatabaseRouter {
                 &placement.alias,
                 &database_url,
                 self.max_connections_per_pool,
-                self.acquire_timeout,
+                self.execution_acquire_timeout,
                 self.operation_timeout_config,
             )
             .await?;
@@ -1044,7 +1057,7 @@ impl DatabaseRouter {
                     alias,
                     &database_url,
                     self.max_connections_per_pool,
-                    self.acquire_timeout,
+                    self.execution_acquire_timeout,
                     self.operation_timeout_config,
                 )
                 .await?
@@ -1057,7 +1070,7 @@ impl DatabaseRouter {
                     alias,
                     &database_url,
                     self.max_connections_per_pool,
-                    self.acquire_timeout,
+                    self.execution_acquire_timeout,
                     self.operation_timeout_config,
                 )
                 .await?
@@ -1081,7 +1094,7 @@ impl DatabaseRouter {
                 alias,
                 &database_url,
                 self.max_connections_per_pool,
-                self.acquire_timeout,
+                self.execution_acquire_timeout,
                 self.operation_timeout_config,
             )
             .await?
@@ -2024,6 +2037,7 @@ mod tests {
                 uri: "postgres://lazy-control-pool".to_string(),
                 max_connections_per_pool: 5,
                 acquire_timeout: Duration::from_secs(10),
+                execution_acquire_timeout: Duration::from_secs(10),
                 circuit_breaker_config: CircuitBreakerConfig::default(),
                 placement_config: PlacementConfig::default_single_database(),
                 operation_timeout_config: None,
@@ -2812,6 +2826,61 @@ mod tests {
         let error = database_router.execution(run_id, 7).await.unwrap_err();
         assert!(error.to_string().contains("role control"));
         assert!(error.to_string().contains("not shard-capable"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a PostgreSQL DATABASE_URL for sqlx router tests"]
+    async fn coordinator_execution_pool_bounds_checkout_and_resumes(pool: PgPool) {
+        sqlx::query("INSERT INTO database_placements (alias, database_url_env, role, status) VALUES ('shard_checkout', 'DATABASE_URL', 'shard', 'active')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let control_timeout = Duration::from_secs(10);
+        let router = DatabaseRouter::new(
+            Config::new(
+                isolated_database_url(&pool).await,
+                1,
+                control_timeout,
+                CircuitBreakerConfig::default(),
+                PlacementConfig::default_single_database(),
+            )
+            .with_execution_acquire_timeout(COORDINATOR_PLACEMENT_ACQUIRE_TIMEOUT),
+        );
+        assert_eq!(
+            router
+                .control()
+                .await
+                .unwrap()
+                .options()
+                .get_acquire_timeout(),
+            control_timeout
+        );
+        let execution = router.execution_database("shard_checkout").await.unwrap();
+        assert_eq!(
+            execution.options().get_acquire_timeout(),
+            Duration::from_secs(1)
+        );
+
+        let held = execution.acquire().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), execution.acquire())
+            .await
+            .expect("saturated execution pool exceeded its checkout budget");
+        assert!(matches!(result, Err(sqlx::Error::PoolTimedOut)));
+
+        let mut acquiring = std::pin::pin!(execution.acquire());
+        tokio::select! {
+            _ = &mut acquiring => panic!("checkout finished while the only connection was held"),
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        drop(held);
+        let mut connection = acquiring.await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i32>("SELECT 1")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]

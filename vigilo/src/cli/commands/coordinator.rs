@@ -10,7 +10,10 @@
 //! - contains placement-scoped database failures so healthy aliases continue
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     num::NonZeroUsize,
     time::{
         Duration,
@@ -375,20 +378,42 @@ async fn run_coordinator_cycle(
     let (recovery, cancellations) =
         recover_expired_chunk_leases(&context, database_router, coordinator_id, config).await?;
     let recovery_ms = recovery_started.elapsed().as_millis() as u64;
+    let mut placement_failures = recovery.failures;
 
     // --- Dispatch runnable chunk windows ---
     // Dispatch runs before finalization so newly-created work is surfaced
     // promptly.
     let dispatch_started = Instant::now();
-    let dispatch = dispatch_ready_chunk_windows(database_router, coordinator_id, config).await?;
+    let dispatch = dispatch_ready_chunk_windows(
+        database_router,
+        coordinator_id,
+        config,
+        placement_failures.connection_failures(),
+    )
+    .await?;
     let dispatch_ms = dispatch_started.elapsed().as_millis() as u64;
+    placement_failures.merge(dispatch.failures);
 
-    let aggregation = aggregate_pending_summaries(database_router, coordinator_id, config).await?;
+    let aggregation = aggregate_pending_summaries(
+        database_router,
+        coordinator_id,
+        config,
+        placement_failures.connection_failures(),
+    )
+    .await?;
+    placement_failures.merge(aggregation.failures);
 
     // --- Finalize terminal runs ---
     let finalization_started = Instant::now();
-    let finalization = finalize_ready_runs(database_router, coordinator_id, config).await?;
+    let finalization = finalize_ready_runs(
+        database_router,
+        coordinator_id,
+        config,
+        placement_failures.connection_failures(),
+    )
+    .await?;
     let finalization_ms = finalization_started.elapsed().as_millis() as u64;
+    placement_failures.merge(finalization.failures);
 
     // --- Publish durable outbox event records ---
     // Failed broker publishes stay in the outbox delivery queue for retry.
@@ -404,16 +429,17 @@ async fn run_coordinator_cycle(
         retry_delay_seconds: config.outbox_retry_delay_seconds,
     };
     let outbox_started = Instant::now();
-    let publication =
-        publish_outbox_events(database_router, &publisher, &outbox_config, coordinator_id).await?;
+    let publication = publish_outbox_events(
+        database_router,
+        &publisher,
+        &outbox_config,
+        coordinator_id,
+        placement_failures.connection_failures(),
+    )
+    .await?;
     let outbox_publish_ms = outbox_started.elapsed().as_millis() as u64;
     crate::deferred_runtime::deliver_cancellations(&context, cancellations).await;
 
-    let mut placement_failures = PlacementFailureStats::default();
-    placement_failures.merge(recovery.failures);
-    placement_failures.merge(dispatch.failures);
-    placement_failures.merge(aggregation.failures);
-    placement_failures.merge(finalization.failures);
     placement_failures.merge(publication.failures);
     info!(
         run_creations_claimed = creation_recovery.claimed_runs,
@@ -608,10 +634,12 @@ async fn aggregate_pending_summaries(
     database_router: &database::DatabaseRouter,
     coordinator_id: Uuid,
     config: &CoordinatorRuntimeConfig,
+    deferred_aliases: &BTreeSet<String>,
 ) -> anyhow::Result<PlacementPassResult<usize>> {
-    let aliases = database_router
+    let mut aliases = database_router
         .serviceable_execution_database_aliases()
         .await?;
+    aliases.retain(|alias| !deferred_aliases.contains(alias));
     let batch = run_operations_concurrently(
         database_router,
         coordinator_id,
@@ -651,6 +679,7 @@ async fn dispatch_ready_chunk_windows(
     database_router: &database::DatabaseRouter,
     coordinator_id: Uuid,
     config: &CoordinatorRuntimeConfig,
+    deferred_aliases: &BTreeSet<String>,
 ) -> anyhow::Result<PlacementPassResult<usize>> {
     // --- Dispatch pass ---
     // Repeatedly claim one dispatchable run/window until the cycle limit is
@@ -683,7 +712,7 @@ async fn dispatch_ready_chunk_windows(
             break;
         }
         let select_started = Instant::now();
-        let excluded_aliases = failures.excluded_aliases();
+        let excluded_aliases = failures.dispatch_excluded_aliases(deferred_aliases);
         let Some(mut dispatch_claim) =
             run_dispatch::claim_next_dispatch_route(control_db, &excluded_aliases).await?
         else {
@@ -929,11 +958,13 @@ async fn publish_outbox_events(
     publisher: &dyn EventPublisher,
     config: &OutboxPublisherConfig,
     coordinator_id: Uuid,
+    deferred_aliases: &BTreeSet<String>,
 ) -> anyhow::Result<PlacementPassResult<OutboxPublishStats>> {
     let alias_list_started = Instant::now();
-    let aliases = database_router
+    let mut aliases = database_router
         .serviceable_outbox_database_aliases()
         .await?;
+    aliases.retain(|alias| !deferred_aliases.contains(alias));
     debug!(
         coordinator_id = %coordinator_id,
         serviceable_outbox_placement_count = aliases.len(),
@@ -1030,6 +1061,7 @@ async fn finalize_ready_runs(
     database_router: &database::DatabaseRouter,
     coordinator_id: Uuid,
     config: &CoordinatorRuntimeConfig,
+    deferred_aliases: &BTreeSet<String>,
 ) -> anyhow::Result<PlacementPassResult<usize>> {
     // --- Finalization pass ---
     // Inspect candidates until the cycle limit is reached or none remain.
@@ -1050,6 +1082,7 @@ async fn finalize_ready_runs(
         "measured finalization candidate backlog"
     );
     let mut checked_run_ids = Vec::with_capacity(config.max_finalize_per_cycle);
+    let mut deferred_aliases = deferred_aliases.clone();
     for _ in 0..config.max_finalize_per_cycle {
         let select_started = Instant::now();
         let Some(run) =
@@ -1060,10 +1093,16 @@ async fn finalize_ready_runs(
         let finalization_candidate_select_ms = select_started.elapsed().as_millis() as u64;
         checked_run_ids.push(run.id);
 
-        let collection =
-            collect_run_shard_summaries(database_router, coordinator_id, run.tenant_id, run.id)
-                .await?;
+        let collection = collect_run_shard_summaries(
+            database_router,
+            coordinator_id,
+            run.tenant_id,
+            run.id,
+            &deferred_aliases,
+        )
+        .await?;
         let placement_failure_count = collection.failures.failed_operation_count();
+        deferred_aliases.extend(collection.failures.connection_failures().iter().cloned());
         failures.merge(collection.failures);
         let summaries = collection.output.summaries;
         if !collection.output.complete
@@ -1184,7 +1223,9 @@ pub(crate) async fn finalize_target(
     let Some(policy) = candidate else {
         return Ok(false);
     };
-    let collection = collect_run_shard_summaries(router, coordinator_id, tenant_id, run_id).await?;
+    let collection =
+        collect_run_shard_summaries(router, coordinator_id, tenant_id, run_id, &BTreeSet::new())
+            .await?;
     anyhow::ensure!(
         collection.failures.failed_operation_count() == 0,
         "a routed summary is unavailable"
@@ -1224,10 +1265,23 @@ async fn collect_run_shard_summaries(
     coordinator_id: Uuid,
     tenant_id: Uuid,
     run_id: Uuid,
+    deferred_aliases: &BTreeSet<String>,
 ) -> anyhow::Result<PlacementPassResult<RunShardSummaryCollection>> {
     let placements = database_router
         .execution_placements_for_run_with_context(run_id, tenant_id)
         .await?;
+    if placements
+        .iter()
+        .any(|placement| deferred_aliases.contains(&placement.database_alias))
+    {
+        return Ok(PlacementPassResult {
+            output: RunShardSummaryCollection {
+                summaries: Vec::new(),
+                complete: false,
+            },
+            failures: PlacementFailureStats::default(),
+        });
+    }
     let mut placements_by_alias = BTreeMap::new();
     for placement in placements {
         placements_by_alias
@@ -1436,6 +1490,7 @@ mod placement {
     #[derive(Debug, Default)]
     pub(super) struct PlacementFailureStats {
         skipped_database_aliases: BTreeSet<String>,
+        connection_failed_aliases: BTreeSet<String>,
         failed_operations: usize,
         retryable_errors: usize,
         terminal_errors: usize,
@@ -1445,6 +1500,10 @@ mod placement {
         fn record(&mut self, failure: &PlacementOperationFailure) {
             self.skipped_database_aliases
                 .insert(failure.database_alias.clone());
+            if database::is_database_connection_failure(&failure.error) {
+                self.connection_failed_aliases
+                    .insert(failure.database_alias.clone());
+            }
             self.failed_operations += 1;
             if failure.classification.retryable {
                 self.retryable_errors += 1;
@@ -1460,13 +1519,25 @@ mod placement {
         pub(super) fn merge(&mut self, other: Self) {
             self.skipped_database_aliases
                 .extend(other.skipped_database_aliases);
+            self.connection_failed_aliases
+                .extend(other.connection_failed_aliases);
             self.failed_operations += other.failed_operations;
             self.retryable_errors += other.retryable_errors;
             self.terminal_errors += other.terminal_errors;
         }
 
-        pub(super) fn excluded_aliases(&self) -> Vec<String> {
-            self.skipped_database_aliases.iter().cloned().collect()
+        pub(super) fn connection_failures(&self) -> &BTreeSet<String> {
+            &self.connection_failed_aliases
+        }
+
+        pub(super) fn dispatch_excluded_aliases(
+            &self,
+            deferred_aliases: &BTreeSet<String>,
+        ) -> Vec<String> {
+            self.skipped_database_aliases
+                .union(deferred_aliases)
+                .cloned()
+                .collect()
         }
 
         pub(super) fn skipped_placement_count(&self) -> usize {
@@ -2045,6 +2116,10 @@ mod placement {
             assert_eq!(
                 stats.skipped_database_aliases,
                 BTreeSet::from(["shard_001".to_string(), "shard_002".to_string()])
+            );
+            assert_eq!(
+                stats.connection_failures(),
+                &BTreeSet::from(["shard_001".to_string()])
             );
             assert_eq!(stats.failed_operations, 2);
             assert_eq!(stats.retryable_errors, 1);

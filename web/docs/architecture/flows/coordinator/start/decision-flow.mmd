@@ -21,10 +21,10 @@ flowchart TD
     CreationDeferred[Release ownership and continue bounded candidates]
     Circuit{Alias circuit admits operation?}
     CircuitSkip[Leave durable work pending and continue]
-    Recover[Read expired leases with bounded lookahead and limit eligible standalone invocations]
-    RecoveryIsolated[Count placement failure and continue aliases]
+    Recover[Read expired leases with bounded execution checkout and lookahead]
+    RecoveryIsolated[Count failure and defer connection-failed aliases for the cycle]
     Dispatch[Claim cursor, read scoped snapshot and route, fence admission, and commit with the cursor if colocated]
-    DispatchIsolated[Leave cursor open and exclude failed alias]
+    DispatchIsolated[Leave cursor open and defer connection-failed aliases for the cycle]
     Finalize[Read routed summaries, claim lease and recheck expiry under run lock before final commit]
     FinalizeIsolated[Scope deferral heartbeat; inspect next run]
     Aggregate[Restricted ready-shard discovery with bounded database and shard concurrency]
