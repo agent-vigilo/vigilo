@@ -121,7 +121,13 @@ impl Agent {
                                     socket.write_all(response.as_bytes()).await?;
                                     return anyhow::Ok(());
                                 }
-                                let response=if authorized {"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 20\r\nconnection: close\r\n\r\n{\"text\":\"good safe\"}"} else {"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"};
+                                let response = if authorized {
+                                    let text = input["fixture_response_text"].as_str().unwrap_or("good safe");
+                                    let payload = json!({"text":text}).to_string();
+                                    format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", payload.len(), payload)
+                                } else {
+                                    "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into()
+                                };
                                 socket.write_all(response.as_bytes()).await?;
                                 anyhow::Ok(())
                             }).await.context("agent fixture deadline")?

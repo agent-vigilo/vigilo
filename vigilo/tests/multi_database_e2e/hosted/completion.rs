@@ -82,7 +82,7 @@ impl Fixture {
         Ok(())
     }
 
-    async fn exercise_completion_subscription(&mut self) -> anyhow::Result<()> {
+    async fn exercise_completion_subscription(&mut self, mixed: bool) -> anyhow::Result<()> {
         self.setup().await?;
         let runtime = self.runtime.as_ref().unwrap().clone();
         let coordinator = runtime.coordinator();
@@ -126,7 +126,18 @@ impl Fixture {
         let mut owners = self.owners.keys().copied();
         let owner = owners.next().context("run owner")?;
         let other = owners.next().context("other owner")?;
-        let upload = self.upload(owner, 101).await?;
+        let (upload, passed, failed, errored, gate) = if mixed {
+            let upload = self
+                .upload_with_input(owner, 6, |i| match i {
+                    0 => json!({"owner": other, "user_message":"good safe"}),
+                    1 | 2 => json!({"owner": owner, "user_message":"good safe", "fixture_response_text":"terrible"}),
+                    _ => json!({"owner": owner, "user_message":"good safe"}),
+                })
+                .await?;
+            (upload, 3, 2, 1, "fail")
+        } else {
+            (self.upload(owner, 101).await?, 101, 0, 0, "pass")
+        };
         let run = Uuid::now_v7();
         self.object_owners.insert(run, owner);
         let user = self.user(owner);
@@ -146,11 +157,11 @@ impl Fixture {
         assert!(!first.redelivered);
         let event: RunCompletedEventV1 = serde_json::from_slice(&first.data)?;
         assert_eq!((event.tenant_id, event.run_id), (owner, run));
-        assert_eq!(event.gate_status, "pass");
-        assert_eq!(event.terminal_execution_count, 101);
-        assert_eq!(event.passed_execution_count, 101);
-        assert_eq!(event.failed_execution_count, 0);
-        assert_eq!(event.errored_execution_count, 0);
+        assert_eq!(event.gate_status, gate);
+        assert_eq!(event.terminal_execution_count, passed + failed + errored);
+        assert_eq!(event.passed_execution_count, passed);
+        assert_eq!(event.failed_execution_count, failed);
+        assert_eq!(event.errored_execution_count, errored);
         let message_id = format!("run:{run}:completed");
         assert_eq!(
             first.properties.message_id().as_ref().unwrap().as_str(),
@@ -170,7 +181,9 @@ impl Fixture {
         assert_eq!(committed.details.run_key, event.run_key);
         assert_eq!(committed.details.status, "completed");
         assert_eq!(committed.details.gate_status, event.gate_status);
-        assert_eq!(committed.summary.passed_execution_count, 101);
+        assert_eq!(committed.summary.passed_execution_count, i64::from(passed));
+        assert_eq!(committed.summary.failed_execution_count, i64::from(failed));
+        assert_eq!(committed.summary.error_execution_count, i64::from(errored));
         assert!(committed.summary_complete);
         assert!(committed.scorecard.is_some());
         for denied in [
@@ -216,20 +229,32 @@ impl Fixture {
         );
         restarted.close(200, "completion acknowledged").await?;
         pools.close().await;
-        self.sample_oracle(run, 101).await?;
+        if !mixed {
+            self.sample_oracle(run, 101).await?;
+        }
         Ok(())
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn completion_subscription_recovers_and_reads_exact_results() -> anyhow::Result<()> {
+    completion_scenario(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completion_subscription_reports_mixed_outcomes() -> anyhow::Result<()> {
+    completion_scenario(true).await
+}
+
+async fn completion_scenario(mixed: bool) -> anyhow::Result<()> {
     if std::env::var(E2E_ENABLED_ENV).as_deref() != Ok("1") {
         return Ok(());
     }
     let mut fixture = Fixture::new().await?;
-    let result = std::panic::AssertUnwindSafe(Box::pin(fixture.exercise_completion_subscription()))
-        .catch_unwind()
-        .await;
+    let result =
+        std::panic::AssertUnwindSafe(Box::pin(fixture.exercise_completion_subscription(mixed)))
+            .catch_unwind()
+            .await;
     let cleanup = fixture.cleanup().await;
     match result {
         Ok(result) => result.and(cleanup),

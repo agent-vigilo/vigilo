@@ -144,6 +144,20 @@ impl Fixture {
             .user(UserContext::new(tenant, tenant).unwrap())
     }
     async fn upload(&mut self, tenant: Uuid, count: usize) -> anyhow::Result<Uuid> {
+        self.upload_with_input(
+            tenant,
+            count,
+            |_| json!({"owner": tenant, "user_message":"good safe"}),
+        )
+        .await
+    }
+
+    async fn upload_with_input(
+        &mut self,
+        tenant: Uuid,
+        count: usize,
+        input: impl Fn(usize) -> Value,
+    ) -> anyhow::Result<Uuid> {
         let owner = self.root.path().join(format!("{tenant}.toml"));
         let source = self.root.path().join(format!("{tenant}.jsonl"));
         tokio::fs::write(&owner, toml::to_string(&self.owners[&tenant])?).await?;
@@ -157,7 +171,7 @@ impl Fixture {
         for i in 0..count {
             content += &format!(
                 "{}\n",
-                json!({"id":Uuid::from_u128(i as u128+1),"task_type":"classification","input":{"owner":tenant.to_string(),"user_message":"good safe"},"expected":{"label":"positive"}})
+                json!({"id":Uuid::from_u128(i as u128+1),"task_type":"classification","input":input(i),"expected":{"label":"positive"}})
             );
         }
         tokio::fs::write(&source, content).await?;

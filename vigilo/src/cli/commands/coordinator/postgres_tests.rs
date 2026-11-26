@@ -63,28 +63,17 @@ async fn route(pool: &PgPool, run: Uuid) {
     .unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires a PostgreSQL DATABASE_URL for coordinator outbox tests"]
-async fn outbox_bounds_placement_checkout_and_resumes_when_capacity_returns(pool: PgPool) {
-    struct EmptyOutboxPublisher;
-
-    #[async_trait]
-    impl EventPublisher for EmptyOutboxPublisher {
-        async fn publish(
-            &self,
-            _: &crate::models::outbox_event::OutboxEvent,
-        ) -> anyhow::Result<()> {
-            panic!("fixture has no outbox events")
-        }
-    }
-
+async fn fixed_router(
+    pool: &PgPool,
+    acquire_timeout: Duration,
+) -> (database::DatabaseRouter, PgPool) {
     sqlx::query("INSERT INTO database_placements (alias, database_url_env, role, status) VALUES ('shard_001', 'TEST_SHARD_URL', 'shard', 'active')")
-        .execute(&pool)
+        .execute(pool)
         .await
         .unwrap();
     let shard_pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(Duration::from_secs(10))
+        .acquire_timeout(acquire_timeout)
         .connect_with(pool.connect_options().as_ref().clone())
         .await
         .unwrap();
@@ -100,7 +89,7 @@ async fn outbox_bounds_placement_checkout_and_resumes_when_capacity_returns(pool
             (
                 "primary".to_string(),
                 database::FixedPlacementPool {
-                    pool,
+                    pool: pool.clone(),
                     role: "control_and_shard",
                 },
             ),
@@ -114,6 +103,25 @@ async fn outbox_bounds_placement_checkout_and_resumes_when_capacity_returns(pool
         ]),
     )
     .unwrap();
+    (router, shard_pool)
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires a PostgreSQL DATABASE_URL for coordinator outbox tests"]
+async fn outbox_bounds_placement_checkout_and_resumes_when_capacity_returns(pool: PgPool) {
+    struct EmptyOutboxPublisher;
+
+    #[async_trait]
+    impl EventPublisher for EmptyOutboxPublisher {
+        async fn publish(
+            &self,
+            _: &crate::models::outbox_event::OutboxEvent,
+        ) -> anyhow::Result<()> {
+            panic!("fixture has no outbox events")
+        }
+    }
+
+    let (router, shard_pool) = fixed_router(&pool, Duration::from_secs(10)).await;
     let config = OutboxPublisherConfig::default();
     let coordinator_id = Uuid::now_v7();
     let deferred_aliases = BTreeSet::new();
@@ -560,3 +568,140 @@ async fn sealed_summary_finalization_reads_without_local_write_admission(pool: P
 
 #[path = "finalization_scope_tests.rs"]
 mod finalization_scope_tests;
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn outbox_reclaims_event_after_post_publish_checkout_timeout(pool: PgPool) {
+    use crate::models::outbox_event::{
+        OutboxEvent,
+        OutboxEventDraft,
+    };
+    struct Publisher {
+        expected: Uuid,
+        calls: std::sync::atomic::AtomicUsize,
+        reject: bool,
+    }
+
+    #[async_trait]
+    impl EventPublisher for Publisher {
+        async fn publish(&self, event: &OutboxEvent) -> anyhow::Result<()> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(event.id, self.expected);
+            anyhow::ensure!(!self.reject, "broker rejected publication");
+            Ok(())
+        }
+    }
+    let (_, shard) = fixed_router(&pool, Duration::from_secs(10)).await;
+    let config = OutboxPublisherConfig::default();
+    for reject in [false, true] {
+        let event = outbox_events::insert_outbox_event(
+            &pool,
+            &OutboxEventDraft {
+                event_type: "test.event".into(),
+                aggregate_type: "test".into(),
+                aggregate_id: Uuid::now_v7(),
+                dedupe_key: format!("checkout-{reject}"),
+            },
+        )
+        .await
+        .unwrap();
+        let publisher = Publisher {
+            expected: event.id,
+            calls: Default::default(),
+            reject,
+        };
+        let claim = outbox_events::claim_publishable_outbox_events(&pool, 1, 60)
+            .await
+            .unwrap();
+        assert_eq!(claim.len(), 1);
+        let token = claim[0].claim_token.unwrap();
+        let held = shard.acquire().await.unwrap();
+        let attempt = publish_claimed_events(&shard, &publisher, &config, claim, Some("shard_001"));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), attempt)
+                .await
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(
+            publisher.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        drop(held);
+        let expired = sqlx::query("UPDATE outbox_delivery_queue SET available_at=now()-interval '1 second', claimed_until=now()-interval '1 second' WHERE event_id=$1 AND claim_token=$2")
+            .bind(event.id).bind(token).execute(&pool).await.unwrap();
+        assert_eq!(expired.rows_affected(), 1);
+        let retry = outbox_events::claim_publishable_outbox_events(&pool, 1, 60)
+            .await
+            .unwrap();
+        assert_eq!(retry.len(), 1);
+        assert_ne!(retry[0].claim_token, Some(token));
+        let stats = publish_claimed_events(
+            &shard,
+            &Publisher {
+                reject: false,
+                ..publisher
+            },
+            &config,
+            retry,
+            Some("shard_001"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.published_events, 1);
+        assert_eq!(
+            outbox_events::count_pending_outbox_deliveries(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires PostgreSQL"]
+async fn late_summary_checkout_failure_defers_only_dependent_candidates(pool: PgPool) {
+    let (router, shard) = fixed_router(&pool, Duration::from_millis(200)).await;
+    let mut runs = Vec::new();
+    for alias in ["shard_001", "shard_001", "primary"] {
+        let (run, dataset) = fixture(&pool, 1).await;
+        route(&pool, run).await;
+        let chunk = ranged_chunk(&pool, run, dataset, 0, 1, "completed").await;
+        let execution = Uuid::now_v7();
+        let attempt = Uuid::now_v7();
+        seed_execution(&pool, run, 4, chunk, execution, attempt, "completed").await;
+        seed_aggregate(&pool, run, 4, execution, attempt, "passed").await;
+        run_shard_summary::refresh_run_shard_summary(&pool, run, 4)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE shard_placements SET database_alias=$2 WHERE run_id=$1")
+            .bind(run)
+            .bind(alias)
+            .execute(&pool)
+            .await
+            .unwrap();
+        runs.push(run);
+    }
+    let held = shard.acquire().await.unwrap();
+    let pass = finalize_ready_runs(&router, Uuid::now_v7(), &config(), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(pass.output, 1);
+    assert_eq!(pass.failures.failed_operation_count(), 1);
+    let completed: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM runs WHERE status='completed'")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(completed, vec![runs[2]]);
+    drop(held);
+    let pass = finalize_ready_runs(&router, Uuid::now_v7(), &config(), &Default::default())
+        .await
+        .unwrap();
+    assert_eq!(pass.output, 2);
+    for run in runs {
+        let counts: (i64,i64) = sqlx::query_as("SELECT (SELECT count(*) FROM run_scorecards WHERE run_id=$1), (SELECT count(*) FROM outbox_events WHERE aggregate_id=$1 AND event_type='run.completed')")
+            .bind(run).fetch_one(&pool).await.unwrap();
+        assert_eq!(counts, (1, 1));
+    }
+}
